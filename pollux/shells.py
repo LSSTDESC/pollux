@@ -1,4 +1,5 @@
 import os
+from selectors import EpollSelector
 
 import healpy as hp
 import healsparse
@@ -24,7 +25,9 @@ class ShellBuilder:
                  octant_only=True,
                  nside_c=32,
                  dtype=np.int64,
-                 save_format='fits'):
+                 save_format='fits',
+                 subsample_box=None,
+                 z_subsample_auto=2.):
         """An object to handle the computation of particle shells from an N-body simulation.
 
         Parameters
@@ -57,10 +60,13 @@ class ShellBuilder:
         self.save_dir = save_dir
         self.apply_random_isometry = apply_random_isometry
         self.seed = seed
+        # self.rng = np.random.default_rng(seed)
         self.octant_only = octant_only
         self.nside_c = nside_c
         self.dtype = dtype
         self.save_format = save_format
+        self.subsample_box = subsample_box
+        self.z_subsample_auto = z_subsample_auto
 
         self.nshells = self.reader.nshells
 
@@ -80,17 +86,19 @@ class ShellBuilder:
         return os.path.join(self.save_dir,
                             f'shell_{self.reader.kind}_z{ishell}_nside{self.nside}_seed{self.seed}.' + self.save_format)
 
-    def get_random_isometries(self):
+    def get_random_isometries(self, size):
         """Generates random isometries for each shell.
 
         Returns
         -------
             A list of (A,b) with an isometry A (rotations and flips) and translation by shift b.
         """
-        s = np.random.seed(self.seed)
+        # s = np.random.seed(self.seed)
+        rng = np.random.default_rng(self.seed)
         Abs = []
         for _ in range(self.nshells):
-            Abs.append(random_isometry(s, self.reader.boxsize))
+            # Abs.append(random_isometry(s, size))
+            Abs.append(random_isometry(rng, size))
         self.Abs = Abs
         return Abs
 
@@ -154,20 +162,48 @@ class ShellBuilder:
         # get random isometries
         if self.apply_random_isometry:
             if self.Abs is None and Abs is None:
-                Abs = self.get_random_isometries()
+                Abs = self.get_random_isometries(self.reader.get_boxsize(self.cosmo))
             else:
                 Abs = self.Abs
 
         # nrepeat = int(np.ceil(com_shell_bins[-1]/reader.boxsize)) + 2 # not too sure about that 2, but it's fast to check...
-        nrepeat = int(np.ceil(
-            np.sqrt(rmax2) / self.reader.boxsize)) + 2  # not too sure about that 2, but it's fast to check...
+        nrepeat = int(np.ceil(np.sqrt(rmax2) / self.reader.get_boxsize(
+            self.cosmo))) + 2  # not too sure about that 2, but it's fast to check...
 
         # read box
-        xyz, box_edges = self.reader.read_sub(isub, read_box_edges_only=debug or get_repeats_only)
+        xyz, box_edges = self.reader.read_sub(isub,
+                                              read_box_edges_only=get_repeats_only,
+                                              h_to_divide_by=None if self.reader.unit == 'Mpc' else self.cosmo["h"])
         if verbose:
             print(f"Loaded box {isub} (shell {ishell}) with {len(xyz)} particles.")
 
+        if self.subsample_box is not None:
+            if self.subsample_box == 'auto':
+                ngal_pix = self.estimate_repeats() * self.reader.nparticles / (hp.nside2npix(
+                    self.nside))  # estimated number of galaxies per pixel
+                if self.octant_only:
+                    ngal_pix *= 8.
+                snr_pix = 1. / np.sqrt(ngal_pix)  # S/N per pixel
+                snr_pix_cut = np.interp(self.z_subsample_auto, self.reader.zsnapshots,
+                                        snr_pix)  # S/N at redshift z_subsample_auto
+                ratio = np.minimum(
+                    1.,
+                    (snr_pix / snr_pix_cut)**2)[ishell]  # fraction of particles to maintain S/N of z>z_subsample_auto
+            elif type(self.subsample_box) is float:
+                ratio = self.subsample_box
+            else:
+                raise ValueError
+            if verbose:
+                print(f"Keeping a fraction {ratio} of particles")
+            rng = np.random.default_rng(self.seed + ishell)
+            xyz = xyz[rng.choice(len(xyz), size=int(len(xyz) * ratio), replace=False), :]
+
+        # initialize shell
         shell = healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
+
+        # precompute isometry on particles (since repeats are then only a shift away)
+        if self.apply_random_isometry:
+            xyz_Axpb = Axpb(*Abs[ishell], xyz)
 
         repeats = []
         # repeat the box
@@ -180,7 +216,7 @@ class ShellBuilder:
                             continue
 
                     # compute shift
-                    shift = (np.array([ix, iy, iz]) * self.reader.boxsize)[None, :]
+                    shift = (np.array([ix, iy, iz]) * self.reader.get_boxsize(self.cosmo))[None, :]
 
                     # apply isometry to box edges
                     if self.apply_random_isometry:
@@ -189,7 +225,7 @@ class ShellBuilder:
                         tmp_box_edges = shift + box_edges
 
                     # check if intersects octant, otherwise skip
-                    if self.octant_only and np.all(tmp_box_edges < 0.):
+                    if self.octant_only and np.any(np.all(tmp_box_edges < 0., axis=0)):  #np.all(tmp_box_edges < 0.):
                         continue
 
                     ## check if box intersects with shell, otherwise skip
@@ -198,7 +234,10 @@ class ShellBuilder:
                         continue
 
                     # second, check if box intersects with outer sphere
-                    s = -shift - Abs[ishell][1] if self.apply_random_isometry else -shift  # sphere center in box frame
+                    # s = -shift - Abs[ishell][1] if self.apply_random_isometry else -shift  # sphere center in box frame
+                    s = -shift
+                    if self.apply_random_isometry:
+                        s -= Abs[ishell][1]
                     if not AABB_sphere_intersect(box_edges, s[0], rmax2):
                         continue
 
@@ -212,7 +251,8 @@ class ShellBuilder:
                     ## now, add particles to shell
                     # apply isometry to particles
                     if self.apply_random_isometry:
-                        temp_xyz = Axpb(*Abs[ishell], xyz + shift)
+                        # temp_xyz = Axpb(*Abs[ishell], xyz + shift)
+                        temp_xyz = xyz_Axpb + Ax(Abs[ishell][0], shift)
                     else:
                         temp_xyz = xyz + shift
 
@@ -221,9 +261,18 @@ class ShellBuilder:
                     w = (r2 >= rmin2) & (r2 < rmax2)
 
                     if self.octant_only:
-                        w &= np.all(temp_xyz >= 0., axis=1)
+                        # w &= np.all(temp_xyz >= 0., axis=1)
+                        w &= np.logical_not(np.any(temp_xyz < 0., axis=1))
+
+                    if debug:
+                        print(np.sqrt(rmin2), np.sqrt(rmax2))
+                        print(tmp_box_edges)
+                        print(temp_xyz)
+                        print(r2)
 
                     if np.any(w):
+                        if verbose:
+                            print(f"Found {np.sum(w)} particles.")
                         # get corresponding healpy pixels
                         ipix = hp.vec2pix(self.nside, *(temp_xyz[w].T))
                         u, c = np.unique(ipix, return_counts=True)
@@ -233,6 +282,9 @@ class ShellBuilder:
                         tmp_shell.update_values_pix(u, c)
 
                         shell = healsparse.operations.sum_union([shell, tmp_shell])
+                    else:
+                        if verbose:
+                            print("Found no particle.")
 
         if verbose:
             print(f"Found overlap for box {isub} (shell {ishell}) for {len(repeats)} repeats")
@@ -264,6 +316,16 @@ class ShellBuilder:
 
         for isub in tqdm(it, desc='[construct_shells]'):
             _ = self.construct_shell_sub(isub, Abs=Abs, com_shell_bins=com_shell_bins, **kwargs)
+
+    def estimate_repeats(self):
+        com_shell_bins = self.reader.get_com_shell_bins(self.cosmo)
+        box_volume = self.reader.get_boxsize(self.cosmo)**3
+
+        shell_volume = 4. / 3. * np.pi * (com_shell_bins[1:]**3 - com_shell_bins[:-1]**3)
+        if self.octant_only:
+            shell_volume /= 8.
+
+        return shell_volume / box_volume
 
     def get_repeats(self, **kwargs):
         """Computes the list of repeat indices (ix,iy,iz) for all the sub-volumes and snapshots. 
@@ -380,7 +442,7 @@ class ShellBuilder:
                 hp.mollview(hp_map, sub=(ny, nx, ishell + 1), title=title, cbar=cbar, **kwargs)
         hp.graticule(verbose=False)
 
-    def get_cls_wsp(self, b=None, nlb=50):
+    def get_cls_wsp(self, b=None, nlb=20):
         """Gets the Namaster workspace object for the shell (same for all shells here).
 
         Parameters
@@ -416,7 +478,7 @@ class ShellBuilder:
 
         return wsp, mask, b
 
-    def compute_shells_cls(self, shells=None, ishells=None, b=None, nlb=50):
+    def compute_shells_cls(self, shells=None, ishells=None, b=None, nlb=20):
         """Computes the angular power spectra of overdensity maps defined from particle shells.
 
         Parameters
@@ -448,7 +510,7 @@ class ShellBuilder:
 
         return b.get_effective_ells(), cls_out
 
-    def predict_shells_cls(self, ishells=None, b=None, nlb=50):
+    def predict_shells_cls(self, ishells=None, b=None, nlb=20):
         """Computes theory angular power spectra of overdensity maps with CCL.
 
         Parameters

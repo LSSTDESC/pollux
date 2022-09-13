@@ -44,14 +44,20 @@ def Axpb(A, b, xyz):
 
 
 @numba.jit(nopython=True, parallel=True)
+def Ax(A, xyz):
+    return np.dot(xyz, A)
+
+
+@numba.jit(nopython=True, parallel=True)
 def Axpb_inv(A, b, xyz):
     return np.dot(xyz, A.T) - b
 
 
-def random_isometry(seed, boxsize):
+def random_isometry(rng, boxsize):
     pcomb = list(itertools.product([1, -1], repeat=3))  # all permuted orders
-    r = Rotation.random(random_state=seed).as_matrix()
-    p = pcomb[np.random.choice(len(pcomb))]
+    r = Rotation.random(random_state=rng).as_matrix()
+    # p = pcomb[np.random.choice(len(pcomb))]
+    p = pcomb[rng.choice(len(pcomb))]
     A = np.dot(r, np.diag(np.array(p)))
     b = np.random.rand(3) * boxsize
     return A, b
@@ -213,3 +219,18 @@ def make_nmtbin_powspaced(nside, lmin, lmax, n_ell_bins, power, f_ell=None, **kw
 #     # x = hpmap[mask.astype(bool)]
 #     # w = np.argwhere(x == )
 #     # x[w] = value
+
+
+def trim_array_min_diff(a, mindiff, return_indices=False):
+    x = [a[0]]
+    idx = [0]
+    for i in range(1, len(a) - 1):
+        if a[i + 1] - x[-1] > mindiff:
+            x.append(a[i])
+            idx.append(i)
+    x.append(a[i + 1])
+    idx.append(i + 1)
+    if return_indices:
+        return np.array(x), idx
+    else:
+        return np.array(x)

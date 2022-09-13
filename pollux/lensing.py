@@ -98,12 +98,12 @@ class LensingBuilder:
             ikappas = range(self.nkappas)
 
         kappas = []
-        for ikappa in tqdm(ikappas):
+        for ikappa in tqdm(ikappas, desc='[load_kappas]'):
             fname = self.get_fname(ikappa)
             kappas.append(healsparse.HealSparseMap.read(fname, nside_coverage=self.shell_builder.nside_c))
         return kappas
 
-    def compute_kappas_cls(self, kappas=None, ikappas=None, b=None, nlb=50):
+    def compute_kappas_cls(self, kappas=None, ikappas=None, b=None, nlb=20):
         """Computes the (auto- and cross-) angular power spectra of convergence maps.
 
         Parameters
@@ -143,7 +143,7 @@ class LensingBuilder:
 
         return b.get_effective_ells(), cls_out
 
-    def predict_kappas_cls(self, ikappas=None, b=None, nlb=50):
+    def predict_kappas_cls(self, ikappas=None, b=None, nlb=20):
         """Computes theory angular power spectra of convergence maps with CCL.
 
         Parameters
@@ -225,7 +225,7 @@ class BornLensingBuilder(LensingBuilder):
 
                 pixel_volume = 4. * np.pi / 3. * (chi_max**3 - chi_min**3) / npix
 
-                tmp = shell.astype(dtype) / dtype(box_density * pixel_volume) - 1.
+                tmp = shell.astype(dtype) / dtype(box_density[i] * pixel_volume) - 1.
                 tmp *= dtype(w)
 
                 kappa = healsparse.operations.sum_union([tmp, kappa])

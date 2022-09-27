@@ -3,3 +3,4 @@
 *.pyc
 **/*.code-workspace
 **/*.egg-info
+**/__pycache__

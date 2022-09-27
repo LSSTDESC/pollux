@@ -45,6 +45,17 @@ class Reader:
 
     def read_sub(self, isub, verbose=False, assert_xyz_in_box=False, read_box_edges_only=False, h_to_divide_by=None):
         raise NotImplementedError
+    
+    def get_box_comoving_density(self, cosmo):
+        """Computes the comoving particle density of the simulation.
+
+        Returns
+        -------
+            Comoving particle density of the simulation.
+        """
+        return self.nparticles / self.get_boxsize(cosmo)**3
+
+
 
 
 class SLICSReader(Reader):
@@ -170,50 +181,10 @@ class SLICSReader(Reader):
 
         return xyz, box_edges
 
-    def get_box_comoving_density(self):
-        """Computes the comoving particle density of the simulation.
-
-        Returns
-        -------
-            Comoving particle density of the simulation.
-        """
-        return self.nparticles / self.boxsize**3 * np.ones(self.nshells)
-
-    def get_pixel_density(self, ishell, cosmo, nside):
-        """Computes the expected mean number of particle per pixels from the simulation density.
-
-        Parameters
-        ----------
-        ishell
-            Index of the shell.
-        cosmo
-            Cosmology object from CCL.
-        nside
-            Resolution parameter nside of the shell.
-
-        Returns
-        -------
-            Mean number of particles per pixel.
-        """
-        npix = hp.nside2npix(nside)
-        com_shell_bins = self.get_com_shell_bins(cosmo)
-
-        #     z_shell_bins = 1./pyccl.scale_factor_of_chi(cosmo, com_shell_bins) - 1.
-
-        #     z_low = z_shell_bins[ishell]
-        #     z_up = z_shell_bins[ishell+1]
-        # pixel_volume = (cosmo.comoving_volume(z_up).value - cosmo.comoving_volume(z_low).value)/n_pix
-
-        chi_max = com_shell_bins[ishell + 1]
-        chi_min = com_shell_bins[ishell]
-        pixel_volume = 4. * np.pi / 3. * (chi_max**3 - chi_min**3) / npix
-
-        return pixel_volume * self.get_box_comoving_density()
-
 
 class HACCReader(Reader):
 
-    def __init__(self, path, nsteps=500, zmax=4., zmin=0., aminstep=0., group_along_x=True):
+    def __init__(self, path, nsteps=500, zmax=4., zmin=0., aminstep=0., group_along_x=False):
         """Reader for SLICS simulations by Joachim Harnois-Deraps.
 
         Parameters
@@ -260,7 +231,6 @@ class HACCReader(Reader):
         self.ncube = 64
 
         # independent jobs
-        # self._sub_args = list(itertools.product(range(self.nshells), range(self.ncube)))
         if self.group_along_x:
             self._sub_args = list(
                 itertools.product(range(self.nshells), range(16))
@@ -280,9 +250,6 @@ class HACCReader(Reader):
         self.boxsize_h = pygio.read_phys_scale(name)[0]
         self.nparticles = pygio.read_num_elems(name[:-2])
 
-        # define approximately even split of significant jobs (here, one job per cube accross shells)
-        # self.jobs = [range(c, self.nsubs, self.ncube) for c in range(self.ncube)]
-        # self.njobs = len(self.jobs)
 
         super().__init__('hacc', 'Mpc_over_h')
 
@@ -369,4 +336,59 @@ class HACCReader(Reader):
             for i in range(3):
                 assert np.all(np.min(box_edges[:, i]) <= xyz[:, i]) and np.all(xyz[:, i] <= np.max(box_edges[:, i]))
 
+        return xyz, box_edges
+
+    
+
+class DummyReader(Reader):
+
+    def __init__(self, nshells=6, boxsize=600., nparticles=1e8, ainit=0.75):
+        self.nshells = nshells
+        self.boxsize = boxsize
+        self.nparticles = nparticles
+        self.asnapshots = np.linspace(ainit, 1., nshells)[::-1]
+        self.zsnapshots = 1. / self.asnapshots - 1.
+        
+        self._sub_args = list(itertools.product(range(self.nshells), range(4)))
+        self.nsubs = len(self._sub_args)
+
+        super().__init__('dummy', 'Mpc')
+
+    def get_com_shell_bins(self, cosmo):
+        """Computes the comoving distances for the particle shells. Here, snapshots are at fixed scale factor, therefore we use this to determine the furthest shell.
+
+        Parameters
+        ----------
+        cosmo
+            Cosmology object from CCL.
+
+        Returns
+        -------
+            Comving distances.
+        """
+        # TODO : make it a property
+
+        amids = 0.5 * (self.asnapshots[1:] + self.asnapshots[:-1])
+
+        # compute bins in comoving distance
+        com_shell_bins = np.zeros(self.nshells + 1)
+        com_shell_bins[1:-1] = pyccl.comoving_radial_distance(cosmo, amids)
+        com_shell_bins[-1] = pyccl.comoving_radial_distance(cosmo,
+                                                            2 * amids[-1] - amids[-2])  # fixed scake factor width
+
+        return com_shell_bins
+
+    def get_boxsize(self, cosmo):
+        return self.boxsize
+
+    def read_sub(self, isub, verbose=False, assert_xyz_in_box=False, read_box_edges_only=False, h_to_divide_by=None):
+
+        if read_box_edges_only:
+            xyz = np.random.uniform(0., self.boxsize, size=(17,3))
+        else:
+            xyz = np.random.uniform(0., self.boxsize, size=(int(self.nparticles),3))
+        
+        cube_nodes = ((np.arange(8)[:, None] & (1 << np.arange(3))) > 0).astype(int)  #[(0,0,0),(0,0,1),...,(1,1,1)]
+        box_edges = cube_nodes * self.boxsize
+        
         return xyz, box_edges

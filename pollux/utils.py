@@ -43,7 +43,7 @@ def Axpb(A, b, xyz):
     return np.dot(xyz + b, A)
 
 
-@numba.jit(nopython=True, parallel=True)
+@numba.jit(nopython=True)
 def Ax(A, xyz):
     return np.dot(xyz, A)
 
@@ -56,10 +56,9 @@ def Axpb_inv(A, b, xyz):
 def random_isometry(rng, boxsize):
     pcomb = list(itertools.product([1, -1], repeat=3))  # all permuted orders
     r = Rotation.random(random_state=rng).as_matrix()
-    # p = pcomb[np.random.choice(len(pcomb))]
     p = pcomb[rng.choice(len(pcomb))]
     A = np.dot(r, np.diag(np.array(p)))
-    b = np.random.rand(3) * boxsize
+    b = rng.random(3) * boxsize
     return A, b
 
 

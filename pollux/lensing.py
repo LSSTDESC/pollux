@@ -12,7 +12,7 @@ from tqdm.auto import tqdm, trange
 
 class LensingBuilder:
 
-    def __init__(self, shell_builder, nzs):
+    def __init__(self, shell_builder, nzs, save_dir=None):
         """LensingBuilder is a generic class to build convergence maps from particle shells.
 
         Parameters
@@ -23,9 +23,13 @@ class LensingBuilder:
             List of callables representing redshift distributions.
         """
         self.shell_builder = shell_builder
-        self.save_dir = shell_builder.save_dir
+        if save_dir is None:
+            self.save_dir = shell_builder.save_dir
+        else:
+            self.save_dir = save_dir
         self.reader = shell_builder.reader
         self.cosmo = shell_builder.cosmo
+        self.nshells = shell_builder.nshells
         self.nzs = nzs
         self.nkappas = len(nzs)
 
@@ -40,10 +44,10 @@ class LensingBuilder:
     def construct_kappas(self):
         raise NotImplementedError
 
-    def get_fname(self, ikappa):
+    def get_fname(self, ikappa, what='kappa'):
         return os.path.join(
             self.save_dir,
-            f'kappa_{self.reader.kind}_nz{ikappa}_nside{self.shell_builder.nside}_seed{self.shell_builder.seed}.' +
+            f'{what}_{self.reader.kind}_nz{ikappa}_nside{self.shell_builder.nside}_seed{self.shell_builder.seed}.' +
             self.shell_builder.save_format)
 
     def plot_kappas(self, kappas, nx=None, title_prefix=None, cbar=False, **kwargs):
@@ -60,26 +64,26 @@ class LensingBuilder:
         cbar, optional
             Whether to show color bars, by default False
         """
-        nshells = len(kappas)
+        nkappas = len(kappas)
         if nx is None:
-            nx = nshells
-        ny = int(np.ceil(nshells / nx))
+            nx = nkappas
+        ny = int(np.ceil(nkappas / nx))
 
         plt.figure(figsize=(4 * nx, 4 * ny))
 
-        for ishell in range(nshells):
-            hp_map = kappas[ishell].generate_healpix_map()
-            title = title_prefix + f" {ishell}" if title_prefix is not None else None
+        for ikappa in range(nkappas):
+            hp_map = kappas[ikappa].generate_healpix_map()
+            title = title_prefix + f" {ikappa}" if title_prefix is not None else None
             if self.shell_builder.octant_only:
                 hp.orthview(hp_map,
                             rot=(35, 20),
                             half_sky=True,
-                            sub=(ny, nx, ishell + 1),
+                            sub=(ny, nx, ikappa + 1),
                             title=title,
                             cbar=cbar,
                             **kwargs)
             else:
-                hp.mollview(hp_map, sub=(ny, nx, ishell + 1), title=title, cbar=cbar, **kwargs)
+                hp.mollview(hp_map, sub=(ny, nx, ikappa + 1), title=title, cbar=cbar, **kwargs)
         hp.graticule(verbose=False)
 
     def load_kappas(self, ikappas=None):
@@ -180,8 +184,8 @@ class LensingBuilder:
 
 class BornLensingBuilder(LensingBuilder):
 
-    def __init__(self, shell_builder, nzs):
-        super().__init__(shell_builder, nzs)
+    def __init__(self, shell_builder, nzs, save_dir=None):
+        super().__init__(shell_builder, nzs, save_dir=save_dir)
 
     def construct_kappas(self, dtype=np.float32):
         """Constructs and saves convergence maps from particle shells in the Born approximation, ie by summing the particle overdensity maps with appropriate weights computed with CCL.
@@ -197,7 +201,7 @@ class BornLensingBuilder(LensingBuilder):
         """
         # prefactor = 3.0 * pyccl.omega_x(self.cosmo, 1., 'matter') / 2.0
         npix = hp.nside2npix(self.shell_builder.nside)
-        box_density = self.reader.get_box_comoving_density()
+        box_density = [self.shell_builder.get_box_comoving_density(ishell) for ishell in range(self.nshells)]
 
         kappas = []
         weights = []
@@ -216,7 +220,7 @@ class BornLensingBuilder(LensingBuilder):
                                                         dtype=dtype)
 
             weight = []
-            for i, shell in enumerate(range(self.shell_builder.nshells)):
+            for i, shell in enumerate(range(self.nshells)):
                 shell = shells[i]
                 chi_max = com_shell_bins[i + 1]
                 chi_min = com_shell_bins[i]
@@ -239,3 +243,42 @@ class BornLensingBuilder(LensingBuilder):
             kappa.write(fname, clobber=True)
 
         return kappas, np.array(weights)
+    
+    
+    def get_shear_maps(self, kappas, return_alms=False, dtype=np.float32):
+        ell = np.arange(3*self.shell_builder.nside)
+        fl = np.zeros(len(ell))
+        fl[1:] = - np.sqrt((ell[1:]+2.)*(ell[1:]-1.)/(ell[1:]*(ell[1:]+1.)))
+        
+        pixels = np.where(self.shell_builder.get_mask())[0]
+        
+        gammas = []
+        alms = []
+        for iz, kappa in enumerate(tqdm(kappas)):
+            # Get harmonic coefficients of convergence map
+            klm = hp.map2alm(kappa.generate_healpix_map(), pol=False)
+            
+            # Convert to shear
+            glm_E = hp.almxfl(klm, fl)
+            z = np.zeros_like(glm_E)
+            
+            # Generate shear map
+            _, g1, g2 = hp.alm2map([z, glm_E, z], nside=self.shell_builder.nside, pol=True)
+            
+            gamma1 = healsparse.HealSparseMap.make_empty(self.shell_builder.nside_c, self.shell_builder.nside, dtype=dtype)
+            gamma2 = healsparse.HealSparseMap.make_empty(self.shell_builder.nside_c, self.shell_builder.nside, dtype=dtype)
+            
+            gamma1.update_values_pix(pixels, g1[pixels].astype(dtype))
+            gamma2.update_values_pix(pixels, g2[pixels].astype(dtype))
+            
+            gamma1.write(self.get_fname(iz, what='gamma1'), clobber=True)
+            gamma2.write(self.get_fname(iz, what='gamma2'), clobber=True)
+
+            gammas.append([gamma1, gamma2])
+            if return_alms:
+                alms.append(klm)
+        
+        if return_alms:
+            return gammas, alms
+        else:
+            return gammas

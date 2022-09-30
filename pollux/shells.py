@@ -58,6 +58,7 @@ class ShellBuilder:
         self.reader = reader
         self.cosmo = cosmo
         self.nside = nside
+        self.npix = hp.nside2npix(nside)
         self.save_dir = save_dir
         self.apply_random_isometry = apply_random_isometry
         self.seed = seed
@@ -213,20 +214,18 @@ class ShellBuilder:
         if self.subsample_box is not None:
             if self.subsample_box == 'auto':
                 ratio = self.get_subsample_ratio(ishell)
+            nparticles_kept = int(len(xyz) * ratio)
             if verbose:
-                print(f"Keeping a fraction {ratio} of particles")
-            rng = np.random.default_rng(self.seed + ishell)
-            xyz = xyz[rng.choice(len(xyz), size=int(len(xyz) * ratio), replace=False), :]
+                print(f"Keeping {nparticles_kept} particles, ie a fraction {ratio}.")
+            if nparticles_kept < len(xyz):
+                rng = np.random.default_rng(self.seed + ishell)
+                xyz = xyz[rng.choice(len(xyz), size=nparticles_kept, replace=False), :]
 
         # initialize shell
         shell = healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
 
-        # precompute isometry on particles (since repeats are then only a shift away)
-        if self.apply_random_isometry:
-            xyz = Axpb(*Abs[ishell], xyz)
-
-        gc.collect()
-
+        random_isometry_applied_to_xyz = False
+        
         repeats = []
         # repeat the box
         for ix in range(-nrepeat, nrepeat + 1):
@@ -256,10 +255,10 @@ class ShellBuilder:
                         continue
 
                     # second, check if box intersects with outer sphere
-                    # s = -shift - Abs[ishell][1] if self.apply_random_isometry else -shift  # sphere center in box frame
-                    s = -shift
                     if self.apply_random_isometry:
-                        s -= Abs[ishell][1]
+                        s = -shift - Abs[ishell][1] # sphere center, with box aligned wrt xyz axis
+                    else:
+                        s = -shift
                     if not AABB_sphere_intersect(box_edges, s[0], rmax2):
                         continue
 
@@ -271,47 +270,25 @@ class ShellBuilder:
                         continue
 
                     ## now, add particles to shell
-                    # apply isometry to particles
+                    # precompute isometry on particles (since repeats are then only a shift away)
+                    if (not random_isometry_applied_to_xyz) and self.apply_random_isometry:
+                        xyz = Axpb(*Abs[ishell], xyz)
+                        random_isometry_applied_to_xyz = True
+                    
                     if self.apply_random_isometry:
-                        tmp_xyz = xyz + Ax(Abs[ishell][0], shift)
-                    else:
-                        tmp_xyz = xyz + shift
+                        shift = Ax(Abs[ishell][0], shift)
+                    
+                    # compute unique pixels into which particles fall and their counts, all done in vec2pix_unique (using numba) as follows:
+                    # 1 - remove particles out of shell based on radius
+                    # 2 - remove particles out of octant if octant_only
+                    # 3 - compute corresponding healpy pixels of all particles (removed particles fast set to -1) with vec2pix and loc2pix (translated into python from Healpix code)
+                    # 4 - get unique pixels and counts (ignoring -1's)
+                    u, c = vec2pix_unique(self.nside, *(xyz.T), *(shift[0].T), rmin2, rmax2, self.octant_only)
 
-                    # filter particles out of shell
-                    r2 = xyz2r2(tmp_xyz)
-                    w = (r2 >= rmin2) & (r2 < rmax2)
-
-                    # clean memory
-                    del r2
-                    gc.collect()
-
-                    if self.octant_only:
-                        w &= np.logical_not(np.any(tmp_xyz < 0., axis=1))
-
-                    if debug:
-                        print(np.sqrt(rmin2), np.sqrt(rmax2))
-                        print(tmp_box_edges)
-                        print(tmp_xyz)
-                        print(r2)
-
-                    if np.any(w):
+                    if len(u)>0:
                         if verbose:
-                            print(f"Found {np.sum(w)} particles.")
-
-                        # get corresponding healpy pixels
-                        ipix = hp.vec2pix(self.nside, *(tmp_xyz[w].T))
-
-                        # clean memory
-                        del tmp_xyz, w
-                        gc.collect()
-
-                        # get unique pixels and counts per pixel
-                        u, c = np.unique(ipix, return_counts=True)
-
-                        # clean memory
-                        del ipix
-                        gc.collect()
-
+                            print(f"Found {len(u)} particles.")
+                    
                         # add particles to shell
                         tmp_shell = healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
                         tmp_shell.update_values_pix(u, c)
@@ -373,18 +350,23 @@ class ShellBuilder:
 
         return repeats
 
-    def combine_shells(self):
+    def combine_shells(self, skip_existing=False):
         """Sums the particles shells computed independently for each sub-volume/snapshot with construct_shell_sub
         """
         for ishell in trange(self.nshells, desc="[combine_shells]"):
+            fname = self.get_fname(ishell)
+            if skip_existing and os.path.exists(fname):
+                continue
+            
             shell = healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
+            
             isubs = self.reader.get_isubs_for_shell(ishell)
             for isub in tqdm(isubs, desc=f"[combine_shells: shell {ishell}]", leave=False):
-                fname = self.get_fname_sub(isub)
-                tmp_shell = healsparse.HealSparseMap.read(fname)
+                tmp_fname = self.get_fname_sub(isub)
+                tmp_shell = healsparse.HealSparseMap.read(tmp_fname)
                 shell = healsparse.operations.sum_union([shell, tmp_shell])
 
-            shell.write(self.get_fname(ishell), clobber=True, format=self.save_format)
+            shell.write(fname, clobber=True, format=self.save_format)
 
     def load_sub_shells(self, ishell):
         """Loads shell maps of sub-volumes

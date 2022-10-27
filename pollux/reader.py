@@ -184,7 +184,7 @@ class SLICSReader(Reader):
 
 class HACCReader(Reader):
 
-    def __init__(self, path, nsteps=500, zmax=4., zmin=0., aminstep=0., group_along_x=False):
+    def __init__(self, path, nsteps=500, sim_zmin=0., sim_zmax=4., aminstep=0., zmax=None, group_along_x=False):
         """Reader for SLICS simulations by Joachim Harnois-Deraps.
 
         Parameters
@@ -203,9 +203,6 @@ class HACCReader(Reader):
             Scale, by default 3072.0
         """
         self.path = path
-        self.nsteps = nsteps
-        self.zmax = zmax
-        self.zmin = zmin
         self.aminstep = aminstep
         self.group_along_x = group_along_x
 
@@ -213,8 +210,8 @@ class HACCReader(Reader):
         snapshot_dirs = os.listdir(os.path.join(path, 'output'))
         snapshots = np.array([i for i in range(nsteps) if f'STEP{i}' in snapshot_dirs])
 
-        amax = 1. / (1. + zmin)
-        amin = 1. / (1. + zmax)
+        amax = 1. / (1. + sim_zmin)
+        amin = 1. / (1. + sim_zmax)
         asnapshots = amin + (amax - amin) * (snapshots - snapshots[0]) / (snapshots[-1] - snapshots[0])
         self.asnapshots, _idx = trim_array_min_diff(asnapshots, self.aminstep, return_indices=True)
         if len(_idx) < len(snapshots):
@@ -225,6 +222,14 @@ class HACCReader(Reader):
         self.snapshots = self.snapshots[::-1]
 
         self.zsnapshots = 1. / self.asnapshots - 1.
+        if zmax is not None:
+            try:
+                i = np.argwhere(self.zsnapshots>zmax)[0,0]
+                self.zsnapshots = self.zsnapshots[:i+1]
+                self.asnapshots = self.asnapshots[:i+1]
+                self.snapshots = self.snapshots[:i+1]
+            except:
+                pass
         self.nshells = len(self.zsnapshots)
 
         # number of sub boxes (constant here)

@@ -43,7 +43,7 @@ class MapBuilder:
         if wsp_dir is None:
             wsp_dir = save_dir
         self.wsp_dir = wsp_dir
-        
+
         if b is not None:
             self.b = b
         self._nlb = nlb
@@ -56,7 +56,6 @@ class MapBuilder:
             if not os.path.exists(self.save_dir):
                 # os.mkdir(self.save_dir)
                 os.makedirs(self.save_dir, exist_ok=True)
-
 
     def tqdm(self, it, **kwargs):
         if it is None:
@@ -73,7 +72,7 @@ class MapBuilder:
 
         if what is not None:
             fname += f'_{what}'
-            
+
         if imap is not None:
             fname += f'_imap{imap}'
 
@@ -87,13 +86,6 @@ class MapBuilder:
 
         return os.path.join(self.save_dir, fname)
 
-    # def get_fname_cls(self):
-    #     fname = self.base_fname
-
-    #     fname = f'{self.base_fname}_nside{self.nside}_cls.fits'
-
-    #     return os.path.join(self.save_dir, fname)
-
     def get_tracers(self):
         raise NotImplementedError
 
@@ -105,7 +97,7 @@ class MapBuilder:
 
     def check_maps(self, imaps=None, read=False, fname=None, check_finite=False):
         assert (imaps is None) or (fname is None)
-        
+
         def check_one(filename):
             if os.path.exists(filename):
                 if read:
@@ -124,7 +116,7 @@ class MapBuilder:
             else:
                 print(f"Cannot find map at {fname}.")
                 return False
-            
+
         if fname is not None:
             return check_one(fname)
         else:
@@ -216,7 +208,7 @@ class MapBuilder:
         if not hasattr(self, 'b'):
             self.b = make_nmtbin_logspaced(self.nside, 8, 2 * self.nside, self._nlb, f_ell='pixwin')
         return self.b
-    
+
     def get_cls_wsp(self):
         """Gets the Namaster workspace object for the shell (same for all shells here).
 
@@ -231,7 +223,7 @@ class MapBuilder:
         -------
             Workspace, mask and binning scheme.
         """
-        
+
         if hasattr(self, 'wsp'):
             return self.wsp
         else:
@@ -272,10 +264,10 @@ class MapBuilder:
                 hp.write_alm(fname, alms[imap], overwrite=True)
 
         return alms
-    
+
     def compute_maps_from_alms(self, imaps=None, save=True):
         _, ipix = self.get_mask(return_ipix=True)
-        
+
         maps = []
         for imap in self.tqdm(imaps, desc="[compute_maps_from_alms]"):
             alm = hp.read_alm(self.get_fname(imap, what='alms', force_fits=True))
@@ -286,9 +278,9 @@ class MapBuilder:
                 fname = self.get_fname(imap)
                 tmp.write(fname, clobber=True)
             maps.append(tmp)
-            
+
         return maps
-            
+
     def _save_cls(self, ell, cl):
         s = sacc.Sacc()
         tracers = self.get_tracers_sacc()
@@ -326,28 +318,28 @@ class MapBuilder:
             pairs = [(i, i) for i in imaps]
         else:
             # pairs = [(i1, i2) for i, i1 in enumerate(imaps) for i2 in imaps[:i + 1]]
-            pairs = [(i1, i2) for i, i2 in enumerate(imaps) for i1 in imaps[i:]] # with this order, i2 is preserved
+            pairs = [(i1, i2) for i, i2 in enumerate(imaps) for i1 in imaps[i:]]  # with this order, i2 is preserved
 
         cl = {}
         b = self.get_cls_b()
         wsp = self.get_cls_wsp()
 
         if use_precomputed_alms:
-            previous_pair = (-1,-1)
+            previous_pair = (-1, -1)
             for pair_count, (i, j) in enumerate(tqdm(pairs, desc="[compute_cls]")):
                 if pair_job is not None:
                     if not pair_count == pair_job:
                         continue
-                if not i==previous_pair[0]:
+                if not i == previous_pair[0]:
                     almi = hp.read_alm(self.get_fname(i, what='alms', force_fits=True))
-                if i==j:
+                if i == j:
                     almj = almi
                 else:
-                    if not j==previous_pair[1]:
+                    if not j == previous_pair[1]:
                         almj = hp.read_alm(self.get_fname(j, what='alms', force_fits=True))
                 pcl = hp.alm2cl(almi, almj)
                 cl[i, j] = wsp.decouple_cell([pcl])[0]
-                previous_pair = (i,j)
+                previous_pair = (i, j)
         else:
             mask = self.get_mask()
             fields = {i: None for i in imaps}
@@ -393,7 +385,7 @@ class MapBuilder:
         else:
             # pairs = [(i1, i2) for i, i1 in enumerate(imaps) for i2 in imaps[:i + 1]]
             pairs = [(i1, i2) for i, i2 in enumerate(imaps) for i1 in imaps[i:]]
-            
+
         tracers = self.get_tracers()
         tracers_ = {i: t for i, t in zip(imaps, tracers)}
 
@@ -412,32 +404,41 @@ class MapBuilder:
                 cl[i, j] = np.dot(bpws, hp.pixwin(self.nside)**2 * cl_raw)
 
         return b.get_effective_ells(), cl
-    
-    def triangle_plot_cls(self, auto_only=False, logy=False, theory_only=False, data_only=False, save=True, sharey=None):
+
+    def triangle_plot_cls(
+            self, auto_only=False, logy=False, theory_only=False, data_only=False, save=True, sharey=None
+        ):
         n = self.nmaps
         m = 1 if auto_only else n
-        sharey = sharey or False #False if auto_only else 'row'
-        fig, axes = plt.subplots(m, n, figsize=(4*n,3*m), sharex=True, sharey=sharey, squeeze=False)
+        sharey = sharey or False  #False if auto_only else 'row'
+        fig, axes = plt.subplots(m, n, figsize=(4 * n, 3 * m), sharex=True, sharey=sharey, squeeze=False)
 
         ell, cl_th = self.predict_cls(auto_only=auto_only)
         s = self.load_cls()
-        
+
         tracers = list(s.tracers.keys())
         tc = s.get_tracer_combinations(self.sacc_type)
-        
+
         for i in range(m):
             for j in range(n):
                 if auto_only:
-                    ax = axes[0,j]
+                    ax = axes[0, j]
                     i = j
                 else:
-                    ax = axes[i,j]
+                    ax = axes[i, j]
                 ax_used = False
-                if (i,j) in cl_th.keys() and not data_only:
-                    ax.plot(ell, cl_th[i,j], c='orange')
+                if (i, j) in cl_th.keys() and not data_only:
+                    ax.plot(ell, cl_th[i, j], c='orange')
                     ax_used = True
                 if (tracers[i], tracers[j]) in tc and not theory_only:
-                    ax.plot(ell, s.get_ell_cl(self.sacc_type, tracers[i], tracers[j])[1], c='dodgerblue', ls=' ', marker='o', markersize=5)
+                    ax.plot(
+                        ell,
+                        s.get_ell_cl(self.sacc_type, tracers[i], tracers[j])[1],
+                        c='dodgerblue',
+                        ls=' ',
+                        marker='o',
+                        markersize=5
+                        )
                     ax_used = True
                 if ax_used:
                     ax.set_xlabel('Multipole $\ell$')
@@ -447,13 +448,11 @@ class MapBuilder:
                         ax.set_yscale('log')
                 else:
                     ax.axis('off')
-                     
+
         fig.tight_layout()
-        
+
         if save:
             fname = self.get_fname(what='cls', force_fits=True).replace('.fits', '.png')
             fig.savefig(fname, bbox_inches='tight')
-        
+
         plt.show()
-        
-        

@@ -35,10 +35,6 @@ class Reader:
         self._sub_args = list(itertools.product(range(self.nshells), range(nsubs)))
         self.njobs = len(self._sub_args)
 
-        # define approximately even split of significant jobs (here, one job per cube accross shells)
-        # self.jobs = [range(c, self.nsubs, ncube) for c in range(ncube)]
-        # self.njobs = len(self.jobs)
-
         self.dtype = dtype
 
     def get_ishell(self, isub):
@@ -46,16 +42,6 @@ class Reader:
 
     def get_isubs_for_shell(self, ishell):
         return np.argwhere([x[0] == ishell for x in self._sub_args])[:, 0]
-
-    # def get_fname_sub(self, save_dir, isub, nside, seed, save_format):
-    #     return os.path.join(
-    #         save_dir, f'shell_{self.kind}_z{self.get_ishell(isub)}_sub{isub}_nside{nside}_seed{seed}.' + save_format
-    #         )
-
-    # def get_fname_shell(self, save_dir, isub, nside, seed, save_format):
-    #     return os.path.join(
-    #         save_dir, f'shell_{self.kind}_z{self.get_ishell(isub)}_nside{nside}_seed{seed}.' + save_format
-    #         )
 
     def get_com_shell_bins(self, cosmo):
         raise NotImplementedError
@@ -249,18 +235,6 @@ class HACCReader(Reader):
                 zsnapshots = zsnapshots[:i + 1]
             except:
                 pass
-
-        # # number of sub boxes (constant here)
-        # self.ncube = 64
-
-        # # independent jobs
-        # if self.group_along_x:
-        #     self._sub_args = list(
-        #         itertools.product(range(self.nshells), range(16))
-        #         )  # there are 64 subfiles, but on the x-axis, they are not continuous, so we might as well load them all together and make one continious volume
-        # else:
-        #     self._sub_args = list(itertools.product(range(self.nshells), range(64)))
-        # self.nsubs = len(self._sub_args)
 
         self.lims = np.array(
             [

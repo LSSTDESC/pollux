@@ -18,10 +18,28 @@ class Reader:
     """A generic class to read particles from N-body simulations.
     """
 
-    def __init__(self, kind, unit="Mpc"):
+    def __init__(self, kind, unit, nparticles, zsnapshots, nsubs, dtype=np.float64):
         self.kind = kind
-        self.unit = unit
+
         assert unit in ["Mpc", "Mpc_over_h"]
+        self.unit = unit
+
+        self.nparticles = nparticles
+
+        self.zsnapshots = zsnapshots
+        self.asnapshots = 1. / (1. + zsnapshots)
+        self.nshells = len(zsnapshots)
+        self.nsubs = nsubs
+
+        # independent jobs
+        self._sub_args = list(itertools.product(range(self.nshells), range(nsubs)))
+        self.njobs = len(self._sub_args)
+
+        # define approximately even split of significant jobs (here, one job per cube accross shells)
+        # self.jobs = [range(c, self.nsubs, ncube) for c in range(ncube)]
+        # self.njobs = len(self.jobs)
+
+        self.dtype = dtype
 
     def get_ishell(self, isub):
         return self._sub_args[isub][0]
@@ -29,23 +47,41 @@ class Reader:
     def get_isubs_for_shell(self, ishell):
         return np.argwhere([x[0] == ishell for x in self._sub_args])[:, 0]
 
-    def get_fname_sub(self, save_dir, isub, nside, seed, save_format):
-        return os.path.join(
-            save_dir, f'shell_{self.kind}_z{self.get_ishell(isub)}_sub{isub}_nside{nside}_seed{seed}.' + save_format)
+    # def get_fname_sub(self, save_dir, isub, nside, seed, save_format):
+    #     return os.path.join(
+    #         save_dir, f'shell_{self.kind}_z{self.get_ishell(isub)}_sub{isub}_nside{nside}_seed{seed}.' + save_format
+    #         )
 
-    def get_fname_shell(self, save_dir, isub, nside, seed, save_format):
-        return os.path.join(save_dir,
-                            f'shell_{self.kind}_z{self.get_ishell(isub)}_nside{nside}_seed{seed}.' + save_format)
+    # def get_fname_shell(self, save_dir, isub, nside, seed, save_format):
+    #     return os.path.join(
+    #         save_dir, f'shell_{self.kind}_z{self.get_ishell(isub)}_nside{nside}_seed{seed}.' + save_format
+    #         )
 
     def get_com_shell_bins(self, cosmo):
         raise NotImplementedError
+
+    def get_z_shell_bins(self, cosmo):
+        com_shell_bins = self.get_com_shell_bins(cosmo)
+        return 1. / pyccl.scale_factor_of_chi(cosmo, com_shell_bins) - 1.
+
+    def get_shell_info(self, cosmo, fname=None):
+        z_shell_bins = self.get_z_shell_bins(cosmo)
+        names = ['ishell', 'zsnapshot', 'zmin', 'zmax', 'snapshot_id']
+        dtypes = ['int', 'float', 'float', 'float', 'int']
+        out = np.array(
+            list(zip(np.arange(self.nshells), self.zsnapshots, z_shell_bins[:-1], z_shell_bins[1:], self.snapshots)),
+            dtype=list(zip(names, dtypes))
+            )
+        if fname is not None:
+            np.savetxt(fname, out, header=' '.join(names), fmt='%8i %16.8f %16.8f %16.8f %8i')
+        return out
 
     def get_boxsize(self, cosmo):
         raise NotImplementedError
 
     def read_sub(self, isub, verbose=False, assert_xyz_in_box=False, read_box_edges_only=False, h_to_divide_by=None):
         raise NotImplementedError
-    
+
     def get_box_comoving_density(self, cosmo):
         """Computes the comoving particle density of the simulation.
 
@@ -54,8 +90,6 @@ class Reader:
             Comoving particle density of the simulation.
         """
         return self.nparticles / self.get_boxsize(cosmo)**3
-
-
 
 
 class SLICSReader(Reader):
@@ -80,27 +114,17 @@ class SLICSReader(Reader):
         """
         self.path = path
         self.boxsize = boxsize
-        self.nparticles = nparticles
         self.nodes_dim = nodes_dim  # that’s the
         self.ncc = ncc
         self.rnc = rnc
 
         # simulation snapshot redshifts
-        self.zsnapshots = np.sort([float(x[:5]) for x in filter(lambda _x: "xv0.dat" in _x, os.listdir(self.path))])
-        self.nshells = len(self.zsnapshots)
+        zsnapshots = np.sort([float(x[:5]) for x in filter(lambda _x: "xv0.dat" in _x, os.listdir(self.path))])
 
         # number of sub boxes (constant here)
-        self.ncube = self.nodes_dim**3
+        ncube = self.nodes_dim**3
 
-        # independent jobs
-        self._sub_args = list(itertools.product(range(self.nshells), range(self.ncube)))
-        self.nsubs = len(self._sub_args)
-
-        # define approximately even split of significant jobs (here, one job per cube accross shells)
-        self.jobs = [range(c, self.nsubs, self.ncube) for c in range(self.ncube)]
-        self.njobs = len(self.jobs)
-
-        super().__init__('slics', 'Mpc')
+        super().__init__('slics', 'Mpc', nparticles, zsnapshots, ncube, dtype=np.float32)
 
     def get_com_shell_bins(self, cosmo):
         """Computes the comoving distances for the particle shells. Here, snapshots are at fixed comoving distance, therefore we use this to determine the furthest shell.
@@ -212,51 +236,50 @@ class HACCReader(Reader):
 
         amax = 1. / (1. + sim_zmin)
         amin = 1. / (1. + sim_zmax)
-        asnapshots = amin + (amax - amin) * (snapshots - snapshots[0]) / (snapshots[-1] - snapshots[0])
-        self.asnapshots, _idx = trim_array_min_diff(asnapshots, self.aminstep, return_indices=True)
-        if len(_idx) < len(snapshots):
-            print(f"Subsampling snapshots with aminstep={aminstep} returns {len(_idx)} snapshots")
-        self.snapshots = snapshots[_idx]
+        asnapshots_all = amin + (amax - amin) * (snapshots - snapshots[0]) / (snapshots[-1] - snapshots[0])
+        asnapshots, idx = trim_array_min_diff(asnapshots_all, self.aminstep, return_indices=True)
+        if len(idx) < len(snapshots):
+            print(f"Subsampling snapshots with aminstep={aminstep} returns {len(idx)} snapshots")
+        zsnapshots = 1. / asnapshots[::-1] - 1.
+        self.snapshots = snapshots[list(reversed(idx))]
 
-        self.asnapshots = self.asnapshots[::-1]
-        self.snapshots = self.snapshots[::-1]
-
-        self.zsnapshots = 1. / self.asnapshots - 1.
         if zmax is not None:
             try:
-                i = np.argwhere(self.zsnapshots>zmax)[0,0]
-                self.zsnapshots = self.zsnapshots[:i+1]
-                self.asnapshots = self.asnapshots[:i+1]
-                self.snapshots = self.snapshots[:i+1]
+                i = np.argwhere(zsnapshots > zmax)[0, 0]
+                zsnapshots = zsnapshots[:i + 1]
             except:
                 pass
-        self.nshells = len(self.zsnapshots)
 
-        # number of sub boxes (constant here)
-        self.ncube = 64
+        # # number of sub boxes (constant here)
+        # self.ncube = 64
 
-        # independent jobs
-        if self.group_along_x:
-            self._sub_args = list(
-                itertools.product(range(self.nshells), range(16))
-            )  # there are 64 subfiles, but on the x-axis, they are not continuous, so we might as well load them all together and make one continious volume
-        else:
-            self._sub_args = list(itertools.product(range(self.nshells), range(64)))
-        self.nsubs = len(self._sub_args)
+        # # independent jobs
+        # if self.group_along_x:
+        #     self._sub_args = list(
+        #         itertools.product(range(self.nshells), range(16))
+        #         )  # there are 64 subfiles, but on the x-axis, they are not continuous, so we might as well load them all together and make one continious volume
+        # else:
+        #     self._sub_args = list(itertools.product(range(self.nshells), range(64)))
+        # self.nsubs = len(self._sub_args)
 
-        self.lims = np.array([[[np.floor(ibox / (16)) * 0.5,
-                                np.floor(ibox / (16)) * 0.5 + 2.5],
-                               [np.floor(ibox / 4) % 4, (np.floor(ibox / 4) % 4) + 1], [ibox % 4, (ibox % 4) + 1]]
-                              for ibox in range(64)])
+        self.lims = np.array(
+            [
+                [
+                    [np.floor(ibox / (16)) * 0.5, np.floor(ibox / (16)) * 0.5 + 2.5],
+                    [np.floor(ibox / 4) % 4, (np.floor(ibox / 4) % 4) + 1], [ibox % 4, (ibox % 4) + 1]
+                    ] for ibox in range(64)
+                ]
+            )
 
         # some simulation properties
         step = self.snapshots[0]
         name = os.path.join(self.path, 'output', f'STEP{step}/m000.full.mpicosmo.{step}#0')
         self.boxsize_h = pygio.read_phys_scale(name)[0]
-        self.nparticles = pygio.read_num_elems(name[:-2])
+        nparticles = pygio.read_num_elems(name[:-2])
+        dtype = pygio.read_variable_dtypes(name)['x']
 
-
-        super().__init__('hacc', 'Mpc_over_h')
+        nsub = 16 if self.group_along_x else 64
+        super().__init__('hacc', 'Mpc_over_h', nparticles, zsnapshots, nsub, dtype=dtype)
 
     def get_com_shell_bins(self, cosmo):
         """Computes the comoving distances for the particle shells. Here, snapshots are at fixed scale factor, therefore we use this to determine the furthest shell.
@@ -277,8 +300,9 @@ class HACCReader(Reader):
         # compute bins in comoving distance
         com_shell_bins = np.zeros(self.nshells + 1)
         com_shell_bins[1:-1] = pyccl.comoving_radial_distance(cosmo, amids)
-        com_shell_bins[-1] = pyccl.comoving_radial_distance(cosmo,
-                                                            2 * amids[-1] - amids[-2])  # fixed scake factor width
+        com_shell_bins[-1] = pyccl.comoving_radial_distance(
+            cosmo, 2 * amids[-1] - amids[-2]
+            )  # fixed scake factor width
 
         return com_shell_bins
 
@@ -328,6 +352,7 @@ class HACCReader(Reader):
         for ix in range(nx):
             ifile = ix * 16 + ibox
             name = os.path.join(self.path, 'output', f'STEP{step}/m000.full.mpicosmo.{step}#{ifile}')
+            print(name)
             if verbose:
                 print("Reading", name)
             data = pygio.read_genericio(name, variables=variables)
@@ -341,59 +366,36 @@ class HACCReader(Reader):
             for i in range(3):
                 assert np.all(np.min(box_edges[:, i]) <= xyz[:, i]) and np.all(xyz[:, i] <= np.max(box_edges[:, i]))
 
-        return xyz, box_edges
+        return xyz, box_edges.astype(self.dtype)
 
-    
 
 class DummyReader(Reader):
+    """A generic class to read particles from N-body simulations.
+    """
 
-    def __init__(self, nshells=6, boxsize=600., nparticles=1e8, ainit=0.75):
-        self.nshells = nshells
+    def __init__(self, boxsize=200., nshells=3, nsplit=2, nparticule_per_sub=10, zmax=2.):
         self.boxsize = boxsize
-        self.nparticles = nparticles
-        self.asnapshots = np.linspace(ainit, 1., nshells)[::-1]
-        self.zsnapshots = 1. / self.asnapshots - 1.
-        
-        self._sub_args = list(itertools.product(range(self.nshells), range(4)))
-        self.nsubs = len(self._sub_args)
+        self.xyzs = np.random.uniform(high=self.boxsize, size=(nsplit**3 * nshells, nparticule_per_sub, 3))
+        self.zmax = zmax
 
-        super().__init__('dummy', 'Mpc')
+        nparticles = nsplit**3 * nparticule_per_sub
+        zsnapshots = np.zeros(nshells)
+        nsubs = nsplit**3
+
+        super().__init__('dummy', 'Mpc', nparticles, zsnapshots, nsubs, dtype=np.float64)
 
     def get_com_shell_bins(self, cosmo):
-        """Computes the comoving distances for the particle shells. Here, snapshots are at fixed scale factor, therefore we use this to determine the furthest shell.
-
-        Parameters
-        ----------
-        cosmo
-            Cosmology object from CCL.
-
-        Returns
-        -------
-            Comving distances.
-        """
-        # TODO : make it a property
-
-        amids = 0.5 * (self.asnapshots[1:] + self.asnapshots[:-1])
-
-        # compute bins in comoving distance
-        com_shell_bins = np.zeros(self.nshells + 1)
-        com_shell_bins[1:-1] = pyccl.comoving_radial_distance(cosmo, amids)
-        com_shell_bins[-1] = pyccl.comoving_radial_distance(cosmo,
-                                                            2 * amids[-1] - amids[-2])  # fixed scake factor width
-
-        return com_shell_bins
+        chi_max = pyccl.comoving_radial_distance(cosmo, 1. / (1. + self.zmax))
+        return np.linspace(0, chi_max, self.nshells + 1)
 
     def get_boxsize(self, cosmo):
         return self.boxsize
 
     def read_sub(self, isub, verbose=False, assert_xyz_in_box=False, read_box_edges_only=False, h_to_divide_by=None):
-
-        if read_box_edges_only:
-            xyz = np.random.uniform(0., self.boxsize, size=(17,3))
-        else:
-            xyz = np.random.uniform(0., self.boxsize, size=(int(self.nparticles),3))
-        
         cube_nodes = ((np.arange(8)[:, None] & (1 << np.arange(3))) > 0).astype(int)  #[(0,0,0),(0,0,1),...,(1,1,1)]
         box_edges = cube_nodes * self.boxsize
-        
+        xyz = self.xyzs[isub]
         return xyz, box_edges
+
+    def get_box_comoving_density(self, cosmo):
+        return self.nparticles / self.get_boxsize(cosmo)**3

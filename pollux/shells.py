@@ -1,34 +1,32 @@
-import os
-
 import healpy as hp
 import healsparse
-import matplotlib.pyplot as plt
 import numpy as np
 import pyccl
-import pymaster as nmt
+import sacc
 import scipy.stats
 from tqdm.auto import tqdm, trange
 
+from .map_builder import MapBuilder
 from .utils import *
 from .utils import _construct_shell_sub
 
 
-class ShellBuilder:
+class ShellBuilder(MapBuilder):
 
-    def __init__(self,
-                 reader,
-                 cosmo,
-                 nside,
-                 save_dir=None,
-                 apply_random_isometry=False,
-                 seed=12345,
-                 octant_only=True,
-                 nside_c=32,
-                 dtype=np.int64,
-                 save_format='fits',
-                 subsample_box=None,
-                 z_subsample_auto=2.,
-                 group_isometries=None):
+    def __init__(
+            self,
+            reader,
+            cosmo,
+            nside,
+            save_dir,
+            apply_random_isometry=False,
+            seed=12345,
+            dtype=np.uint64,
+            subsample_box=None,
+            z_subsample_auto=2.,
+            group_isometries=None,
+            **kwargs
+        ):
         """An object to handle the computation of particle shells from an N-body simulation.
 
         Parameters
@@ -57,49 +55,101 @@ class ShellBuilder:
 
         self.reader = reader
         self.cosmo = cosmo
-        self.nside = nside
-        self.npix = hp.nside2npix(nside)
-        self.save_dir = save_dir
+        # self.nside = nside
+        # self.npix = hp.nside2npix(nside)
+        # self.save_dir = save_dir
         self.apply_random_isometry = apply_random_isometry
         self.seed = seed
-        self.octant_only = octant_only
-        self.nside_c = nside_c
-        self.dtype = dtype
-        self.save_format = save_format
+        # self.octant_only = octant_only
+        # self.nside_c = nside_c
+        # self.dtype = dtype
+        # self.save_format = save_format
         self.subsample_box = subsample_box
         self.z_subsample_auto = z_subsample_auto
         self.group_isometries = group_isometries
 
         self.nshells = self.reader.nshells
 
-        self.wsp = None
+        base_fname = f'shell_{self.reader.kind}_seed{self.seed}'
 
-        if dtype != np.int64:
-            print(
-                f"Warning: the max value for {dtype} might not be enough : {np.iinfo(dtype)}")
+        super().__init__(
+            nside=nside,
+            dtype=dtype,
+            save_dir=save_dir,
+            base_fname=base_fname,
+            nmaps=self.nshells,
+            sacc_type="galaxy_density_cl",
+            **kwargs
+            )
+
+        if dtype == np.int32:
+            print(f"Warning: the max value for {dtype} might not be enough : {np.iinfo(dtype)}")
 
         # Draw random isometries
         if apply_random_isometry:
             self.Abs = self.get_random_isometries()
 
         # Particle subsampling
-        assert subsample_box == 'auto' or type(
-            subsample_box) is float or subsample_box is None
+        assert subsample_box == 'auto' or type(subsample_box) is float or subsample_box is None
 
-        # make sure folder exists
-        if self.save_dir is not None:
-            if not os.path.exists(self.save_dir):
-                os.mkdir(self.save_dir)
+        # # make sure folder exists
+        # if self.save_dir is not None:
+        #     if not os.path.exists(self.save_dir):
+        #         os.mkdir(self.save_dir)
 
-    def get_fname_sub(self, isub):
-        return os.path.join(
-            self.save_dir,
-            f'shell_{self.reader.kind}_z{self.reader.get_ishell(isub)}_sub{isub}_nside{self.nside}_seed{self.seed}.' +
-            self.save_format)
+    # def get_fname_sub(self, isub):
+    #     return os.path.join(
+    #         self.save_dir,
+    #         f'shell_{self.reader.kind}_z{self.reader.get_ishell(isub)}_sub{isub}_nside{self.nside}_seed{self.seed}.' +
+    #         self.save_format)
 
-    def get_fname(self, ishell, what='shell'):
-        return os.path.join(self.save_dir,
-                            f'{what}_{self.reader.kind}_z{ishell}_nside{self.nside}_seed{self.seed}.' + self.save_format)
+    # def get_fname(self, ishell, what='shell'):
+    #     return os.path.join(self.save_dir,
+    #                         f'{what}_{self.reader.kind}_z{ishell}_nside{self.nside}_seed{self.seed}.' + self.save_format)
+
+    # def get_fname_cls(self):
+    #     return os.path.join(self.save_dir, f'cls_{self.reader.kind}_nside{self.nside}_seed{self.seed}.fits')
+
+    def get_tracers(self, Nz=1000):
+        z_shell_bins = self.reader.get_z_shell_bins(self.cosmo)
+
+        # zz = np.linspace(0, z_shell_bins[-1], Nz)
+
+        # return [
+        #     pyccl.NumberCountsTracer(
+        #         self.cosmo,
+        #         False,
+        #         dndz=(
+        #             zz,
+        #             scipy.stats.uniform.pdf(
+        #                 zz, loc=z_shell_bins[ishell], scale=z_shell_bins[ishell + 1] - z_shell_bins[ishell]
+        #                 )
+        #             ),
+        #         bias=(zz, np.ones_like(zz))
+        #         )
+        #     ]
+
+        ones = np.ones(Nz)
+        tracers = []
+        for ishell in range(self.nshells):
+            zz = np.linspace(z_shell_bins[ishell], z_shell_bins[ishell + 1], Nz)
+            tracers.append(pyccl.NumberCountsTracer(self.cosmo, False, dndz=(zz, ones), bias=(zz, ones)))
+
+        return tracers
+
+    def get_tracers_sacc(self, Nz=1000):
+        z_shell_bins = self.reader.get_z_shell_bins(self.cosmo)
+
+        zz = np.linspace(0, z_shell_bins[-1], Nz)
+
+        return [
+            sacc.tracers.NZTracer(
+                f"density_{ishell}", zz,
+                scipy.stats.uniform.pdf(
+                    zz, loc=z_shell_bins[ishell], scale=z_shell_bins[ishell + 1] - z_shell_bins[ishell]
+                    )
+                ) for ishell in range(self.nshells)
+            ]
 
     def get_random_isometries(self):
         """Generates random isometries for each shell.
@@ -119,19 +169,20 @@ class ShellBuilder:
                 assert self.group_isometries
                 com_iso_depth = boxsize
             if type(self.group_isometries) is float:
-                com_iso_depth = boxsize*self.group_isometries
-            n_isometries = int(np.ceil(com_shell_bins[-1]/com_iso_depth))
-            com_iso_bins = np.arange(n_isometries+1)*com_iso_depth
-            print(
-                f"Grouping {n_isometries} isometries for shells within {com_iso_depth:.2f} Mpc.")
+                com_iso_depth = boxsize * self.group_isometries
+            n_isometries = int(np.ceil(com_shell_bins[-1] / com_iso_depth))
+            com_iso_bins = np.arange(n_isometries + 1) * com_iso_depth
+            print(f"Grouping {n_isometries} isometries for shells within {com_iso_depth:.2f} Mpc.")
 
         # draw random isometries
         _Abs = []
         for _ in range(n_isometries):
-            _Abs.append(random_isometry(rng, boxsize))
+            A, b = random_isometry(rng, boxsize)
+            _Abs.append([A.astype(self.reader.dtype), b.astype(self.reader.dtype)])
 
         # assign isometries to shells
         if self.group_isometries is not None:
+
             def get_max_overlap(a, b):
                 return np.argmax(np.fmin(a[1:, None], b[None, 1:]) - np.fmax(a[:-1, None], b[None, :-1]), axis=1)
 
@@ -151,8 +202,7 @@ class ShellBuilder:
         com_shell_bins = self.reader.get_com_shell_bins(self.cosmo)
         box_volume = self.reader.get_boxsize(self.cosmo)**3
 
-        shell_volume = 4. / 3. * np.pi * \
-            (com_shell_bins[ishell + 1]**3 - com_shell_bins[ishell]**3)
+        shell_volume = 4. / 3. * np.pi * (com_shell_bins[ishell + 1]**3 - com_shell_bins[ishell]**3)
         if self.octant_only:
             shell_volume /= 8.
 
@@ -167,28 +217,22 @@ class ShellBuilder:
         """
         repeats = []
         for isub in trange(self.reader.nsubs, desc='[get_repeats]'):
-            repeats.append((
-                isub,
-                self.construct_shell_sub(
-                    isub,
-                    get_repeats_only=True,
-                    **kwargs)))
+            repeats.append((isub, self.construct_shell_sub(isub, get_repeats_only=True, **kwargs)))
         return repeats
-    
+
     def get_subsample_ratio(self, ishell):
         if self.subsample_box == 'auto':
             if not hasattr(self, 'subsample_ratios'):
-                ngal_pix = np.array([self.estimate_repeats(ishell) for ishell in range(
-                    self.nshells)]) * self.reader.nparticles / (hp.nside2npix(self.nside))  # estimated number of galaxies per pixel
+                ngal_pix = np.array(
+                    [self.estimate_repeats(ishell) for ishell in range(self.nshells)]
+                    ) * self.reader.nparticles / (hp.nside2npix(self.nside))  # estimated number of galaxies per pixel
                 if self.octant_only:
                     ngal_pix *= 8.
                 snr_pix = 1. / np.sqrt(ngal_pix)  # S/N per pixel
                 # S/N at redshift z_subsample_auto
-                snr_pix_cut = np.interp(
-                    self.z_subsample_auto, self.reader.zsnapshots, snr_pix)
+                snr_pix_cut = np.interp(self.z_subsample_auto, self.reader.zsnapshots, snr_pix)
                 # fraction of particles to maintain S/N of z>z_subsample_auto
-                self.subsample_ratios = np.minimum(
-                    1., (snr_pix / snr_pix_cut)**2)
+                self.subsample_ratios = np.minimum(1., (snr_pix / snr_pix_cut)**2)
             ratio = self.subsample_ratios[ishell]
         elif type(self.subsample_box) is float:
             ratio = self.subsample_box
@@ -223,18 +267,20 @@ class ShellBuilder:
         pixel_volume = 4. * np.pi / 3. * (chi_max**3 - chi_min**3) / npix
 
         return pixel_volume * self.get_box_comoving_density(ishell)
-    
-    def construct_shell_sub(self,
-                            isub,
-                            Abs=None,
-                            com_shell_bins=None,
-                            skip_existing=False,
-                            check_read_existing=True,
-                            verbose=False,
-                            debug=False,
-                            repeat_ixyz=None,
-                            get_repeats_only=False,
-                            fast=True):
+
+    def construct_shell_sub(
+            self,
+            isub,
+            Abs=None,
+            com_shell_bins=None,
+            skip_existing=False,
+            check_read_existing=True,
+            verbose=False,
+            debug=False,
+            repeat_ixyz=None,
+            get_repeats_only=False,
+            fast=True
+        ):
         """Constructs a single shell from a simulation sub-volume/snapshot, applying isometries and repeating it as necessary.
 
         Parameters
@@ -264,24 +310,13 @@ class ShellBuilder:
         ishell = self.reader.get_ishell(isub)
 
         # check if shell exists and/or can be saved
-        if self.save_dir is not None:
-            fname = self.get_fname_sub(isub)
+        # if self.save_dir is not None:
+        fname = self.get_fname(ishell, sub=isub)
 
-            # check if shell has already been created
-            if skip_existing and os.path.exists(fname):
-                if verbose:
-                    print(
-                        f"Found shell for box {isub} (shell {ishell}) at {fname}.")
-                if check_read_existing:
-                    try:
-                        shell = healsparse.HealSparseMap.read(
-                            fname, nside_coverage=self.nside_c)
-                        return fname, ishell
-                    except:
-                        print(
-                            f"Cannot read shell for box {isub} (shell {ishell}) at {fname}.")
-                else:
-                    return fname, ishell
+        # check if shell has already been created
+        if skip_existing:
+            if self.check_maps(read=check_read_existing, fname=fname):
+                return
 
         # get shell radii
         if com_shell_bins is None:
@@ -302,12 +337,13 @@ class ShellBuilder:
         nrepeat = int(np.ceil(np.sqrt(rmax2) / boxsize)) + 2
 
         # read box
-        xyz, box_edges_original = self.reader.read_sub(isub,
-                                                       read_box_edges_only=get_repeats_only,
-                                                       h_to_divide_by=None if self.reader.unit == 'Mpc' else np.float64(self.cosmo["h"]))
+        xyz, box_edges_original = self.reader.read_sub(
+            isub,
+            read_box_edges_only=get_repeats_only,
+            h_to_divide_by=None if self.reader.unit == 'Mpc' else np.float64(self.cosmo["h"])
+            )
         if verbose:
-            print(
-                f"Loaded box {isub} (shell {ishell}) with {len(xyz)} particles.")
+            print(f"Loaded box {isub} (shell {ishell}) with {len(xyz)} particles.")
 
         # particle sub-sampling
         if self.subsample_box is not None:
@@ -315,29 +351,25 @@ class ShellBuilder:
                 ratio = self.get_subsample_ratio(ishell)
             nparticles_kept = int(len(xyz) * ratio)
             if verbose:
-                print(
-                    f"Keeping {nparticles_kept} particles, ie a fraction {ratio}.")
+                print(f"Keeping {nparticles_kept} particles, ie a fraction {ratio}.")
             if nparticles_kept < len(xyz):
                 rng = np.random.default_rng(self.seed + ishell)
-                xyz = xyz[rng.choice(
-                    len(xyz), size=nparticles_kept, replace=False), :]
+                xyz = xyz[rng.choice(len(xyz), size=nparticles_kept, replace=False), :]
 
         # initialize shell
-        shell = healsparse.HealSparseMap.make_empty(
-            self.nside_c, self.nside, dtype=self.dtype)
+        shell = healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
 
         if fast:
             nside = self.nside
             order = hp.nside2order(nside)
-            ncap = (nside*nside-nside) << 1
+            ncap = (nside * nside - nside) << 1
             npix = hp.nside2npix(nside)
-            u, c = _construct_shell_sub(xyz.astype(np.float64), box_edges_original,
-                                        Abs[ishell][0], Abs[ishell][1],
-                                        nrepeat, boxsize, rmin2, rmax2,
-                                        self.apply_random_isometry, self.octant_only,
-                                        nside, order, ncap, npix)
+            u, c = _construct_shell_sub(
+                xyz, box_edges_original, Abs[ishell][0], Abs[ishell][1], nrepeat, boxsize, rmin2, rmax2,
+                self.apply_random_isometry, self.octant_only, nside, order, ncap, npix
+                )
             if len(u) > 0:
-                shell.update_values_pix(u, c)
+                shell.update_values_pix(u, c.astype(self.dtype))
 
         else:
             # precompute isometry on particles (since repeats are then only a shift away)
@@ -359,22 +391,19 @@ class ShellBuilder:
 
                         # compute shift
                         shift_original = (
-                            np.array([ix, iy, iz]) * self.reader.get_boxsize(self.cosmo))[None, :]
+                            np.array([ix, iy, iz], dtype=self.reader.dtype) * self.reader.get_boxsize(self.cosmo)
+                            )[None, :]
                         if self.apply_random_isometry:
                             shift = Ax(Abs[ishell][0], shift_original)
                         else:
                             shift = shift_original
 
-                        # # apply isometry to box edges
-                        # if self.apply_random_isometry:
-                        #     tmp_box_edges = Axpb(*Abs[ishell], shift + box_edges)
-                        # else:
-                        #     tmp_box_edges = shift + box_edges
+                        # apply isometry to box edges
                         tmp_box_edges = shift + box_edges
 
                         # check if intersects octant, otherwise skip
                         # np.all(tmp_box_edges < 0.):
-                        if self.octant_only and np.any(np.all(tmp_box_edges < 0., axis=0)):
+                        if self.octant_only and np.any(np.all(tmp_box_edges <= 0., axis=0)):
                             continue
 
                         # check if box intersects with shell, otherwise skip
@@ -383,17 +412,14 @@ class ShellBuilder:
                             continue
 
                         # second, check if box intersects with outer sphere
-                        sphere_center = - \
-                            Abs[ishell][1] if self.apply_random_isometry else np.zeros(
-                                3)
-                        if not AABB_sphere_intersect(box_edges_original+shift_original, sphere_center, rmax2):
+                        sphere_center = -Abs[ishell][1] if self.apply_random_isometry else np.zeros(3)
+                        if not AABB_sphere_intersect(box_edges_original + shift_original, sphere_center, rmax2):
                             continue
 
                         # if we got this far, then this repeat intersects with the shell
                         repeats.append([ix, iy, iz])
                         if verbose:
-                            print(
-                                f"Found overlap for box {isub} (shell {ishell}) for repeat {(ix,iy,iz)}")
+                            print(f"Found overlap for box {isub} (shell {ishell}) for repeat {(ix,iy,iz)}")
                         if get_repeats_only:
                             continue
 
@@ -406,27 +432,23 @@ class ShellBuilder:
                         # 2 - remove particles out of octant if octant_only
                         # 3 - compute corresponding healpy pixels of all particles (removed particles fast set to -1) with vec2pix and loc2pix (translated into python from Healpix code)
                         # 4 - get unique pixels and counts (ignoring -1's)
-                        u, c = vec2pix_unique(
-                            self.nside, *(xyz.T), *(shift[0].T), rmin2, rmax2, self.octant_only)
+                        u, c = vec2pix_unique(self.nside, *(xyz.T), *(shift[0].T), rmin2, rmax2, self.octant_only)
 
                         if len(u) > 0:
                             if verbose:
                                 print(f"Found {len(u)} particles.")
 
                             # add particles to shell
-                            tmp_shell = healsparse.HealSparseMap.make_empty(
-                                self.nside_c, self.nside, dtype=self.dtype)
-                            tmp_shell.update_values_pix(u, c)
+                            tmp_shell = healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
+                            tmp_shell.update_values_pix(u, c.astype(self.dtype))
 
-                            shell = healsparse.operations.sum_union(
-                                [shell, tmp_shell])
+                            shell = healsparse.operations.sum_union([shell, tmp_shell])
                         else:
                             if verbose:
                                 print("Found no particle.")
 
             if verbose:
-                print(
-                    f"Found overlap for box {isub} (shell {ishell}) for {len(repeats)} repeats")
+                print(f"Found overlap for box {isub} (shell {ishell}) for {len(repeats)} repeats")
 
             if get_repeats_only:
                 return repeats
@@ -436,306 +458,297 @@ class ShellBuilder:
             if verbose:
                 print(f"Saved to file {fname}")
 
-        return fname, ishell
-
-    def construct_shells(self, job_id=None, **kwargs):
+    def construct_shells(self, isubs=None, **kwargs):
         """Computes all shells.
 
         Parameters
         ----------
-        job_id, optional
+        isubs, optional
             Index of sub-volume/snapshot list to compute, by default None
         """
-        if job_id is None:
+        if isubs is None:
             # Run all files
-            it = range(self.reader.nsubs)
-        else:
-            it = self.reader.jobs[job_id]
+            isubs = range(self.reader.njobs)
 
-        for isub in tqdm(it, desc='[construct_shells]'):
-            _ = self.construct_shell_sub(isub, **kwargs)
+        for isub in tqdm(isubs, desc='[construct_shells]'):
+            self.construct_shell_sub(isub, **kwargs)
 
     def combine_shells(self, ishells=None, skip_existing=False, check_read_existing=True):
         """Sums the particles shells computed independently for each sub-volume/snapshot with construct_shell_sub
         """
-        if ishells is None:
-            ishells = range(self.nshells)
-
-        for ishell in tqdm(ishells, desc="[combine_shells]"):
+        for ishell in self.tqdm(ishells, desc="[combine_shells]"):
             fname = self.get_fname(ishell)
-            if skip_existing and os.path.exists(fname):
-                if check_read_existing:
-                    try:
-                        healsparse.HealSparseMap.read(
-                            fname, nside_coverage=self.nside_c)
-                        continue
-                    except:
-                        print(f"Cannot read shell {ishell} at {fname}.")
-                else:
+            if skip_existing:
+                if self.check_maps(read=check_read_existing, fname=fname):
                     continue
-
-            shell = healsparse.HealSparseMap.make_empty(
-                self.nside_c, self.nside, dtype=self.dtype)
-
+            shell = healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
             isubs = self.reader.get_isubs_for_shell(ishell)
             for isub in tqdm(isubs, desc=f"[combine_shells: shell {ishell}]", leave=False):
-                tmp_fname = self.get_fname_sub(isub)
+                tmp_fname = self.get_fname(ishell, sub=isub)
                 tmp_shell = healsparse.HealSparseMap.read(tmp_fname)
                 shell = healsparse.operations.sum_union([shell, tmp_shell])
 
             shell.write(fname, clobber=True, format=self.save_format)
 
-    def check_sub_shells(self, verbose=False):
-        out = []
-        for isub in range(self.reader.nsubs):
-            fname = self.get_fname_sub(isub)
-            if not os.path.exists(fname):
-                out.append(isub)
-                if verbose:
-                    print(f"Sub {isub} not found in {fname}")
-        return out
+    def construct_maps(self, imaps=None, skip_existing=False, check_read_existing=True, **kwargs):
+        # first construct shells on simulation subs
+        for ishell in self.tqdm(imaps, desc="[construct_maps]"):
+            isubs = self.reader.get_isubs_for_shell(ishell)
+            self.construct_shell(isubs, skip_existing=skip_existing, check_read_existing=check_read_existing, **kwargs)
 
-    def load_sub_shells(self, ishell):
-        """Loads shell maps of sub-volumes
+        # then combine into final shells
+        self.combine_shells(imaps, skip_existing=skip_existing, check_read_existing=check_read_existing)
 
-        Parameters
-        ----------
-        ishell
-            Index of shell.
+    def get_field_map(self, ishell):
+        shell = self.load_maps(ishell)
+        # density = shell.astype(np.float_) / self.get_pixel_density(ishell) - 1.
+        # return density.generate_healpix_map()
 
-        Returns
-        -------
-            List of shells as HealSparseMap objects.
-        """
-        isubs = self.reader.get_isubs_for_shell(ishell)
+        # remove potential hp.UNSEEN for empty pixels in mask
+        # _, ipix = self.get_mask(return_ipix=True)
+        spix = shell.valid_pixels
+        density = -np.ones(self.npix)
+        density[spix] = shell[spix] / self.get_pixel_density(ishell) - 1.
+        return density
 
-        shells = []
-        for isub in tqdm(isubs, desc="[load_sub_shells]"):
-            fname = self.get_fname_sub(isub)
-            shells.append(healsparse.HealSparseMap.read(
-                fname, nside_coverage=self.nside_c))
-        return shells
+    # def load_sub_shells(self, ishell):
+    #     """Loads shell maps of sub-volumes
 
-    def load_shells(self, ishells=None, check_files_exist_only=False):
-        """Loads shell maps.
+    #     Parameters
+    #     ----------
+    #     ishell
+    #         Index of shell.
 
-        Parameters
-        ----------
-        ishells, optional
-            Indices of shells, by default None
+    #     Returns
+    #     -------
+    #         List of shells as HealSparseMap objects.
+    #     """
+    #     isubs = self.reader.get_isubs_for_shell(ishell)
 
-        Returns
-        -------
-            List of shells as HealSparseMap objects.
-        """
-        if ishells is None:
-            ishells = range(self.nshells)
+    #     shells = []
+    #     for isub in tqdm(isubs, desc="[load_sub_shells]"):
+    #         fname = self.get_fname_sub(isub)
+    #         shells.append(healsparse.HealSparseMap.read(
+    #             fname, nside_coverage=self.nside_c))
+    #     return shells
 
-        shells = []
-        for ishell in tqdm(ishells, desc="[load_shells]"):
-            fname = self.get_fname(ishell)
-            if check_files_exist_only:
-                if not os.path.exists(fname):
-                    print(f"Shell {ishell} not found in {fname}")
-            else:
-                shells.append(healsparse.HealSparseMap.read(
-                    fname, nside_coverage=self.nside_c))
-        return shells
+    # def load_shells(self, ishells=None, check_files_exist_only=False):
+    #     """Loads shell maps.
 
-    def plot_shells(self, shells, nx=None, log=True, title_prefix=None, cbar=False, **kwargs):
-        """Plots particle shells.
+    #     Parameters
+    #     ----------
+    #     ishells, optional
+    #         Indices of shells, by default None
 
-        Parameters
-        ----------
-        shells
-            List of shells.
-        nx, optional
-            Number of maps to plot per row, by default None
-        log, optional
-            Plots log10(shells), by default True
-        title_prefix, optional
-            Title prefix, by default None
-        cbar, optional
-            Whether to show color bars, by default False
-        """
-        nshells = len(shells)
-        if nx is None:
-            nx = nshells
-        ny = int(np.ceil(nshells / nx))
+    #     Returns
+    #     -------
+    #         List of shells as HealSparseMap objects.
+    #     """
+    #     if ishells is None:
+    #         ishells = range(self.nshells)
 
-        plt.figure(figsize=(4 * nx, 4 * ny))
+    #     shells = []
+    #     for ishell in tqdm(ishells, desc="[load_shells]"):
+    #         fname = self.get_fname(ishell)
+    #         if check_files_exist_only:
+    #             if not os.path.exists(fname):
+    #                 print(f"Shell {ishell} not found in {fname}")
+    #         else:
+    #             shells.append(healsparse.HealSparseMap.read(
+    #                 fname, nside_coverage=self.nside_c))
+    #     return shells
 
-        for ishell in range(nshells):
-            hp_map = shells[ishell].generate_healpix_map()
-            if log and np.any(hp_map > 0.):
-                hp_map = np.log10(hp_map)
-            title = title_prefix + \
-                f" {ishell}" if title_prefix is not None else None
-            if self.octant_only:
-                hp.orthview(hp_map,
-                            rot=(35, 20),
-                            half_sky=True,
-                            sub=(ny, nx, ishell + 1),
-                            title=title,
-                            cbar=cbar,
-                            **kwargs)
-            else:
-                hp.mollview(hp_map, sub=(ny, nx, ishell + 1),
-                            title=title, cbar=cbar, **kwargs)
-        hp.graticule(verbose=False)
+    # def plot_shells(self, shells, nx=None, log=True, title_prefix=None, cbar=False, **kwargs):
+    #     """Plots particle shells.
 
-    def get_mask(self):
-        if self.octant_only:
-            mask = make_mask_radec_cuts(self.nside, 0, 90, 0, 90)
-        else:
-            mask = np.ones(hp.nside2npix(self.nside))
-        return mask
+    #     Parameters
+    #     ----------
+    #     shells
+    #         List of shells.
+    #     nx, optional
+    #         Number of maps to plot per row, by default None
+    #     log, optional
+    #         Plots log10(shells), by default True
+    #     title_prefix, optional
+    #         Title prefix, by default None
+    #     cbar, optional
+    #         Whether to show color bars, by default False
+    #     """
+    #     nshells = len(shells)
+    #     if nx is None:
+    #         nx = nshells
+    #     ny = int(np.ceil(nshells / nx))
 
-    def get_cls_wsp(self, b=None, nlb=20):
-        """Gets the Namaster workspace object for the shell (same for all shells here).
+    #     plt.figure(figsize=(4 * nx, 4 * ny))
 
-        Parameters
-        ----------
-        b, optional
-            Namaster binning scheme, by default None
-        nlb, optional
-            Number of multipole bins, by default 50
+    #     for ishell in range(nshells):
+    #         hp_map = shells[ishell].generate_healpix_map()
+    #         if log and np.any(hp_map > 0.):
+    #             hp_map = np.log10(hp_map)
+    #         title = title_prefix + \
+    #             f" {ishell}" if title_prefix is not None else None
+    #         if self.octant_only:
+    #             hp.orthview(hp_map,
+    #                         rot=(35, 20),
+    #                         half_sky=True,
+    #                         sub=(ny, nx, ishell + 1),
+    #                         title=title,
+    #                         cbar=cbar,
+    #                         **kwargs)
+    #         else:
+    #             hp.mollview(hp_map, sub=(ny, nx, ishell + 1),
+    #                         title=title, cbar=cbar, **kwargs)
+    #     hp.graticule(verbose=False)
 
-        Returns
-        -------
-            Workspace, mask and binning scheme.
-        """
-        mask = self.get_mask()
+    # def get_mask(self):
+    #     if self.octant_only:
+    #         mask = make_mask_radec_cuts(self.nside, 0, 90, 0, 90)
+    #     else:
+    #         mask = np.ones(hp.nside2npix(self.nside))
+    #     return mask
 
-        if b is None:
-            b = make_nmtbin_logspaced(
-                self.nside, 8, 2 * self.nside, nlb, f_ell='pixwin')
+    # def get_cls_wsp(self, b=None, nlb=20):
+    #     """Gets the Namaster workspace object for the shell (same for all shells here).
 
-        fname = os.path.join(
-            self.save_dir, f'wsp_{self.reader.kind}_nside{self.nside}.wsp')
+    #     Parameters
+    #     ----------
+    #     b, optional
+    #         Namaster binning scheme, by default None
+    #     nlb, optional
+    #         Number of multipole bins, by default 50
 
-        wsp = nmt.NmtWorkspace()
-        if os.path.exists(fname):
-            print("Loading workspace in", fname)
-            wsp.read_from(fname)
-        else:
-            print("Computing and saving workspace in", fname)
-            dummy_f = nmt.NmtField(mask, [np.zeros_like(mask)])
-            wsp.compute_coupling_matrix(dummy_f, dummy_f, b)
-            wsp.write_to(fname)
+    #     Returns
+    #     -------
+    #         Workspace, mask and binning scheme.
+    #     """
+    #     mask = self.get_mask()
 
-        return wsp, mask, b
-    
-    def compute_shells_alms(self, shells=None, ishells=None, b=None, nlb=20, save=False, skip_existing=False, check_read_existing=True):
-        if shells is None:
-            shells = self.load_shells(ishells)
-        if ishells is None:
-            ishells = range(self.nshells)
-        shells_ = {i: k for i, k in zip(ishells, shells)}
+    #     if b is None:
+    #         b = make_nmtbin_logspaced(
+    #             self.nside, 8, 2 * self.nside, nlb, f_ell='pixwin')
 
-        mask = self.get_mask()
+    #     fname = os.path.join(
+    #         self.save_dir, f'wsp_{self.reader.kind}_nside{self.nside}.wsp')
 
-        alms = {}
-        for ishell in tqdm(ishells, desc="[compute_shells_alms]"):
-            if save:
-                fname = self.get_fname(ishell, what='alms')
-                if skip_existing and os.path.exists(fname):
-                    if check_read_existing:
-                        try:
-                            hp.read_alm(fname)
-                            continue
-                        except:
-                            pass
-                    else:
-                        continue
+    #     wsp = nmt.NmtWorkspace()
+    #     if os.path.exists(fname):
+    #         print("Loading workspace in", fname)
+    #         wsp.read_from(fname)
+    #     else:
+    #         print("Computing and saving workspace in", fname)
+    #         dummy_f = nmt.NmtField(mask, [np.zeros_like(mask)])
+    #         wsp.compute_coupling_matrix(dummy_f, dummy_f, b)
+    #         wsp.write_to(fname)
 
-            alms[ishell] = hp.map2alm(
-                shells_[ishell].generate_healpix_map()*mask, pol=False)
+    #     return wsp, mask, b
 
-            if save:
-                hp.write_alm(fname, alms[ishell], overwrite=True)
+    # def compute_shells_alms(self, shells=None, ishells=None, b=None, nlb=20, save=False, skip_existing=False, check_read_existing=True):
+    #     if shells is None:
+    #         shells = self.load_shells(ishells)
+    #     if ishells is None:
+    #         ishells = range(self.nshells)
+    #     shells_ = {i: k for i, k in zip(ishells, shells)}
 
-        return alms
-        
-    def compute_shells_cls(self, shells=None, ishells=None, b=None, nlb=20):
-        """Computes the angular power spectra of overdensity maps defined from particle shells.
+    #     mask = self.get_mask()
 
-        Parameters
-        ----------
-        shells, optional
-            List of particle shells, by default None
-        ishells, optional
-            Indices of particle shells, by default None
-        b, optional
-            Namaster binning scheme, by default None
-        nlb, optional
-            Number of multipole bins, by default 50
+    #     alms = {}
+    #     for ishell in tqdm(ishells, desc="[compute_shells_alms]"):
+    #         if save:
+    #             fname = self.get_fname(ishell, what='alms')
+    #             if skip_existing and os.path.exists(fname):
+    #                 if check_read_existing:
+    #                     try:
+    #                         hp.read_alm(fname)
+    #                         continue
+    #                     except:
+    #                         pass
+    #                 else:
+    #                     continue
 
+    #         alms[ishell] = hp.map2alm(
+    #             shells_[ishell].generate_healpix_map()*mask, pol=False)
 
-        Returns
-        -------
-            Multipole bin centers and list of spectra.
-        """
-        wsp, mask, b = self.get_cls_wsp(b=b, nlb=nlb)
+    #         if save:
+    #             hp.write_alm(fname, alms[ishell], overwrite=True)
 
-        if shells is None:
-            shells = self.load_shells(ishells)
+    #     return alms
 
-        cls_out = []
-        for ishell, shell in enumerate(tqdm(shells, desc="[compute_shells_cls]")):
-            # remove potential hp.UNSEEN for empty pixels in mask
-            s = np.clip(shell.generate_healpix_map(), 0, np.inf)
-            field = nmt.NmtField(
-                mask, [s / self.get_pixel_density(ishell) - 1.])
-            cls_out.append(nmt.compute_full_master(
-                field, field, b, workspace=wsp)[0])
+    # def compute_shells_cls(self, shells=None, ishells=None, b=None, nlb=20):
+    #     """Computes the angular power spectra of overdensity maps defined from particle shells.
 
-        return b.get_effective_ells(), cls_out
+    #     Parameters
+    #     ----------
+    #     shells, optional
+    #         List of particle shells, by default None
+    #     ishells, optional
+    #         Indices of particle shells, by default None
+    #     b, optional
+    #         Namaster binning scheme, by default None
+    #     nlb, optional
+    #         Number of multipole bins, by default 50
 
+    #     Returns
+    #     -------
+    #         Multipole bin centers and list of spectra.
+    #     """
+    #     wsp, mask, b = self.get_cls_wsp(b=b, nlb=nlb)
 
+    #     if shells is None:
+    #         shells = self.load_shells(ishells)
 
-    def predict_shells_cls(self, ishells=None, b=None, nlb=20, **kwargs):
-        """Computes theory angular power spectra of overdensity maps with CCL.
+    #     cls_out = []
+    #     for ishell, shell in enumerate(tqdm(shells, desc="[compute_shells_cls]")):
+    #         # remove potential hp.UNSEEN for empty pixels in mask
+    #         s = np.clip(shell.generate_healpix_map(), 0, np.inf)
+    #         field = nmt.NmtField(
+    #             mask, [s / self.get_pixel_density(ishell) - 1.])
+    #         cls_out.append(nmt.compute_full_master(
+    #             field, field, b, workspace=wsp)[0])
 
-        Parameters
-        ----------
-        ishells, optional
-            Indices of particle shells, by default None
-        b, optional
-            Namaster binning scheme, by default None
-        nlb, optional
-            Number of multipole bins, by default 50
+    #     return b.get_effective_ells(), cls_out
 
-        Returns
-        -------
-            Multipole bin centers and list of spectra.
-        """
-        if ishells is None:
-            ishells = range(self.nshells)
+    # def predict_shells_cls(self, ishells=None, b=None, nlb=20, **kwargs):
+    #     """Computes theory angular power spectra of overdensity maps with CCL.
 
-        _, _, b = self.get_cls_wsp(b=b, nlb=nlb)
+    #     Parameters
+    #     ----------
+    #     ishells, optional
+    #         Indices of particle shells, by default None
+    #     b, optional
+    #         Namaster binning scheme, by default None
+    #     nlb, optional
+    #         Number of multipole bins, by default 50
 
-        com_shell_bins = self.reader.get_com_shell_bins(self.cosmo)
-        z_shell_bins = 1. / \
-            pyccl.scale_factor_of_chi(self.cosmo, com_shell_bins) - 1.
+    #     Returns
+    #     -------
+    #         Multipole bin centers and list of spectra.
+    #     """
+    #     if ishells is None:
+    #         ishells = range(self.nshells)
 
-        zz = np.linspace(0, z_shell_bins[-1], 10000)
-        dls = [
-            pyccl.NumberCountsTracer(
-                self.cosmo, False,
-                dndz=(zz,
-                      scipy.stats.uniform.pdf(
-                          zz, loc=z_shell_bins[ishell], scale=z_shell_bins[ishell + 1] - z_shell_bins[ishell])),
-                bias=(zz, np.ones_like(zz))) for ishell in range(self.nshells)
-        ]
+    #     _, _, b = self.get_cls_wsp(b=b, nlb=nlb)
 
-        # TODO : use wsp to get exact convolution, if actually useful for validation
+    #     com_shell_bins = self.reader.get_com_shell_bins(self.cosmo)
+    #     z_shell_bins = 1. / \
+    #         pyccl.scale_factor_of_chi(self.cosmo, com_shell_bins) - 1.
 
-        # return dls
-        ell = b.get_effective_ells()
-        Cls = []
-        for dl in tqdm(dls):
-            cl = pyccl.angular_cl(self.cosmo, dl, dl, ell, **kwargs)
-            Cls.append(cl)
+    #     zz = np.linspace(0, z_shell_bins[-1], 10000)
+    #     dls = [
+    #         pyccl.NumberCountsTracer(
+    #             self.cosmo, False,
+    #             dndz=(zz,
+    #                   scipy.stats.uniform.pdf(
+    #                       zz, loc=z_shell_bins[ishell], scale=z_shell_bins[ishell + 1] - z_shell_bins[ishell])),
+    #             bias=(zz, np.ones_like(zz))) for ishell in range(self.nshells)
+    #     ]
 
-        return ell, Cls
+    #     # TODO : use wsp to get exact convolution, if actually useful for validation
+
+    #     # return dls
+    #     ell = b.get_effective_ells()
+    #     Cls = []
+    #     for dl in tqdm(dls):
+    #         cl = pyccl.angular_cl(self.cosmo, dl, dl, ell, **kwargs)
+    #         Cls.append(cl)
+
+    #     return ell, Cls

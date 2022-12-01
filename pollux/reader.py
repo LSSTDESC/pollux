@@ -5,7 +5,7 @@ import healpy as hp
 import numpy as np
 import pyccl
 
-from .utils import trim_array_min_diff
+from .utils import trim_array_min_diff, read_params
 
 os.environ["GENERICIO_NO_MPI"] = "y"
 try:
@@ -194,7 +194,7 @@ class SLICSReader(Reader):
 
 class HACCReader(Reader):
 
-    def __init__(self, path, nsteps=500, sim_zmin=0., sim_zmax=4., aminstep=0., zmax=None, group_along_x=False):
+    def __init__(self, path, read_cosmo_params=False, nsteps=500, sim_zmin=0., sim_zmax=200., aminstep=0., zmax=None, group_along_x=False):
         """Reader for SLICS simulations by Joachim Harnois-Deraps.
 
         Parameters
@@ -216,13 +216,33 @@ class HACCReader(Reader):
         self.aminstep = aminstep
         self.group_along_x = group_along_x
 
+        if read_cosmo_params:
+            fname = os.path.join(path, 'run/run000/indat.params')
+            params = read_params(fname)
+            # create cosmo object that can be used by builder
+            self.cosmo = pyccl.Cosmology(
+                Omega_c=float(params['OMEGA_CDM']),
+                Omega_b=float(params['DEUT']) / float(params['HUBBLE'])**2,
+                h=float(params['HUBBLE']),
+                n_s=float(params['NS']),
+                sigma8=float(params['SS8']),
+                Omega_k=0.
+                )
+            # read and override parameters to determine redshifts of snapshots
+            nsteps = int(params['N_STEPS'])
+            sim_zmax = float(params['Z_IN'])
+            sim_zmin = float(params['Z_FIN'])
+
         # simulation snapshot redshifts : step are constant in scale factor, but only a fraction of steps are saved
         snapshot_dirs = os.listdir(os.path.join(path, 'output'))
         snapshots = np.array([i for i in range(nsteps) if f'STEP{i}' in snapshot_dirs])
 
         amax = 1. / (1. + sim_zmin)
         amin = 1. / (1. + sim_zmax)
-        asnapshots_all = amin + (amax - amin) * (snapshots - snapshots[0]) / (snapshots[-1] - snapshots[0])
+        # asnapshots_all = amin + (amax - amin) * (snapshots - snapshots[0]) / (snapshots[-1] - snapshots[0])
+        asnapshots_all = np.linspace(amin, amax, nsteps + 1)[1:]
+        asnapshots_all = asnapshots_all[snapshots]
+
         asnapshots, idx = trim_array_min_diff(asnapshots_all, self.aminstep, return_indices=True)
         if len(idx) < len(snapshots):
             print(f"Subsampling snapshots with aminstep={aminstep} returns {len(idx)} snapshots")
@@ -373,3 +393,50 @@ class DummyReader(Reader):
 
     def get_box_comoving_density(self, cosmo):
         return self.nparticles / self.get_boxsize(cosmo)**3
+
+
+class SkySimReader(HACCReader):
+
+    def __init__(self, path, nsteps=500, sim_zmin=0., sim_zmax=200., aminstep=0., zmax=None):
+        self.path = path
+        self.aminstep = aminstep
+
+        # # simulation snapshot redshifts : step are constant in scale factor, but only a fraction of steps are saved
+        # snapshot_dirs = os.listdir(os.path.join(path, 'output'))
+        # snapshots = np.array([i for i in range(nsteps) if f'STEP{i}' in snapshot_dirs])
+        mass_sheets_fname = list(sorted(filter(lambda s: s.endswith('.bin'), os.listdir(path))))
+        mass_sheets_fname.remove('density_map_259_dens.bin')
+        snapshots = np.array([i for i in range(nsteps) if f'density_map_{i}_dens.bin' in mass_sheets_fname])
+
+        amax = 1. / (1. + sim_zmin)
+        amin = 1. / (1. + sim_zmax)
+        # asnapshots_all = amin + (amax - amin) * (snapshots - snapshots[0]) / (snapshots[-1] - snapshots[0])
+        asnapshots_all = np.linspace(amin, amax, nsteps + 1)[1:]
+        asnapshots_all = asnapshots_all[snapshots]
+
+        asnapshots, idx = trim_array_min_diff(asnapshots_all, self.aminstep, return_indices=True)
+        if len(idx) < len(snapshots):
+            print(f"Subsampling snapshots with aminstep={aminstep} returns {len(idx)} snapshots")
+        zsnapshots = 1. / asnapshots[::-1] - 1.
+        self.snapshots = snapshots[list(reversed(idx))]
+
+        if zmax is not None:
+            try:
+                i = np.argwhere(zsnapshots > zmax)[0, 0]
+                zsnapshots = zsnapshots[:i + 1]
+            except:
+                pass
+
+        # some simulation properties
+        # step = self.snapshots[0]
+        # name = os.path.join(self.path, 'output', f'STEP{step}/m000.full.mpicosmo.{step}#0')
+        # self.boxsize_h = pygio.read_phys_scale(name)[0]
+        # nparticles = pygio.read_num_elems(name[:-2])
+        # dtype = pygio.read_variable_dtypes(name)['x']
+        nparticles = 10240**3
+        self.boxsize_h = 3e3
+        dtype = np.float32
+        nsub = 1
+
+        # super().__init__
+        Reader.__init__(self, 'skysim', 'Mpc_over_h', nparticles, zsnapshots, nsub, dtype=dtype)

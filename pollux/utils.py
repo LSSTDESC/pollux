@@ -116,7 +116,7 @@ def thetaphi2radec(theta, phi):
     return ra, dec
 
 
-def make_mask_radec_cuts(nside, ramin, ramax, decmin, decmax):
+def make_mask_radec_cuts(nside, ramin, ramax, decmin, decmax, dtype=float):
     """
     Generates a square mask limited by RA/DEC.
 
@@ -143,7 +143,7 @@ def make_mask_radec_cuts(nside, ramin, ramax, decmin, decmax):
     ths, phs = radec2thetaphi([ramin, ramax], [decmin, decmax])
     thmin, thmax = min(ths), max(ths)
     phmin, phmax = min(phs), max(phs)
-    mask[np.where((th < thmax) & (th > thmin) & (ph > phmin) & (ph < phmax))[0]] = 1.
+    mask[np.where((th < thmax) & (th > thmin) & (ph > phmin) & (ph < phmax))[0]] = dtype(1)
     return mask
 
 
@@ -363,7 +363,7 @@ def _construct_shell_sub(
     count = np.zeros(npix, dtype=np.uint)
 
     # repeats = []
-    
+
     dtype = xyz.dtype
 
     # repeat the box
@@ -416,3 +416,16 @@ def _construct_shell_sub(
 
     u = np.argwhere(count)[:, 0]
     return u, count[u]
+
+
+def read_params(fname):
+    with open(fname, 'r') as f:
+        params = {}
+        for x in f:
+            if not (x.startswith('#') or x.startswith('\n')):
+                try:
+                    k, v = x.rstrip().split(' ', 1)
+                    params[k] = v
+                except ValueError:
+                    pass
+    return params

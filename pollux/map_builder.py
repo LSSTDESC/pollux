@@ -357,9 +357,20 @@ class MapBuilder:
 
         return ell, cl
 
-    def load_cls(self):
+    def load_cls(self, return_dict=False):
         fname = self.get_fname(what='cls', force_fits=True)
-        return sacc.Sacc.load_fits(fname)
+        s = sacc.Sacc.load_fits(fname)
+        if return_dict:
+            tracers = list(s.tracers.keys())
+            tc = s.get_tracer_combinations(self.sacc_type)
+            cls_out = {}
+            for i in range(self.nmaps):
+                for j in range(self.nmaps):
+                    if (tracers[i], tracers[j]) in tc:
+                        ell, cls_out[i,j] = s.get_ell_cl(self.sacc_type, tracers[i], tracers[j])
+            return ell, cls_out
+        else:
+            return s
 
     def predict_cls(self, imaps=None, auto_only=False, approximate=False):
         """Computes theory angular power spectra of convergence maps with CCL.
@@ -406,12 +417,22 @@ class MapBuilder:
         return b.get_effective_ells(), cl
 
     def triangle_plot_cls(
-            self, auto_only=False, logy=False, theory_only=False, data_only=False, save=True, sharey=None
+            self,
+            auto_only=False,
+            logy=False,
+            theory_only=False,
+            data_only=False,
+            ratio_data_theory=False,
+            save=True,
+            sharey=None
         ):
         n = self.nmaps
         m = 1 if auto_only else n
         sharey = sharey or False  #False if auto_only else 'row'
         fig, axes = plt.subplots(m, n, figsize=(4 * n, 3 * m), sharex=True, sharey=sharey, squeeze=False)
+
+        if ratio_data_theory:
+            assert not (logy or theory_only or data_only)
 
         ell, cl_th = self.predict_cls(auto_only=auto_only)
         s = self.load_cls()
@@ -427,19 +448,25 @@ class MapBuilder:
                 else:
                     ax = axes[i, j]
                 ax_used = False
-                if (i, j) in cl_th.keys() and not data_only:
-                    ax.plot(ell, cl_th[i, j], c='orange')
-                    ax_used = True
-                if (tracers[i], tracers[j]) in tc and not theory_only:
-                    ax.plot(
-                        ell,
-                        s.get_ell_cl(self.sacc_type, tracers[i], tracers[j])[1],
-                        c='dodgerblue',
-                        ls=' ',
-                        marker='o',
-                        markersize=5
-                        )
-                    ax_used = True
+                if ratio_data_theory:
+                    if (i, j) in cl_th.keys() and (tracers[i], tracers[j]) in tc:
+                        ax.plot(ell, s.get_ell_cl(self.sacc_type, tracers[i], tracers[j])[1] / cl_th[i, j], c='r')
+                        ax.axhline(y=1., c='.8', ls='--')
+                        ax_used = True
+                else:
+                    if (i, j) in cl_th.keys() and not data_only:
+                        ax.plot(ell, cl_th[i, j], c='orange')
+                        ax_used = True
+                    if (tracers[i], tracers[j]) in tc and not theory_only:
+                        ax.plot(
+                            ell,
+                            s.get_ell_cl(self.sacc_type, tracers[i], tracers[j])[1],
+                            c='dodgerblue',
+                            ls=' ',
+                            marker='o',
+                            markersize=5
+                            )
+                        ax_used = True
                 if ax_used:
                     ax.set_xlabel('Multipole $\ell$')
                     ax.set_ylabel('$C_\ell$')

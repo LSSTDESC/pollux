@@ -52,8 +52,6 @@ class LensingBuilder(MapBuilder):
             **kwargs
             )
 
-
-
     def get_tracers(self, Nz=1000):
         self.com_shell_bins = self.reader.get_com_shell_bins(self.cosmo)
         z_shell_bins = 1. / pyccl.scale_factor_of_chi(self.cosmo, self.com_shell_bins) - 1.
@@ -91,9 +89,6 @@ class LensingBuilder(MapBuilder):
                     tracers.append(sacc.tracers.NZTracer(f"kappa_{i}", nz[0], nz[1]))
 
         return tracers
-
-    def construct_kappas(self):
-        raise NotImplementedError
 
     def get_field_map(self, imap):
         return self.load_maps(imap).generate_healpix_map()
@@ -166,7 +161,6 @@ class BornLensingBuilder(LensingBuilder):
 
         return quad(lambda chi: tracer.get_kernel(chi), chi_min, chi_max)[0]
 
-
     def construct_maps(self, ikappas=None, skip_existing=False, check_read_existing=True):
         """Constructs and saves convergence maps from particle shells in the Born approximation, ie by summing the particle overdensity maps with appropriate weights computed with CCL.
 
@@ -202,7 +196,7 @@ class BornLensingBuilder(LensingBuilder):
             ikappa: healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
             for ikappa in _ikappas
             }
-        
+
         tracers = self.get_tracers()
 
         for ishell in trange(self.nshells, desc="[construct_maps]"):
@@ -219,7 +213,7 @@ class BornLensingBuilder(LensingBuilder):
             kappa.write(fname, clobber=True)
 
         return kappas
-    
+
     def construct_maps_alms(self, ikappas=None, skip_existing=False, check_read_existing=True):
         """Constructs and saves convergence maps from particle shells in the Born approximation, ie by summing the particle overdensity maps with appropriate weights computed with CCL.
 
@@ -239,7 +233,7 @@ class BornLensingBuilder(LensingBuilder):
             ikappas = [ikappas]
         else:
             pass
-        
+
         if skip_existing:
             _ikappas = []
             for ikappa in ikappas:
@@ -257,23 +251,19 @@ class BornLensingBuilder(LensingBuilder):
         else:
             _ikappas = ikappas
 
-        lmax = 3*self.nside - 1
+        lmax = 3 * self.nside - 1
         mmax = lmax
-        len_alm = int(mmax * (2 * lmax + 1 - mmax)/2 + lmax + 1)
-        klms = {
-            ikappa: np.zeros(len_alm, dtype=np.complex_)
-            for ikappa in _ikappas
-            }
-        
+        len_alm = int(mmax * (2 * lmax + 1 - mmax) / 2 + lmax + 1)
+        klms = {ikappa: np.zeros(len_alm, dtype=np.complex_) for ikappa in _ikappas}
+
         tracers = self.get_tracers()
-        
+
         for ishell in trange(self.nshells, desc="[construct_maps_alms]"):
             alms = hp.read_alm(self.shell_builder.get_fname(ishell, what='alms', force_fits=True))
             for ikappa in klms.keys():
                 w = self.compute_weight(ishell, tracers[ikappa])
-                klms[ikappa] += w*alms
+                klms[ikappa] += w * alms
 
         for ikappa, klm in klms.items():
             fname = self.get_fname(ikappa, what='alms', force_fits=True)
             hp.write_alm(fname, klm, overwrite=True)
-                

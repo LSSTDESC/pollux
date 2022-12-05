@@ -63,7 +63,9 @@ class ShellBuilder(MapBuilder):
 
         self.nshells = self.reader.nshells
 
-        base_fname = f'shell_{self.reader.kind}_seed{self.seed}'
+        base_fname = f'shell_{self.reader.kind}'
+        if apply_random_isometry:
+            base_fname += f'_seed{self.seed}'
 
         super().__init__(
             nside=nside,

@@ -5,7 +5,7 @@ import healpy as hp
 import numpy as np
 import pyccl
 
-from .utils import trim_array_min_diff, read_params
+from .utils import trim_array_min_diff, read_params, get_z_shell_fz
 
 os.environ["GENERICIO_NO_MPI"] = "y"
 try:
@@ -18,7 +18,7 @@ class Reader:
     """A generic class to read particles from N-body simulations.
     """
 
-    def __init__(self, kind, unit, nparticles, zsnapshots, nsubs, dtype=np.float64):
+    def __init__(self, kind, unit, nparticles, zsnapshots, nsubs, binning_match, dtype=np.float64):
         self.kind = kind
 
         assert unit in ["Mpc", "Mpc_over_h"]
@@ -30,6 +30,7 @@ class Reader:
         self.asnapshots = 1. / (1. + zsnapshots)
         self.nshells = len(zsnapshots)
         self.nsubs = nsubs
+        self.binning_match = binning_match
 
         # independent jobs
         self._sub_args = list(itertools.product(range(self.nshells), range(nsubs)))
@@ -44,11 +45,25 @@ class Reader:
         return np.argwhere([x[0] == ishell for x in self._sub_args])[:, 0]
 
     def get_com_shell_bins(self, cosmo):
-        raise NotImplementedError
+        return pyccl.comoving_radial_distance(cosmo, 1. / (1 + self.get_z_shell_bins(cosmo)))
 
-    def get_z_shell_bins(self, cosmo):
-        com_shell_bins = self.get_com_shell_bins(cosmo)
-        return 1. / pyccl.scale_factor_of_chi(cosmo, com_shell_bins) - 1.
+    def get_z_shell_bins(self, cosmo, return_fzbins=False):
+        if self.binning_match == 'center_redshift':
+            func = lambda z: z
+            ifunc = func
+        elif self.binning_match == 'center_scale_factor':
+            func = lambda z: 1. / (1. + z)
+            ifunc = lambda a: 1. / a - 1.
+        elif self.binning_match == 'center_comoving_distance':
+            func = lambda z: 1e-3 * pyccl.comoving_radial_distance(cosmo, 1. / (1. + z))
+            ifunc = None
+        elif self.binning_match == 'center_comoving_volume':
+            func = lambda z: (1e-3 * pyccl.comoving_radial_distance(cosmo, 1. / (1. + z)))**3
+            ifunc = None
+        else:
+            raise ValueError
+
+        return get_z_shell_fz(self.zsnapshots, func=func, ifunc=ifunc, return_fzbins=return_fzbins)
 
     def get_shell_info(self, cosmo, fname=None):
         z_shell_bins = self.get_z_shell_bins(cosmo)
@@ -80,7 +95,16 @@ class Reader:
 
 class SLICSReader(Reader):
 
-    def __init__(self, path, boxsize=505. / 0.6898, nparticles=1536**3, nodes_dim=4, ncc=768, rnc=3072.0):
+    def __init__(
+            self,
+            path,
+            boxsize=505. / 0.6898,
+            nparticles=1536**3,
+            nodes_dim=4,
+            ncc=768,
+            rnc=3072.0,
+            binning_match='center_comoving_distance'
+        ):
         """Reader for SLICS simulations by Joachim Harnois-Deraps.
 
         Parameters
@@ -110,31 +134,7 @@ class SLICSReader(Reader):
         # number of sub boxes (constant here)
         ncube = self.nodes_dim**3
 
-        super().__init__('slics', 'Mpc', nparticles, zsnapshots, ncube, dtype=np.float32)
-
-    def get_com_shell_bins(self, cosmo):
-        """Computes the comoving distances for the particle shells. Here, snapshots are at fixed comoving distance, therefore we use this to determine the furthest shell.
-
-        Parameters
-        ----------
-        cosmo
-            Cosmology object from CCL.
-
-        Returns
-        -------
-            Comving distances.
-        """
-        # TODO : make it a property
-
-        # compute comoving distances of the shell centers and widths (assuming)
-        com_snapshots = pyccl.comoving_radial_distance(cosmo, 1. / (1. + self.zsnapshots))
-
-        # compute bins in comoving distance
-        com_shell_bins = np.zeros(self.nshells + 1)
-        com_shell_bins[1:-1] = 0.5 * (com_snapshots[1:] + com_snapshots[:-1])
-        com_shell_bins[-1] = 2 * com_shell_bins[-2] - com_shell_bins[-3]  # fixed comoving distance width
-
-        return com_shell_bins
+        super().__init__('slics', 'Mpc', nparticles, zsnapshots, ncube, binning_match, dtype=np.float32)
 
     def get_boxsize(self, cosmo):
         return self.boxsize
@@ -194,7 +194,18 @@ class SLICSReader(Reader):
 
 class HACCReader(Reader):
 
-    def __init__(self, path, read_cosmo_params=False, nsteps=500, sim_zmin=0., sim_zmax=200., aminstep=0., zmax=None, group_along_x=False):
+    def __init__(
+            self,
+            path,
+            read_cosmo_params=False,
+            nsteps=500,
+            sim_zmin=0.,
+            sim_zmax=200.,
+            aminstep=0.,
+            zmax=None,
+            group_along_x=False,
+            binning_match='center_scale_factor'
+        ):
         """Reader for SLICS simulations by Joachim Harnois-Deraps.
 
         Parameters
@@ -239,7 +250,6 @@ class HACCReader(Reader):
 
         amax = 1. / (1. + sim_zmin)
         amin = 1. / (1. + sim_zmax)
-        # asnapshots_all = amin + (amax - amin) * (snapshots - snapshots[0]) / (snapshots[-1] - snapshots[0])
         asnapshots_all = np.linspace(amin, amax, nsteps + 1)[1:]
         asnapshots_all = asnapshots_all[snapshots]
 
@@ -273,32 +283,7 @@ class HACCReader(Reader):
         dtype = pygio.read_variable_dtypes(name)['x']
 
         nsub = 16 if self.group_along_x else 64
-        super().__init__('hacc', 'Mpc_over_h', nparticles, zsnapshots, nsub, dtype=dtype)
-
-    def get_com_shell_bins(self, cosmo):
-        """Computes the comoving distances for the particle shells. Here, snapshots are at fixed scale factor, therefore we use this to determine the furthest shell.
-
-        Parameters
-        ----------
-        cosmo
-            Cosmology object from CCL.
-
-        Returns
-        -------
-            Comving distances.
-        """
-        # TODO : make it a property
-
-        amids = 0.5 * (self.asnapshots[1:] + self.asnapshots[:-1])
-
-        # compute bins in comoving distance
-        com_shell_bins = np.zeros(self.nshells + 1)
-        com_shell_bins[1:-1] = pyccl.comoving_radial_distance(cosmo, amids)
-        com_shell_bins[-1] = pyccl.comoving_radial_distance(
-            cosmo, 2 * amids[-1] - amids[-2]
-            )  # fixed scake factor width
-
-        return com_shell_bins
+        super().__init__('hacc', 'Mpc_over_h', nparticles, zsnapshots, nsub, binning_match, dtype=dtype)
 
     def get_boxsize(self, cosmo):
         return self.boxsize_h / cosmo["h"]
@@ -397,20 +382,25 @@ class DummyReader(Reader):
 
 class SkySimReader(HACCReader):
 
-    def __init__(self, path, nsteps=500, sim_zmin=0., sim_zmax=200., aminstep=0., zmax=None):
+    def __init__(
+            self,
+            path,
+            nsteps=500,
+            sim_zmin=0.,
+            sim_zmax=200.,
+            aminstep=0.,
+            zmax=None,
+            binning_match='center_scale_factor'
+        ):
         self.path = path
         self.aminstep = aminstep
 
-        # # simulation snapshot redshifts : step are constant in scale factor, but only a fraction of steps are saved
-        # snapshot_dirs = os.listdir(os.path.join(path, 'output'))
-        # snapshots = np.array([i for i in range(nsteps) if f'STEP{i}' in snapshot_dirs])
         mass_sheets_fname = list(sorted(filter(lambda s: s.endswith('.bin'), os.listdir(path))))
         mass_sheets_fname.remove('density_map_259_dens.bin')
         snapshots = np.array([i for i in range(nsteps) if f'density_map_{i}_dens.bin' in mass_sheets_fname])
 
         amax = 1. / (1. + sim_zmin)
         amin = 1. / (1. + sim_zmax)
-        # asnapshots_all = amin + (amax - amin) * (snapshots - snapshots[0]) / (snapshots[-1] - snapshots[0])
         asnapshots_all = np.linspace(amin, amax, nsteps + 1)[1:]
         asnapshots_all = asnapshots_all[snapshots]
 
@@ -428,15 +418,9 @@ class SkySimReader(HACCReader):
                 pass
 
         # some simulation properties
-        # step = self.snapshots[0]
-        # name = os.path.join(self.path, 'output', f'STEP{step}/m000.full.mpicosmo.{step}#0')
-        # self.boxsize_h = pygio.read_phys_scale(name)[0]
-        # nparticles = pygio.read_num_elems(name[:-2])
-        # dtype = pygio.read_variable_dtypes(name)['x']
         nparticles = 10240**3
         self.boxsize_h = 3e3
         dtype = np.float32
         nsub = 1
 
-        # super().__init__
-        Reader.__init__(self, 'skysim', 'Mpc_over_h', nparticles, zsnapshots, nsub, dtype=dtype)
+        Reader.__init__(self, 'skysim', 'Mpc_over_h', nparticles, zsnapshots, nsub, binning_match, dtype=dtype)

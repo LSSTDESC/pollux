@@ -87,46 +87,32 @@ class ShellBuilder(MapBuilder):
         # Particle subsampling
         assert subsample_box == 'auto' or type(subsample_box) is float or subsample_box is None
 
+    def _get_dndz(self, zz):
+        aa = 1. / (1. + zz)
+        dVdz = pyccl.comoving_angular_distance(self.cosmo, aa)**2 / pyccl.background.h_over_h0(self.cosmo, aa)
+        return dVdz / np.trapz(dVdz, zz) # rough normalization
+
     def get_tracers(self, Nz=1000):
         z_shell_bins = self.reader.get_z_shell_bins(self.cosmo)
 
-        # zz = np.linspace(0, z_shell_bins[-1], Nz)
-
-        # return [
-        #     pyccl.NumberCountsTracer(
-        #         self.cosmo,
-        #         False,
-        #         dndz=(
-        #             zz,
-        #             scipy.stats.uniform.pdf(
-        #                 zz, loc=z_shell_bins[ishell], scale=z_shell_bins[ishell + 1] - z_shell_bins[ishell]
-        #                 )
-        #             ),
-        #         bias=(zz, np.ones_like(zz))
-        #         )
-        #     ]
-
-        ones = np.ones(Nz)
         tracers = []
         for ishell in range(self.nshells):
             zz = np.linspace(z_shell_bins[ishell], z_shell_bins[ishell + 1], Nz)
-            tracers.append(pyccl.NumberCountsTracer(self.cosmo, False, dndz=(zz, ones), bias=(zz, ones)))
+            dndz = self._get_dndz(zz)
+            tracers.append(pyccl.NumberCountsTracer(self.cosmo, False, dndz=(zz, dndz), bias=(zz, np.ones_like(zz))))
 
         return tracers
 
     def get_tracers_sacc(self, Nz=1000):
         z_shell_bins = self.reader.get_z_shell_bins(self.cosmo)
 
-        zz = np.linspace(0, z_shell_bins[-1], Nz)
+        tracers = []
+        for ishell in range(self.nshells):
+            zz = np.linspace(z_shell_bins[ishell], z_shell_bins[ishell + 1], Nz)
+            dndz = self._get_dndz(zz)
+            tracers.append(sacc.tracers.NZTracer(f"density_{ishell}", zz, dndz))
 
-        return [
-            sacc.tracers.NZTracer(
-                f"density_{ishell}", zz,
-                scipy.stats.uniform.pdf(
-                    zz, loc=z_shell_bins[ishell], scale=z_shell_bins[ishell + 1] - z_shell_bins[ishell]
-                    )
-                ) for ishell in range(self.nshells)
-            ]
+        return tracers
 
     def get_random_isometries(self):
         """Generates random isometries for each shell.

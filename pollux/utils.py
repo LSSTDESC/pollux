@@ -6,6 +6,7 @@ import healpy as hp
 import numba
 import numpy as np
 import pymaster as nmt
+from pynverse import inversefunc
 from scipy.spatial.transform import Rotation
 
 # @numba.njit(parallel=False)
@@ -23,6 +24,7 @@ def xyz2r2(xyz):
 # @numba.njit(parallel=True)
 # def xyz2r(xyz):
 #     return np.sqrt(xyz2r2(xyz))
+
 
 # @numba.njit(parallel=True)
 # def xyzr2tp(xyz, r):
@@ -429,3 +431,19 @@ def read_params(fname):
                 except ValueError:
                     pass
     return params
+
+
+def get_z_shell_fz(zsnapshots, func=None, ifunc=None, return_fzbins=False):
+    assert func or ifunc
+    if func is None:
+        func = inversefunc(ifunc, domain=[0., None], image=[0., None])
+    if ifunc is None:
+        ifunc = inversefunc(func, domain=[0., None], image=[0., None])
+    nshell = len(zsnapshots)
+    z_shell_bins = np.zeros(nshell + 1)
+    z_shell_bins[1:nshell] = ifunc(0.5 * (func(zsnapshots[:-1]) + func(zsnapshots[1:])))
+    z_shell_bins[nshell] = ifunc(2 * func(zsnapshots[-1]) - func(z_shell_bins[nshell - 1]))
+    if return_fzbins:
+        return z_shell_bins, func(z_shell_bins)
+    else:
+        return z_shell_bins

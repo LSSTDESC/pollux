@@ -290,8 +290,8 @@ class HACCReader(Reader):
             snapshots = snapshots[idx]
 
         # done with subsampling !
-        self.snapshots = snapshots
-        zsnapshots = 1. / get_asnapshots(snapshots)[::-1] - 1.
+        self.snapshots = snapshots[::-1] # snapshots ordered by redshift
+        zsnapshots = 1. / get_asnapshots(snapshots) - 1.
 
         # simulation properties
         step = self.snapshots[0]
@@ -337,7 +337,10 @@ class HACCReader(Reader):
         istep, ibox = self._sub_args[isub]
         step = self.snapshots[istep]
 
-        assert h_to_divide_by is not None, "HACC uses Mpc/h units, so we need h here!"
+        if not hasattr(self, 'cosmo'):
+            assert h_to_divide_by is not None, "HACC uses Mpc/h units, so we need h here!"
+        else:
+            h_to_divide_by = self.cosmo['h']
         boxsize = self.boxsize_h / h_to_divide_by
 
         if self.group_along_x:

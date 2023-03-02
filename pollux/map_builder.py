@@ -152,7 +152,7 @@ class MapBuilder:
         else:
             return maps
 
-    def plot_maps(self, maps, nx=None, log=False, title_prefix=None, cbar=False, **kwargs):
+    def plot_maps(self, maps, nx=None, log=False, title_prefix=None, cbar=True, **kwargs):
         """Plots particle maps.
 
         Parameters

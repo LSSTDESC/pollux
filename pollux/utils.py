@@ -7,7 +7,17 @@ import numba
 import numpy as np
 import pymaster as nmt
 from pynverse import inversefunc
+from scipy.integrate import quad as scipy_quad
 from scipy.spatial.transform import Rotation
+
+QUAD_EPS_REL = 1e-6
+QUAD_EPS_ABS = 0.
+QUAD_LIMIT = 1000
+
+
+def quad(*args, **kwargs):
+    return scipy_quad(*args, epsabs=QUAD_EPS_ABS, epsrel=QUAD_EPS_REL, limit=QUAD_LIMIT, **kwargs)[0]
+
 
 # @numba.njit(parallel=False)
 # def _add_at_one(a, index):
@@ -24,7 +34,6 @@ def xyz2r2(xyz):
 # @numba.njit(parallel=True)
 # def xyz2r(xyz):
 #     return np.sqrt(xyz2r2(xyz))
-
 
 # @numba.njit(parallel=True)
 # def xyzr2tp(xyz, r):

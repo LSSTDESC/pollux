@@ -3,12 +3,10 @@ import healsparse
 import numpy as np
 import pyccl
 import sacc
-import scipy.stats
 from tqdm.auto import tqdm, trange
 
 from .map_builder import MapBuilder
 from .utils import *
-from .utils import _construct_shell_sub
 
 
 class ShellBuilder(MapBuilder):
@@ -90,7 +88,7 @@ class ShellBuilder(MapBuilder):
     def _get_dndz(self, zz):
         aa = 1. / (1. + zz)
         dVdz = pyccl.comoving_angular_distance(self.cosmo, aa)**2 / pyccl.background.h_over_h0(self.cosmo, aa)
-        return dVdz / np.trapz(dVdz, zz) # rough normalization
+        return dVdz / np.trapz(dVdz, zz)  # rough normalization
 
     def get_tracers(self, Nz=1000):
         z_shell_bins = self.reader.get_z_shell_bins(self.cosmo)
@@ -113,6 +111,16 @@ class ShellBuilder(MapBuilder):
             tracers.append(sacc.tracers.NZTracer(f"density_{ishell}", zz, dndz))
 
         return tracers
+
+    def get_mean_z(self, ishell):
+        z_shell_bins = self.reader.get_z_shell_bins(self.cosmo)
+        amin = 1. / (1. + z_shell_bins[ishell + 1])
+        amax = 1. / (1. + z_shell_bins[ishell])
+        dVdz = lambda a: pyccl.comoving_angular_distance(self.cosmo, a)**2 / pyccl.background.h_over_h0(self.cosmo, a)
+
+        amean = quad(lambda a: a * dVdz(a), amin, amax) / quad(dVdz, amin, amax)
+
+        return 1. / amean - 1.
 
     def get_random_isometries(self):
         """Generates random isometries for each shell.

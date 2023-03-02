@@ -48,22 +48,26 @@ class Reader:
         return pyccl.comoving_radial_distance(cosmo, 1. / (1 + self.get_z_shell_bins(cosmo)))
 
     def get_z_shell_bins(self, cosmo, return_fzbins=False):
-        if self.binning_match == 'center_redshift':
-            func = lambda z: z
-            ifunc = func
-        elif self.binning_match == 'center_scale_factor':
-            func = lambda z: 1. / (1. + z)
-            ifunc = lambda a: 1. / a - 1.
-        elif self.binning_match == 'center_comoving_distance':
-            func = lambda z: 1e-3 * pyccl.comoving_radial_distance(cosmo, 1. / (1. + z))
-            ifunc = None
-        elif self.binning_match == 'center_comoving_volume':
-            func = lambda z: (1e-3 * pyccl.comoving_radial_distance(cosmo, 1. / (1. + z)))**3
-            ifunc = None
+        if hasattr(self, 'z_shell_bins'):
+            return self.z_shell_bins
         else:
-            raise ValueError
-
-        return get_z_shell_fz(self.zsnapshots, func=func, ifunc=ifunc, return_fzbins=return_fzbins)
+            if self.binning_match == 'center_redshift':
+                func = lambda z: z
+                ifunc = func
+            elif self.binning_match == 'center_scale_factor':
+                func = lambda z: 1. / (1. + z)
+                ifunc = lambda a: 1. / a - 1.
+            elif self.binning_match == 'center_comoving_distance':
+                func = lambda z: 1e-3 * pyccl.comoving_radial_distance(cosmo, 1. / (1. + z))
+                ifunc = None
+            elif self.binning_match == 'center_comoving_volume':
+                func = lambda z: (1e-3 * pyccl.comoving_radial_distance(cosmo, 1. / (1. + z)))**3
+                ifunc = None
+            else:
+                raise ValueError
+            self.z_shell_bins = get_z_shell_fz(self.zsnapshots, func=func, ifunc=ifunc, return_fzbins=return_fzbins)
+            
+            return self.z_shell_bins
 
     def get_shell_info(self, cosmo, fname=None):
         z_shell_bins = self.get_z_shell_bins(cosmo)

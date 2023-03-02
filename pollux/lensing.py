@@ -56,8 +56,7 @@ class LensingBuilder(MapBuilder):
             base_fname=base_fname,
             nmaps=self.nkappas,
             sacc_type="galaxy_convergence_cl",
-            **kwargs
-            )
+            **kwargs)
 
     def get_tracers(self, Nz=1000):
         z_shell_bins = self.reader.get_z_shell_bins(self.cosmo)
@@ -103,8 +102,7 @@ class LensingBuilder(MapBuilder):
             lmax=None,
             skip_existing=False,
             check_read_existing=True,
-            use_precomputed_alms=False
-        ):
+            use_precomputed_alms=False):
         if lmax is None:
             lmax = 3 * self.shell_builder.nside - 1
 
@@ -118,9 +116,9 @@ class LensingBuilder(MapBuilder):
         alms = []
         for ikappa in self.tqdm(ikappas, desc="[compute_shear_maps]"):
             if skip_existing:
-                if self.check_maps(
-                    read=check_read_existing, fname=self.get_fname(ikappa, what='gamma1')
-                    ) and self.check_maps(read=check_read_existing, fname=self.get_fname(ikappa, what='gamma2')):
+                if self.check_maps(read=check_read_existing, fname=self.get_fname(
+                        ikappa, what='gamma1')) and self.check_maps(read=check_read_existing, fname=self.get_fname(
+                            ikappa, what='gamma2')):
                     continue
 
             # Get harmonic coefficients of convergence map
@@ -165,8 +163,7 @@ class BornLensingBuilder(LensingBuilder):
             dtype=np.float32,
             multiple_planes=False,
             nbar_from_maps=False,
-            **kwargs
-        ):
+            **kwargs):
         super().__init__(shell_builder, nzs, kappa_dir=kappa_dir, dtype=dtype, **kwargs)
 
         self.multiple_planes = multiple_planes
@@ -185,7 +182,7 @@ class BornLensingBuilder(LensingBuilder):
             self.dndz_norm = [
                 quad(lambda z: t.get_dndz(z), 0., zmax) if isinstance(t, pyccl.tracers.WeakLensingTracer) else np.nan
                 for t in self.get_tracers()
-                ]
+            ]
 
     def compute_weight(self, ishell, tracer, dndz_norm=None, zlens=None):
         if self.multiple_planes:
@@ -195,8 +192,7 @@ class BornLensingBuilder(LensingBuilder):
                 zlens = self.shell_builder.get_mean_z(ishell)
 
             d_A_lens = pyccl.angular_diameter_distance(
-                self.cosmo, 1. / (1. + zlens)
-                )  # needed to obtain surface mass density in 1/Mpc^2
+                self.cosmo, 1. / (1. + zlens))  # needed to obtain surface mass density in 1/Mpc^2
 
             if isinstance(tracer, pyccl.tracers.WeakLensingTracer):
                 if dndz_norm is None:
@@ -204,8 +200,7 @@ class BornLensingBuilder(LensingBuilder):
 
                 def integrand(zsource, zlens, tracer):
                     sigma_critical = pyccl.background.sigma_critical(
-                        self.cosmo, 1. / (1. + zlens), 1. / (1. + zsource)
-                        )  # in Msun / Mpc^2
+                        self.cosmo, 1. / (1. + zlens), 1. / (1. + zsource))  # in Msun / Mpc^2
                     return tracer.get_dndz(zsource) / sigma_critical
 
                 w = quad(integrand, zlens, zmax, args=(zlens, tracer)) / dndz_norm
@@ -214,8 +209,7 @@ class BornLensingBuilder(LensingBuilder):
                 zsource = tracer.z_source
                 if zsource > zlens:
                     w = 1. / pyccl.background.sigma_critical(
-                        self.cosmo, 1. / (1. + zlens), 1. / (1. + zsource)
-                        )  # in Msun / Mpc^2
+                        self.cosmo, 1. / (1. + zlens), 1. / (1. + zsource))  # in Msun / Mpc^2
                 else:
                     w = 0.
             else:
@@ -260,7 +254,7 @@ class BornLensingBuilder(LensingBuilder):
         kappas = {
             ikappa: healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
             for ikappa in _ikappas
-            }
+        }
 
         tracers = self.get_tracers()
 

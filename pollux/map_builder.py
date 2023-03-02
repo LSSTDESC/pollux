@@ -28,8 +28,7 @@ class MapBuilder:
             wsp_dir=None,
             sacc_type=None,
             b=None,
-            nlb=20
-        ):
+            nlb=20):
         self.nside = nside
         self.npix = hp.nside2npix(nside)
         self.dtype = dtype
@@ -184,8 +183,7 @@ class MapBuilder:
             title = title_prefix + f" {imap}" if title_prefix is not None else None
             if self.octant_only:
                 hp.orthview(
-                    hp_map, rot=(35, 20), half_sky=True, sub=(ny, nx, imap + 1), title=title, cbar=cbar, **kwargs
-                    )
+                    hp_map, rot=(35, 20), half_sky=True, sub=(ny, nx, imap + 1), title=title, cbar=cbar, **kwargs)
             else:
                 hp.mollview(hp_map, sub=(ny, nx, imap + 1), title=title, cbar=cbar, **kwargs)
         hp.graticule(verbose=False)
@@ -367,7 +365,7 @@ class MapBuilder:
             for i in range(self.nmaps):
                 for j in range(self.nmaps):
                     if (tracers[i], tracers[j]) in tc:
-                        ell, cls_out[i,j] = s.get_ell_cl(self.sacc_type, tracers[i], tracers[j])
+                        ell, cls_out[i, j] = s.get_ell_cl(self.sacc_type, tracers[i], tracers[j])
             return ell, cls_out
         else:
             return s
@@ -424,8 +422,7 @@ class MapBuilder:
             data_only=False,
             ratio_data_theory=False,
             save=True,
-            sharey=None
-        ):
+            sharey=None):
         n = self.nmaps
         m = 1 if auto_only else n
         sharey = sharey or False  #False if auto_only else 'row'
@@ -464,8 +461,7 @@ class MapBuilder:
                             c='dodgerblue',
                             ls=' ',
                             marker='o',
-                            markersize=5
-                            )
+                            markersize=5)
                         ax_used = True
                 if ax_used:
                     ax.set_xlabel('Multipole $\ell$')

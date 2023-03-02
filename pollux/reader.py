@@ -75,8 +75,7 @@ class Reader:
         dtypes = ['int', 'float', 'float', 'float', 'int']
         out = np.array(
             list(zip(np.arange(self.nshells), self.zsnapshots, z_shell_bins[:-1], z_shell_bins[1:], self.snapshots)),
-            dtype=list(zip(names, dtypes))
-            )
+            dtype=list(zip(names, dtypes)))
         if fname is not None:
             np.savetxt(fname, out, header=' '.join(names), fmt='%8i %16.8f %16.8f %16.8f %8i')
         return out
@@ -107,8 +106,7 @@ class SLICSReader(Reader):
             nodes_dim=4,
             ncc=768,
             rnc=3072.0,
-            binning_match='center_comoving_distance'
-        ):
+            binning_match='center_comoving_distance'):
         """Reader for SLICS simulations by Joachim Harnois-Deraps.
 
         Parameters
@@ -199,18 +197,17 @@ class SLICSReader(Reader):
 class HACCReader(Reader):
 
     def __init__(
-        self,
-        path,
-        read_cosmo_params=False,
-        nsteps=500,
-        sim_zmin=0.,
-        sim_zmax=200.,
-        zmax=None,
-        aminstep=0.,
-        sampling_match_n=False,
-        binning_match='center_scale_factor',
-        group_along_x=False,
-        ):
+            self,
+            path,
+            read_cosmo_params=False,
+            nsteps=500,
+            sim_zmin=0.,
+            sim_zmax=200.,
+            zmax=None,
+            aminstep=0.,
+            sampling_match_n=False,
+            binning_match='center_scale_factor',
+            group_along_x=False):
         """Reader for SLICS simulations by Joachim Harnois-Deraps.
 
         Parameters
@@ -242,8 +239,7 @@ class HACCReader(Reader):
                 h=float(params['HUBBLE']),
                 n_s=float(params['NS']),
                 sigma8=float(params['SS8']),
-                Omega_k=0.
-                )
+                Omega_k=0.)
             # read and override parameters to determine redshifts of snapshots
             nsteps = int(params['N_STEPS'])
             sim_zmax = float(params['Z_IN'])
@@ -290,7 +286,7 @@ class HACCReader(Reader):
             snapshots = snapshots[idx]
 
         # done with subsampling !
-        self.snapshots = snapshots[::-1] # snapshots ordered by redshift
+        self.snapshots = snapshots[::-1]  # snapshots ordered by redshift
         zsnapshots = 1. / get_asnapshots(snapshots) - 1.
 
         # simulation properties
@@ -301,14 +297,10 @@ class HACCReader(Reader):
         dtype = pygio.read_variable_dtypes(name)['x']
 
         # simulation box limits
-        self.lims = np.array(
-            [
-                [
-                    [np.floor(ibox / (16)) * 0.5, np.floor(ibox / (16)) * 0.5 + 2.5],
-                    [np.floor(ibox / 4) % 4, (np.floor(ibox / 4) % 4) + 1], [ibox % 4, (ibox % 4) + 1]
-                    ] for ibox in range(64)
-                ]
-            )
+        self.lims = np.array([[[np.floor(ibox / (16)) * 0.5,
+                                np.floor(ibox / (16)) * 0.5 + 2.5],
+                               [np.floor(ibox / 4) % 4, (np.floor(ibox / 4) % 4) + 1], [ibox % 4, (ibox % 4) + 1]]
+                              for ibox in range(64)])
 
         nsub = 16 if self.group_along_x else 64
         super().__init__('hacc', 'Mpc_over_h', nparticles, zsnapshots, nsub, binning_match, dtype=dtype)
@@ -421,8 +413,7 @@ class SkySimReader(HACCReader):
             sim_zmax=200.,
             aminstep=0.,
             zmax=None,
-            binning_match='center_scale_factor'
-        ):
+            binning_match='center_scale_factor'):
         self.path = path
         self.aminstep = aminstep
 

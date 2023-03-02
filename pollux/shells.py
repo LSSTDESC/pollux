@@ -23,8 +23,7 @@ class ShellBuilder(MapBuilder):
             subsample_box=None,
             z_subsample_auto=2.,
             group_isometries=None,
-            **kwargs
-        ):
+            **kwargs):
         """An object to handle the computation of particle shells from an N-body simulation.
 
         Parameters
@@ -72,8 +71,7 @@ class ShellBuilder(MapBuilder):
             base_fname=base_fname,
             nmaps=self.nshells,
             sacc_type="galaxy_density_cl",
-            **kwargs
-            )
+            **kwargs)
 
         if dtype == np.int32:
             print(f"Warning: the max value for {dtype} might not be enough : {np.iinfo(dtype)}")
@@ -194,9 +192,9 @@ class ShellBuilder(MapBuilder):
     def get_subsample_ratio(self, ishell):
         if self.subsample_box == 'auto':
             if not hasattr(self, 'subsample_ratios'):
-                ngal_pix = np.array(
-                    [self.estimate_repeats(ishell) for ishell in range(self.nshells)]
-                    ) * self.reader.nparticles / (hp.nside2npix(self.nside))  # estimated number of galaxies per pixel
+                # estimated number of galaxies per pixel
+                ngal_pix = np.array([self.estimate_repeats(ishell) for ishell in range(self.nshells)
+                                    ]) * self.reader.nparticles / self.npix
                 if self.octant_only:
                     ngal_pix *= 8.
                 snr_pix = 1. / np.sqrt(ngal_pix)  # S/N per pixel
@@ -250,8 +248,7 @@ class ShellBuilder(MapBuilder):
             debug=False,
             repeat_ixyz=None,
             get_repeats_only=False,
-            fast=True
-        ):
+            fast=True):
         """Constructs a single shell from a simulation sub-volume/snapshot, applying isometries and repeating it as necessary.
 
         Parameters
@@ -311,8 +308,7 @@ class ShellBuilder(MapBuilder):
         xyz, box_edges_original = self.reader.read_sub(
             isub,
             read_box_edges_only=get_repeats_only,
-            h_to_divide_by=None if self.reader.unit == 'Mpc' else np.float64(self.cosmo["h"])
-            )
+            h_to_divide_by=None if self.reader.unit == 'Mpc' else np.float64(self.cosmo["h"]))
         if verbose:
             print(f"Loaded box {isub} (shell {ishell}) with {len(xyz)} particles.")
 
@@ -337,8 +333,7 @@ class ShellBuilder(MapBuilder):
             npix = hp.nside2npix(nside)
             u, c = _construct_shell_sub(
                 xyz, box_edges_original, Abs[ishell][0], Abs[ishell][1], nrepeat, boxsize, rmin2, rmax2,
-                self.apply_random_isometry, self.octant_only, nside, order, ncap, npix
-                )
+                self.apply_random_isometry, self.octant_only, nside, order, ncap, npix)
             if len(u) > 0:
                 shell.update_values_pix(u, c.astype(self.dtype))
 
@@ -362,8 +357,8 @@ class ShellBuilder(MapBuilder):
 
                         # compute shift
                         shift_original = (
-                            np.array([ix, iy, iz], dtype=self.reader.dtype) * self.reader.get_boxsize(self.cosmo)
-                            )[None, :]
+                            np.array([ix, iy, iz], dtype=self.reader.dtype) *
+                            self.reader.get_boxsize(self.cosmo))[None, :]
                         if self.apply_random_isometry:
                             shift = Ax(Abs[ishell][0], shift_original)
                         else:

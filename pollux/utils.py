@@ -170,15 +170,13 @@ def make_nmtbin(
         verbose=False,
         b_lmax=None,
         bins_ell=None,
-        **kwargs
-    ):
+        **kwargs):
     # Define ell range
     ells = np.arange(lmin, lmax + 1)
 
     if lmax > 3 * nside:
         warnings.warn(
-            "Warning: lmax>3*nside so multipoles will be removed after 3*snide, but lmax will be used for binning."
-            )
+            "Warning: lmax>3*nside so multipoles will be removed after 3*snide, but lmax will be used for binning.")
 
     # Make bin limits
     if bins_ell is not None:
@@ -329,8 +327,7 @@ def _vec2pix(nside, order, ncap, npix, x, y, z, shiftx, shifty, shiftz, rmin2, r
     ipix = np.zeros(n, dtype=np.int_)
     for i in numba.prange(n):
         ipix[i] = _vec2pix_sub(
-            nside, order, ncap, npix, x[i], y[i], z[i], shiftx, shifty, shiftz, rmin2, rmax2, octant_only
-            )
+            nside, order, ncap, npix, x[i], y[i], z[i], shiftx, shifty, shiftz, rmin2, rmax2, octant_only)
     return ipix
 
 
@@ -362,8 +359,7 @@ def vec2pix_unique(nside, x, y, z, shiftx, shifty, shiftz, rmin2, rmax2, octant_
 @numba.njit
 def _construct_shell_sub(
         xyz, box_edges_original, A, b, nrepeat, boxsize, rmin2, rmax2, apply_random_isometry, octant_only, nside, order,
-        ncap, npix
-    ):
+        ncap, npix):
     n = len(xyz)
 
     # precompute isometry on particles (since repeats are then only a shift away)
@@ -419,8 +415,7 @@ def _construct_shell_sub(
                 # compute corresponding healpy pixels of all particles (particles out of shell/octant quickly set to -1) with vec2pix and loc2pix (translated into python from Healpix code)
                 ipix = _vec2pix(
                     nside, order, ncap, npix, xyz[:, 0], xyz[:, 1], xyz[:, 2], shift[0, 0], shift[0, 1], shift[0, 2],
-                    rmin2, rmax2, octant_only
-                    )
+                    rmin2, rmax2, octant_only)
 
                 for i in range(n):
                     pos = ipix[i]
@@ -458,7 +453,7 @@ def get_z_shell_fz(zsnapshots, func=None, ifunc=None, return_fzbins=False):
         return z_shell_bins, func(z_shell_bins)
     else:
         return z_shell_bins
-    
+
 
 def get_trunc_norm(myclip_a, myclip_b, loc, scale):
     a, b = (myclip_a - loc) / scale, (myclip_b - loc) / scale
@@ -466,14 +461,14 @@ def get_trunc_norm(myclip_a, myclip_b, loc, scale):
 
 
 def subsample_ppf(z, n, ppf, check_unique=True, keep_first_last=True):
-    tree = KDTree(z[:,None])
-    u = np.linspace(0,1,n+1)
+    tree = KDTree(z[:, None])
+    u = np.linspace(0, 1, n + 1)
     if keep_first_last:
-        u = np.linspace(0,1,n)
-        best_idx = tree.query(ppf(u)[:,None])[1]
+        u = np.linspace(0, 1, n)
+        best_idx = tree.query(ppf(u)[:, None])[1]
     else:
-        umid = 0.5*(u[1:]+u[:-1])
-        best_idx = tree.query(ppf(umid)[:,None])[1]
+        umid = 0.5 * (u[1:] + u[:-1])
+        best_idx = tree.query(ppf(umid)[:, None])[1]
     if check_unique:
-        assert len(np.unique(best_idx))==len(best_idx)
+        assert len(np.unique(best_idx)) == len(best_idx)
     return best_idx, z[best_idx]

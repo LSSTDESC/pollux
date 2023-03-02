@@ -287,7 +287,7 @@ class HACCReader(Reader):
 
         # done with subsampling !
         self.snapshots = snapshots[::-1]  # snapshots ordered by redshift
-        zsnapshots = 1. / get_asnapshots(snapshots) - 1.
+        zsnapshots = 1. / get_asnapshots(self.snapshots) - 1.
 
         # simulation properties
         step = self.snapshots[0]

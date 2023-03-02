@@ -5,10 +5,17 @@ import healsparse
 import numpy as np
 import pyccl
 import sacc
-from scipy.integrate import quad
-from tqdm.auto import tqdm, trange
+from tqdm.auto import trange
 
 from .map_builder import MapBuilder
+from .utils import quad
+
+
+class MyCMBLensingTracer(pyccl.CMBLensingTracer):
+
+    def __init__(self, cosmo, z_source, n_samples=100):
+        super().__init__(cosmo, z_source, n_samples=100)
+        self.z_source = z_source
 
 
 class LensingBuilder(MapBuilder):
@@ -53,18 +60,16 @@ class LensingBuilder(MapBuilder):
             )
 
     def get_tracers(self, Nz=1000):
-        self.com_shell_bins = self.reader.get_com_shell_bins(self.cosmo)
-        z_shell_bins = 1. / pyccl.scale_factor_of_chi(self.cosmo, self.com_shell_bins) - 1.
-
-        zz = np.linspace(0, z_shell_bins[-1], Nz)
+        z_shell_bins = self.reader.get_z_shell_bins(self.cosmo)
 
         tracers = []
         if self.nzs == 'zsnapshots':
             for z_source in z_shell_bins[1:]:
-                tracers.append(pyccl.CMBLensingTracer(self.cosmo, z_source))
+                tracers.append(MyCMBLensingTracer(self.cosmo, z_source))
         else:
             for nz in self.nzs:
                 if callable(nz):
+                    zz = np.linspace(0, z_shell_bins[-1], Nz)
                     tracers.append(pyccl.WeakLensingTracer(self.cosmo, (zz, nz(zz))))
                 else:
                     tracers.append(pyccl.WeakLensingTracer(self.cosmo, (nz[0], nz[1])))
@@ -72,10 +77,7 @@ class LensingBuilder(MapBuilder):
         return tracers
 
     def get_tracers_sacc(self, Nz=1000):
-        self.com_shell_bins = self.reader.get_com_shell_bins(self.cosmo)
-        z_shell_bins = 1. / pyccl.scale_factor_of_chi(self.cosmo, self.com_shell_bins) - 1.
-
-        zz = np.linspace(0, z_shell_bins[-1], Nz)
+        z_shell_bins = self.reader.get_z_shell_bins(self.cosmo)
 
         tracers = []
         if self.nzs == 'zsnapshots':
@@ -84,6 +86,7 @@ class LensingBuilder(MapBuilder):
         else:
             for i, nz in enumerate(self.nzs):
                 if callable(nz):
+                    zz = np.linspace(0, z_shell_bins[-1], Nz)
                     tracers.append(sacc.tracers.NZTracer(f"kappa_{i}", zz, nz(zz)))
                 else:
                     tracers.append(sacc.tracers.NZTracer(f"kappa_{i}", nz[0], nz[1]))
@@ -154,12 +157,74 @@ class LensingBuilder(MapBuilder):
 
 class BornLensingBuilder(LensingBuilder):
 
-    def compute_weight(self, ishell, tracer):
+    def __init__(
+            self,
+            shell_builder,
+            nzs,
+            kappa_dir=None,
+            dtype=np.float32,
+            multiple_planes=False,
+            nbar_from_maps=False,
+            **kwargs
+        ):
+        super().__init__(shell_builder, nzs, kappa_dir=kappa_dir, dtype=dtype, **kwargs)
 
-        chi_max = self.com_shell_bins[ishell + 1]
-        chi_min = self.com_shell_bins[ishell]
+        self.multiple_planes = multiple_planes
+        self.nbar_from_maps = nbar_from_maps
 
-        return quad(lambda chi: tracer.get_kernel(chi), chi_min, chi_max)[0]
+        if multiple_planes:
+            rho_m = pyccl.background.rho_x(self.cosmo, 1., 'matter', is_comoving=True)  #  in units of Msun / Mpc^3
+            vol = self.reader.get_boxsize(self.cosmo)**3  # in Mpc^3
+            mpart = rho_m * vol / self.reader.nparticles  # in Msun
+
+            area = hp.nside2pixarea(self.nside)
+
+            self.mpart_over_area = mpart / area
+
+            zmax = self.reader.get_z_shell_bins(self.cosmo)[-1]
+            self.dndz_norm = [
+                quad(lambda z: t.get_dndz(z), 0., zmax) if isinstance(t, pyccl.tracers.WeakLensingTracer) else np.nan
+                for t in self.get_tracers()
+                ]
+
+    def compute_weight(self, ishell, tracer, dndz_norm=None, zlens=None):
+        if self.multiple_planes:
+            zmax = self.reader.get_z_shell_bins(self.cosmo)[-1]
+
+            if zlens is None:
+                zlens = self.shell_builder.get_mean_z(ishell)
+
+            d_A_lens = pyccl.angular_diameter_distance(
+                self.cosmo, 1. / (1. + zlens)
+                )  # needed to obtain surface mass density in 1/Mpc^2
+
+            if isinstance(tracer, pyccl.tracers.WeakLensingTracer):
+                if dndz_norm is None:
+                    dndz_norm = quad(lambda z: tracer.get_dndz(z), 0., zmax)
+
+                def integrand(zsource, zlens, tracer):
+                    sigma_critical = pyccl.background.sigma_critical(
+                        self.cosmo, 1. / (1. + zlens), 1. / (1. + zsource)
+                        )  # in Msun / Mpc^2
+                    return tracer.get_dndz(zsource) / sigma_critical
+
+                w = quad(integrand, zlens, zmax, args=(zlens, tracer)) / dndz_norm
+
+            elif isinstance(tracer, pyccl.tracers.CMBLensingTracer):
+                zsource = tracer.z_source
+                if zsource > zlens:
+                    w = 1. / pyccl.background.sigma_critical(
+                        self.cosmo, 1. / (1. + zlens), 1. / (1. + zsource)
+                        )  # in Msun / Mpc^2
+                else:
+                    w = 0.
+            else:
+                raise ValueError
+
+            return w * self.mpart_over_area / d_A_lens**2
+        else:
+            chi_min, chi_max = self.reader.get_com_shell_bins(self.cosmo)[ishell:ishell + 2]
+            return quad(lambda chi: tracer.get_kernel(chi), chi_min, chi_max)
 
     def construct_maps(self, ikappas=None, skip_existing=False, check_read_existing=True):
         """Constructs and saves convergence maps from particle shells in the Born approximation, ie by summing the particle overdensity maps with appropriate weights computed with CCL.
@@ -201,11 +266,21 @@ class BornLensingBuilder(LensingBuilder):
 
         for ishell in trange(self.nshells, desc="[construct_maps]"):
             shell = (self.shell_builder.load_maps(ishell)).astype(self.dtype)
-            nbar = self.shell_builder.get_pixel_density(ishell)
+            if self.nbar_from_maps:
+                s = shell[:]
+                nbar = np.mean(s[s > 0.])
+            else:
+                nbar = self.shell_builder.get_pixel_density(ishell)
+
+            zlens = self.shell_builder.get_mean_z(ishell)
+
             for ikappa, kappa in kappas.items():
-                w = self.compute_weight(ishell, tracers[ikappa])
+                w = self.compute_weight(ishell, tracers[ikappa], dndz_norm=self.dndz_norm[ikappa], zlens=zlens)
                 # only one multiplication and one addition
-                tmp = (shell * self.dtype(w / nbar)) - self.dtype(w)
+                if self.multiple_planes:
+                    tmp = (shell - self.dtype(nbar)) * self.dtype(w)
+                else:
+                    tmp = (shell * self.dtype(w / nbar)) - self.dtype(w)
                 kappas[ikappa] = healsparse.operations.sum_union([tmp, kappa])
 
         for ikappa, kappa in kappas.items():
@@ -213,57 +288,3 @@ class BornLensingBuilder(LensingBuilder):
             kappa.write(fname, clobber=True)
 
         return kappas
-
-    def construct_maps_alms(self, ikappas=None, skip_existing=False, check_read_existing=True):
-        """Constructs and saves convergence maps from particle shells in the Born approximation, ie by summing the particle overdensity maps with appropriate weights computed with CCL.
-
-        Parameters
-        ----------
-        dtype, optional
-            Dtype of the convergence map, by default np.float32
-
-        Returns
-        -------
-            List of convergence maps and weights used in the summation.
-        """
-
-        if ikappas is None:
-            ikappas = range(self.nkappas)
-        elif type(ikappas) is int:
-            ikappas = [ikappas]
-        else:
-            pass
-
-        if skip_existing:
-            _ikappas = []
-            for ikappa in ikappas:
-                fname = self.get_fname(ikappa, what='alms', force_fits=True)
-                if os.path.exists(fname):
-                    if check_read_existing:
-                        try:
-                            hp.read_alm(fname)
-                        except:
-                            _ikappas.append(ikappa)
-                else:
-                    _ikappas.append(ikappa)
-            if len(_ikappas) == 0:
-                return
-        else:
-            _ikappas = ikappas
-
-        lmax = 3 * self.nside - 1
-        mmax = lmax
-        len_alm = int(mmax * (2 * lmax + 1 - mmax) / 2 + lmax + 1)
-        klms = {ikappa: np.zeros(len_alm, dtype=np.complex_) for ikappa in _ikappas}
-
-        tracers = self.get_tracers()
-
-        for ishell in trange(self.nshells, desc="[construct_maps_alms]"):
-            alms = hp.read_alm(self.shell_builder.get_fname(ishell, what='alms', force_fits=True))
-            for ikappa in klms.keys():
-                w = self.compute_weight(ishell, tracers[ikappa])
-                klms[ikappa] += w * alms
-
-        for ikappa, klm in klms.items():
-            fname = self.get_fname(ikappa, what='alms', force_fits=True)
-            hp.write_alm(fname, klm, overwrite=True)

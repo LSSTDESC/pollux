@@ -6,7 +6,18 @@ import healpy as hp
 import numba
 import numpy as np
 import pymaster as nmt
+from pynverse import inversefunc
+from scipy.integrate import quad as scipy_quad
 from scipy.spatial.transform import Rotation
+
+QUAD_EPS_REL = 1e-6
+QUAD_EPS_ABS = 0.
+QUAD_LIMIT = 1000
+
+
+def quad(*args, **kwargs):
+    return scipy_quad(*args, epsabs=QUAD_EPS_ABS, epsrel=QUAD_EPS_REL, limit=QUAD_LIMIT, **kwargs)[0]
+
 
 # @numba.njit(parallel=False)
 # def _add_at_one(a, index):
@@ -429,3 +440,19 @@ def read_params(fname):
                 except ValueError:
                     pass
     return params
+
+
+def get_z_shell_fz(zsnapshots, func=None, ifunc=None, return_fzbins=False):
+    assert func or ifunc
+    if func is None:
+        func = inversefunc(ifunc, domain=[0., None], image=[0., None])
+    if ifunc is None:
+        ifunc = inversefunc(func, domain=[0., None], image=[0., None])
+    nshell = len(zsnapshots)
+    z_shell_bins = np.zeros(nshell + 1)
+    z_shell_bins[1:nshell] = ifunc(0.5 * (func(zsnapshots[:-1]) + func(zsnapshots[1:])))
+    z_shell_bins[nshell] = ifunc(2 * func(zsnapshots[-1]) - func(z_shell_bins[nshell - 1]))
+    if return_fzbins:
+        return z_shell_bins, func(z_shell_bins)
+    else:
+        return z_shell_bins

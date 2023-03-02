@@ -8,7 +8,9 @@ import numpy as np
 import pymaster as nmt
 from pynverse import inversefunc
 from scipy.integrate import quad as scipy_quad
+from scipy.spatial import KDTree
 from scipy.spatial.transform import Rotation
+from scipy.stats import truncnorm
 
 QUAD_EPS_REL = 1e-6
 QUAD_EPS_ABS = 0.
@@ -456,3 +458,22 @@ def get_z_shell_fz(zsnapshots, func=None, ifunc=None, return_fzbins=False):
         return z_shell_bins, func(z_shell_bins)
     else:
         return z_shell_bins
+    
+
+def get_trunc_norm(myclip_a, myclip_b, loc, scale):
+    a, b = (myclip_a - loc) / scale, (myclip_b - loc) / scale
+    return truncnorm(loc=loc, scale=scale, a=a, b=b)
+
+
+def subsample_ppf(z, n, ppf, check_unique=True, keep_first_last=True):
+    tree = KDTree(z[:,None])
+    u = np.linspace(0,1,n+1)
+    if keep_first_last:
+        u = np.linspace(0,1,n)
+        best_idx = tree.query(ppf(u)[:,None])[1]
+    else:
+        umid = 0.5*(u[1:]+u[:-1])
+        best_idx = tree.query(ppf(umid)[:,None])[1]
+    if check_unique:
+        assert len(np.unique(best_idx))==len(best_idx)
+    return best_idx, z[best_idx]

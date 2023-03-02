@@ -1,11 +1,11 @@
 import itertools
 import os
 
-import healpy as hp
 import numpy as np
 import pyccl
+from pynverse import inversefunc
 
-from .utils import trim_array_min_diff, read_params, get_z_shell_fz
+from .utils import (get_trunc_norm, get_z_shell_fz, read_params, subsample_ppf, trim_array_min_diff)
 
 os.environ["GENERICIO_NO_MPI"] = "y"
 try:
@@ -66,7 +66,7 @@ class Reader:
             else:
                 raise ValueError
             self.z_shell_bins = get_z_shell_fz(self.zsnapshots, func=func, ifunc=ifunc, return_fzbins=return_fzbins)
-            
+
             return self.z_shell_bins
 
     def get_shell_info(self, cosmo, fname=None):
@@ -199,16 +199,17 @@ class SLICSReader(Reader):
 class HACCReader(Reader):
 
     def __init__(
-            self,
-            path,
-            read_cosmo_params=False,
-            nsteps=500,
-            sim_zmin=0.,
-            sim_zmax=200.,
-            aminstep=0.,
-            zmax=None,
-            group_along_x=False,
-            binning_match='center_scale_factor'
+        self,
+        path,
+        read_cosmo_params=False,
+        nsteps=500,
+        sim_zmin=0.,
+        sim_zmax=200.,
+        zmax=None,
+        aminstep=0.,
+        sampling_match_n=False,
+        binning_match='center_scale_factor',
+        group_along_x=False,
         ):
         """Reader for SLICS simulations by Joachim Harnois-Deraps.
 
@@ -251,25 +252,55 @@ class HACCReader(Reader):
         # simulation snapshot redshifts : step are constant in scale factor, but only a fraction of steps are saved
         snapshot_dirs = os.listdir(os.path.join(path, 'output'))
         snapshots = np.array([i for i in range(nsteps) if f'STEP{i}' in snapshot_dirs])
+        print(f"Found {len(snapshots)} snapshots")
 
-        amax = 1. / (1. + sim_zmin)
-        amin = 1. / (1. + sim_zmax)
-        asnapshots_all = np.linspace(amin, amax, nsteps + 1)[1:]
-        asnapshots_all = asnapshots_all[snapshots]
+        # helper function : we only work on the list of snapshots to avoid mistakes in book-keeping
+        def get_asnapshots(idx):
+            asnapshots_all = np.linspace(1. / (1. + sim_zmax), 1. / (1. + sim_zmin), nsteps + 1)[1:]
+            return asnapshots_all[idx]
 
-        asnapshots, idx = trim_array_min_diff(asnapshots_all, self.aminstep, return_indices=True)
-        if len(idx) < len(snapshots):
-            print(f"Subsampling snapshots with aminstep={aminstep} returns {len(idx)} snapshots")
-        zsnapshots = 1. / asnapshots[::-1] - 1.
-        self.snapshots = snapshots[list(reversed(idx))]
+        # subsample snapshots : minimum step in scale factor
+        if aminstep > 0.:
+            _, idx = trim_array_min_diff(get_asnapshots(snapshots), aminstep, return_indices=True)
+            print(f"Subsampling snapshots : minimum a step {aminstep}, returns {len(idx)} snapshots")
+            snapshots = snapshots[idx]
 
+        # subsample snapshots : maximum redshift
         if zmax is not None:
-            try:
-                i = np.argwhere(zsnapshots > zmax)[0, 0]
-                zsnapshots = zsnapshots[:i + 1]
-            except:
-                pass
+            w = np.argwhere(get_asnapshots(snapshots) > 1. / (1. + zmax))
+            if len(w) > 0:
+                snapshots = snapshots[w[0, 0]:]
+                print(f"Subsampling snapshots : max redshift {zmax}, returns {len(snapshots)} snapshots")
 
+        # subsample snapshots : match inferred bimodal distribution
+        if sampling_match_n:
+            aa = get_asnapshots(snapshots)
+
+            # multimodal distribution in scale factor, need ppf (computed numerically)
+            s1, s2, lam = 0.12, 0.27, 0.4
+            amin = np.min(aa)
+            t1 = get_trunc_norm(amin, 1., 0.5, s1)
+            t2 = get_trunc_norm(amin, 1., 1., s2)
+            cdf = lambda a: lam * t1.cdf(a) + (1 - lam) * t2.cdf(a)
+            ppf = inversefunc(cdf, domain=[amin, 1.], image=[0., 1.])
+
+            idx, _ = subsample_ppf(aa, sampling_match_n, ppf)
+            if len(idx) < len(snapshots):
+                print(f"Subsampling snapshots : match distribution, returns {len(idx)} snapshots")
+            snapshots = snapshots[idx]
+
+        # done with subsampling !
+        self.snapshots = snapshots
+        zsnapshots = 1. / get_asnapshots(snapshots)[::-1] - 1.
+
+        # simulation properties
+        step = self.snapshots[0]
+        name = os.path.join(self.path, 'output', f'STEP{step}/m000.full.mpicosmo.{step}#0')
+        self.boxsize_h = pygio.read_phys_scale(name)[0]
+        nparticles = pygio.read_num_elems(name[:-2])
+        dtype = pygio.read_variable_dtypes(name)['x']
+
+        # simulation box limits
         self.lims = np.array(
             [
                 [
@@ -278,13 +309,6 @@ class HACCReader(Reader):
                     ] for ibox in range(64)
                 ]
             )
-
-        # some simulation properties
-        step = self.snapshots[0]
-        name = os.path.join(self.path, 'output', f'STEP{step}/m000.full.mpicosmo.{step}#0')
-        self.boxsize_h = pygio.read_phys_scale(name)[0]
-        nparticles = pygio.read_num_elems(name[:-2])
-        dtype = pygio.read_variable_dtypes(name)['x']
 
         nsub = 16 if self.group_along_x else 64
         super().__init__('hacc', 'Mpc_over_h', nparticles, zsnapshots, nsub, binning_match, dtype=dtype)

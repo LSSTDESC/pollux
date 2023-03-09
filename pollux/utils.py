@@ -292,7 +292,7 @@ def _loc2pix(nside, order, ncap, npix, z, phi, sth):
 @numba.njit
 def _vec2pix_sub(nside, order, ncap, npix, x, y, z, shiftx, shifty, shiftz, rmin2, rmax2, octant_only):
     """
-    Healpix function vec2pix
+    Healpix function vec2pix with extra checks (radii and octant)
     """
     # apply shift
     tmpx = x + shiftx
@@ -332,7 +332,60 @@ def _vec2pix(nside, order, ncap, npix, x, y, z, shiftx, shifty, shiftz, rmin2, r
 
 
 @numba.njit
-def unique_pix_pos(ipix, npix):
+def _vec2radec_sub(x, y, z, shiftx, shifty, shiftz, rmin2, rmax2, octant_only):
+    """
+    Healpix function vec2pix with extra checks (radii and octant)
+    """
+    # apply shift
+    tmpx = x + shiftx
+    tmpy = y + shifty
+    tmpz = z + shiftz
+
+    # get radius and remove particles out of shel
+    r2 = tmpx**2 + tmpy**2 + tmpz**2
+    if r2 < rmin2 or r2 >= rmax2:
+        return (False, 0., 0., 0.)
+
+    # remove particles out of octant if octant_only
+    if octant_only:  # check if particle out of octant
+        if (tmpx < 0.) or (tmpy < 0.) or (tmpz < 0.):
+            return (False, 0., 0, 0.)
+
+    r = np.sqrt(r2)
+    theta = np.arccos(tmpz / r)
+    phi = np.arctan2(tmpx, tmpy)
+
+    ra = np.rad2deg(phi)
+    dec = 90. - np.rad2deg(theta)
+
+    return (True, ra, dec, r)
+
+
+@numba.njit(parallel=True)
+def _vec2radec(x, y, z, shiftx, shifty, shiftz, rmin2, rmax2, octant_only):
+    """"
+    Parallelized Healpix function vec2pix to go from x,y,z to healpix pixel
+    """
+    n = len(x)
+    ra = np.zeros(n, dtype=x.dtype)
+    dec = np.zeros(n, dtype=x.dtype)
+    r = np.zeros(n, dtype=x.dtype)
+    idx =  np.zeros(n, dtype=np.int_)
+    for i in numba.prange(n):
+        good, tmpra, tmpdec, tmpr = _vec2radec_sub(x[i], y[i], z[i], shiftx, shifty, shiftz, rmin2, rmax2, octant_only)
+        if good:
+            idx[i] = i
+            ra[i] = tmpra
+            dec[i] = tmpdec
+            r[i] = tmpr
+        else:
+            idx[i] = -1
+
+    return idx, ra, dec, r
+
+
+@numba.njit
+def _unique_pix_pos(ipix, npix):
     n = len(ipix)
     c = np.zeros(npix, dtype=np.int_)
     for i in range(n):
@@ -343,21 +396,19 @@ def unique_pix_pos(ipix, npix):
     return u, c[u]
 
 
-@numba.njit
-def _vec2pix_unique(nside, order, ncap, npix, x, y, z, shiftx, shifty, shiftz, rmin2, rmax2, octant_only):
-    ipix = _vec2pix(nside, order, ncap, npix, x, y, z, shiftx, shifty, shiftz, rmin2, rmax2, octant_only)
-    return unique_pix_pos(ipix, npix)
+# @numba.njit
+# def _vec2pix_unique(nside, order, ncap, npix, x, y, z, shiftx, shifty, shiftz, rmin2, rmax2, octant_only):
+#     ipix = _vec2pix(nside, order, ncap, npix, x, y, z, shiftx, shifty, shiftz, rmin2, rmax2, octant_only)
+#     return unique_pix_pos(ipix, npix)
 
-
-def vec2pix_unique(nside, x, y, z, shiftx, shifty, shiftz, rmin2, rmax2, octant_only):
-    order = hp.nside2order(nside)
-    ncap = (nside * nside - nside) << 1
-    npix = hp.nside2npix(nside)
-    return _vec2pix_unique(nside, order, ncap, npix, x, y, z, shiftx, shifty, shiftz, rmin2, rmax2, octant_only)
-
+# def vec2pix_unique(nside, x, y, z, shiftx, shifty, shiftz, rmin2, rmax2, octant_only):
+#     order = hp.nside2order(nside)
+#     ncap = (nside * nside - nside) << 1
+#     npix = hp.nside2npix(nside)
+#     return _vec2pix_unique(nside, order, ncap, npix, x, y, z, shiftx, shifty, shiftz, rmin2, rmax2, octant_only)
 
 @numba.njit
-def _construct_shell_sub(
+def construct_shell_sub(
         xyz, box_edges_original, A, b, nrepeat, boxsize, rmin2, rmax2, apply_random_isometry, octant_only, nside, order,
         ncap, npix):
     n = len(xyz)
@@ -426,6 +477,91 @@ def _construct_shell_sub(
     return u, count[u]
 
 
+@numba.njit
+def construct_shell_sub_catalog(
+        xyz, box_edges_original, A, b, nrepeat, boxsize, rmin2, rmax2, apply_random_isometry, octant_only):
+    n = len(xyz)
+
+    # precompute isometry on particles (since repeats are then only a shift away)
+    if apply_random_isometry:
+        xyz = Axpb(A, b, xyz)
+        box_edges = Axpb(A, b, box_edges_original)
+    else:
+        box_edges = box_edges_original
+
+    idx = []
+    ra = []
+    dec = []
+    r = []
+
+    dtype = xyz.dtype
+    
+    # repeat the box
+    for ix in range(-nrepeat, nrepeat + 1):
+        for iy in range(-nrepeat, nrepeat + 1):
+            for iz in range(-nrepeat, nrepeat + 1):
+                # compute shift
+                shift_original = np.expand_dims(np.array([ix, iy, iz]) * boxsize, 0).astype(dtype)
+                if apply_random_isometry:
+                    shift = Ax(A, shift_original)
+                else:
+                    shift = shift_original
+
+                # apply isometry to box edges
+                tmp_box_edges = shift + box_edges
+
+                # check if intersects octant, otherwise skip
+                if octant_only:
+                    found_edge_in_octant = False
+                    for e in tmp_box_edges:
+                        if np.all(e > 0.):
+                            found_edge_in_octant = True
+                    if not found_edge_in_octant:
+                        continue
+
+                ## check if box intersects with shell, otherwise skip
+                # first, check if box fully inside inner sphere
+                if np.all(xyz2r2(tmp_box_edges) < rmin2):
+                    continue
+
+                # second, check if box intersects with outer sphere
+                sphere_center = -b if apply_random_isometry else np.zeros(3, dtype=dtype)
+                if not _AABB_sphere_intersect(box_edges_original + shift_original, sphere_center, rmax2):
+                    continue
+
+                # if we got this far, then this repeat intersects with the shell
+                # repeats.append([ix, iy, iz])
+
+                # if catalog_mode:
+                tmpidx, tmpra, tmpdec, tmpr = _vec2radec(
+                    xyz[:, 0], xyz[:, 1], xyz[:, 2], shift[0, 0], shift[0, 1], shift[0, 2], rmin2, rmax2,
+                    octant_only)
+                
+                w = tmpidx >= 0
+                if np.any(w):
+                    idx.append(tmpidx[w])
+                    ra.append(tmpra[w])
+                    dec.append(tmpdec[w])
+                    r.append(tmpr[w])
+                # else:
+                #     ## add particles to shell
+                #     # compute corresponding healpy pixels of all particles (particles out of shell/octant quickly set to -1) with vec2pix and loc2pix (translated into python from Healpix code)
+                #     ipix = _vec2pix(
+                #         nside, order, ncap, npix, xyz[:, 0], xyz[:, 1], xyz[:, 2], shift[0, 0], shift[0, 1],
+                #         shift[0, 2], rmin2, rmax2, octant_only)
+
+                #     for i in range(n):
+                #         pos = ipix[i]
+                #         if pos >= 0:
+                #             count[pos] += 1
+
+    # if catalog_mode:
+    return idx, ra, dec, r
+    # else:
+    #     u = np.argwhere(count)[:, 0]
+    #     return u, count[u]
+
+
 def read_params(fname):
     with open(fname, 'r') as f:
         params = {}
@@ -439,7 +575,7 @@ def read_params(fname):
     return params
 
 
-def get_z_shell_fz(zsnapshots, func=None, ifunc=None, return_fzbins=False):
+def get_z_shell_fz(zsnapshots, func=None, ifunc=None, zmax=None, return_fzbins=False):
     assert func or ifunc
     if func is None:
         func = inversefunc(ifunc, domain=[0., None], image=[0., None])
@@ -448,7 +584,10 @@ def get_z_shell_fz(zsnapshots, func=None, ifunc=None, return_fzbins=False):
     nshell = len(zsnapshots)
     z_shell_bins = np.zeros(nshell + 1)
     z_shell_bins[1:nshell] = ifunc(0.5 * (func(zsnapshots[:-1]) + func(zsnapshots[1:])))
-    z_shell_bins[nshell] = ifunc(2 * func(zsnapshots[-1]) - func(z_shell_bins[nshell - 1]))
+    if zmax is None:
+        z_shell_bins[nshell] = ifunc(2 * func(zsnapshots[-1]) - func(z_shell_bins[nshell - 1]))
+    else:
+        z_shell_bins[nshell] = zmax
     if return_fzbins:
         return z_shell_bins, func(z_shell_bins)
     else:
@@ -460,15 +599,32 @@ def get_trunc_norm(myclip_a, myclip_b, loc, scale):
     return truncnorm(loc=loc, scale=scale, a=a, b=b)
 
 
-def subsample_ppf(z, n, ppf, check_unique=True, keep_first_last=True):
+# def subsample_ppf(z, n, ppf, check_unique=True, keep_first_last=True):
+#     tree = KDTree(z[:, None])
+#     u = np.linspace(0, 1, n + 1)
+#     if keep_first_last:
+#         u = np.linspace(0, 1, n)
+#         best_idx = tree.query(ppf(u)[:, None])[1]
+#     else:
+#         umid = 0.5 * (u[1:] + u[:-1])
+#         best_idx = tree.query(ppf(umid)[:, None])[1]
+#     if check_unique:
+#         assert len(np.unique(best_idx)) == len(best_idx)
+#     return best_idx, z[best_idx]
+
+
+def subsample_ppf(z, n, ppf, keep_first_last=True):
     tree = KDTree(z[:, None])
-    u = np.linspace(0, 1, n + 1)
-    if keep_first_last:
-        u = np.linspace(0, 1, n)
+    for usize in range(n, len(z) + 1):
+        if keep_first_last:
+            u = np.linspace(0, 1, usize)
+        else:
+            uedge = np.linspace(0, 1, usize + 1)
+            u = 0.5 * (uedge[1:] + uedge[:-1])
         best_idx = tree.query(ppf(u)[:, None])[1]
-    else:
-        umid = 0.5 * (u[1:] + u[:-1])
-        best_idx = tree.query(ppf(umid)[:, None])[1]
-    if check_unique:
-        assert len(np.unique(best_idx)) == len(best_idx)
-    return best_idx, z[best_idx]
+        unique_idx = np.unique(best_idx)
+        if len(unique_idx) == n:
+            break
+    if usize > n:
+        print(f"[subsample_ppf] had to try finer grid {usize}>{n}")
+    return unique_idx, z[unique_idx]

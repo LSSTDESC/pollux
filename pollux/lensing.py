@@ -59,7 +59,7 @@ class LensingBuilder(MapBuilder):
             **kwargs)
 
     def get_tracers(self, Nz=1000):
-        z_shell_bins = self.reader.get_z_shell_bins(self.cosmo)
+        z_shell_bins = self.reader.get_z_shell_bins()
 
         tracers = []
         if self.nzs == 'zsnapshots':
@@ -76,7 +76,7 @@ class LensingBuilder(MapBuilder):
         return tracers
 
     def get_tracers_sacc(self, Nz=1000):
-        z_shell_bins = self.reader.get_z_shell_bins(self.cosmo)
+        z_shell_bins = self.reader.get_z_shell_bins()
 
         tracers = []
         if self.nzs == 'zsnapshots':
@@ -171,14 +171,14 @@ class BornLensingBuilder(LensingBuilder):
 
         if multiple_planes:
             rho_m = pyccl.background.rho_x(self.cosmo, 1., 'matter', is_comoving=True)  #  in units of Msun / Mpc^3
-            vol = self.reader.get_boxsize(self.cosmo)**3  # in Mpc^3
+            vol = self.reader.get_boxsize()**3  # in Mpc^3
             mpart = rho_m * vol / self.reader.nparticles  # in Msun
 
             area = hp.nside2pixarea(self.nside)
 
             self.mpart_over_area = mpart / area
 
-            zmax = self.reader.get_z_shell_bins(self.cosmo)[-1]
+            zmax = self.reader.zmax
             self.dndz_norm = [
                 quad(lambda z: t.get_dndz(z), 0., zmax) if isinstance(t, pyccl.tracers.WeakLensingTracer) else np.nan
                 for t in self.get_tracers()
@@ -186,7 +186,7 @@ class BornLensingBuilder(LensingBuilder):
 
     def compute_weight(self, ishell, tracer, dndz_norm=None, zlens=None):
         if self.multiple_planes:
-            zmax = self.reader.get_z_shell_bins(self.cosmo)[-1]
+            zmax = self.reader.zmax
 
             if zlens is None:
                 zlens = self.shell_builder.get_mean_z(ishell)
@@ -217,7 +217,7 @@ class BornLensingBuilder(LensingBuilder):
 
             return w * self.mpart_over_area / d_A_lens**2
         else:
-            chi_min, chi_max = self.reader.get_com_shell_bins(self.cosmo)[ishell:ishell + 2]
+            chi_min, chi_max = self.reader.get_com_shell_bins()[ishell:ishell + 2]
             return quad(lambda chi: tracer.get_kernel(chi), chi_min, chi_max)
 
     def construct_maps(self, ikappas=None, skip_existing=False, check_read_existing=True):

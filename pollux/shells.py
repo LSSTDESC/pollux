@@ -5,6 +5,9 @@ import pyccl
 import sacc
 from tqdm.auto import tqdm, trange
 
+import warnings
+from astropy.io import fits
+
 from .map_builder import MapBuilder
 from .utils import *
 
@@ -14,7 +17,6 @@ class ShellBuilder(MapBuilder):
     def __init__(
             self,
             reader,
-            cosmo,
             nside,
             save_dir,
             apply_random_isometry=False,
@@ -30,8 +32,6 @@ class ShellBuilder(MapBuilder):
         ----------
         reader
             N-body simulation reader.
-        cosmo
-            Cosmology object from CCL.
         nside
             Resolution parameter nside of the shells.
         save_dir, optional
@@ -51,7 +51,7 @@ class ShellBuilder(MapBuilder):
         """
 
         self.reader = reader
-        self.cosmo = cosmo
+        self.cosmo = reader.cosmo
         self.apply_random_isometry = apply_random_isometry
         self.seed = seed
         self.subsample_box = subsample_box
@@ -76,6 +76,20 @@ class ShellBuilder(MapBuilder):
         if dtype == np.int32:
             print(f"Warning: the max value for {dtype} might not be enough : {np.iinfo(dtype)}")
 
+        # Make sure snapshots are larger than the shells
+        z_shell_bins = self.reader.get_z_shell_bins()
+        com_shell_bins = self.reader.get_com_shell_bins()
+        boxsize = self.reader.get_boxsize()
+        diff = np.diff(com_shell_bins)
+        print(f"Box size = {boxsize:.2f} Mpc")
+        print(f"Number of shells = {self.nmaps}")
+        if not np.all(diff < boxsize):
+            message = "Some shells are deeper than the simulation box!\n"
+            for ishell in range(self.nmaps):
+                if diff[ishell] > boxsize:
+                    message += f"Shell {ishell} ({z_shell_bins[ishell]:.2f}<z<{z_shell_bins[ishell+1]:.2f}) has width {diff[ishell]:.2f} Mpc\n"
+            warnings.warn(message)
+
         # Draw random isometries
         if apply_random_isometry:
             self.Abs = self.get_random_isometries()
@@ -89,7 +103,7 @@ class ShellBuilder(MapBuilder):
         return dVdz / np.trapz(dVdz, zz)  # rough normalization
 
     def get_tracers(self, Nz=1000):
-        z_shell_bins = self.reader.get_z_shell_bins(self.cosmo)
+        z_shell_bins = self.reader.get_z_shell_bins()
 
         tracers = []
         for ishell in range(self.nshells):
@@ -100,7 +114,7 @@ class ShellBuilder(MapBuilder):
         return tracers
 
     def get_tracers_sacc(self, Nz=1000):
-        z_shell_bins = self.reader.get_z_shell_bins(self.cosmo)
+        z_shell_bins = self.reader.get_z_shell_bins()
 
         tracers = []
         for ishell in range(self.nshells):
@@ -111,7 +125,7 @@ class ShellBuilder(MapBuilder):
         return tracers
 
     def get_mean_z(self, ishell):
-        z_shell_bins = self.reader.get_z_shell_bins(self.cosmo)
+        z_shell_bins = self.reader.get_z_shell_bins()
         amin = 1. / (1. + z_shell_bins[ishell + 1])
         amax = 1. / (1. + z_shell_bins[ishell])
         dVdz = lambda a: pyccl.comoving_angular_distance(self.cosmo, a)**2 / pyccl.background.h_over_h0(self.cosmo, a)
@@ -128,12 +142,12 @@ class ShellBuilder(MapBuilder):
             A list of (A,b) with an isometry A (rotations and flips) and translation by shift b.
         """
         rng = np.random.default_rng(self.seed)
-        boxsize = self.reader.get_boxsize(self.cosmo)
+        boxsize = self.reader.get_boxsize()
 
         # find number of isometries (can be grouped for adjacent shells)
         n_isometries = self.nshells
         if self.group_isometries is not None:
-            com_shell_bins = self.reader.get_com_shell_bins(self.cosmo)
+            com_shell_bins = self.reader.get_com_shell_bins()
             if type(self.group_isometries) is bool:
                 assert self.group_isometries
                 com_iso_depth = boxsize
@@ -168,8 +182,8 @@ class ShellBuilder(MapBuilder):
         return self.Abs
 
     def estimate_repeats(self, ishell):
-        com_shell_bins = self.reader.get_com_shell_bins(self.cosmo)
-        box_volume = self.reader.get_boxsize(self.cosmo)**3
+        com_shell_bins = self.reader.get_com_shell_bins()
+        box_volume = self.reader.get_boxsize()**3
 
         shell_volume = 4. / 3. * np.pi * (com_shell_bins[ishell + 1]**3 - com_shell_bins[ishell]**3)
         if self.octant_only:
@@ -210,7 +224,7 @@ class ShellBuilder(MapBuilder):
         return ratio
 
     def get_box_comoving_density(self, ishell):
-        return self.reader.get_box_comoving_density(self.cosmo) * self.get_subsample_ratio(ishell)
+        return self.reader.get_box_comoving_density() * self.get_subsample_ratio(ishell)
 
     def get_pixel_density(self, ishell):
         """Computes the expected mean number of particle per pixels from the simulation density.
@@ -219,8 +233,6 @@ class ShellBuilder(MapBuilder):
         ----------
         ishell
             Index of the shell.
-        cosmo
-            Cosmology object from CCL.
         nside
             Resolution parameter nside of the shell.
 
@@ -229,7 +241,7 @@ class ShellBuilder(MapBuilder):
             Mean number of particles per pixel.
         """
         npix = hp.nside2npix(self.nside)
-        com_shell_bins = self.reader.get_com_shell_bins(self.cosmo)
+        com_shell_bins = self.reader.get_com_shell_bins()
 
         chi_max = com_shell_bins[ishell + 1]
         chi_min = com_shell_bins[ishell]
@@ -245,7 +257,6 @@ class ShellBuilder(MapBuilder):
             skip_existing=False,
             check_read_existing=True,
             verbose=False,
-            debug=False,
             repeat_ixyz=None,
             get_repeats_only=False,
             fast=True):
@@ -278,7 +289,6 @@ class ShellBuilder(MapBuilder):
         ishell = self.reader.get_ishell(isub)
 
         # check if shell exists and/or can be saved
-        # if self.save_dir is not None:
         fname = self.get_fname(ishell, sub=isub)
 
         # check if shell has already been created
@@ -288,7 +298,7 @@ class ShellBuilder(MapBuilder):
 
         # get shell radii
         if com_shell_bins is None:
-            com_shell_bins = self.reader.get_com_shell_bins(self.cosmo)
+            com_shell_bins = self.reader.get_com_shell_bins()
         assert self.nshells == len(com_shell_bins) - 1
         rmin2, rmax2 = com_shell_bins[ishell]**2, com_shell_bins[ishell + 1]**2
 
@@ -300,15 +310,12 @@ class ShellBuilder(MapBuilder):
                 Abs = Abs
 
         # get number of repeats per direction
-        boxsize = self.reader.get_boxsize(self.cosmo)
+        boxsize = self.reader.get_boxsize()
         # not too sure about that 2, but it's fast to check...
         nrepeat = int(np.ceil(np.sqrt(rmax2) / boxsize)) + 2
 
         # read box
-        xyz, box_edges_original = self.reader.read_sub(
-            isub,
-            read_box_edges_only=get_repeats_only,
-            h_to_divide_by=None if self.reader.unit == 'Mpc' else np.float64(self.cosmo["h"]))
+        xyz, box_edges_original = self.reader.read_sub(isub, read_box_edges_only=get_repeats_only)
         if verbose:
             print(f"Loaded box {isub} (shell {ishell}) with {len(xyz)} particles.")
 
@@ -326,12 +333,14 @@ class ShellBuilder(MapBuilder):
         # initialize shell
         shell = healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
 
+        nside = self.nside
+        order = hp.nside2order(nside)
+        ncap = (nside * nside - nside) << 1
+        npix = hp.nside2npix(nside)
+
         if fast:
-            nside = self.nside
-            order = hp.nside2order(nside)
-            ncap = (nside * nside - nside) << 1
-            npix = hp.nside2npix(nside)
-            u, c = _construct_shell_sub(
+
+            u, c = construct_shell_sub(
                 xyz, box_edges_original, Abs[ishell][0], Abs[ishell][1], nrepeat, boxsize, rmin2, rmax2,
                 self.apply_random_isometry, self.octant_only, nside, order, ncap, npix)
             if len(u) > 0:
@@ -356,9 +365,8 @@ class ShellBuilder(MapBuilder):
                                 continue
 
                         # compute shift
-                        shift_original = (
-                            np.array([ix, iy, iz], dtype=self.reader.dtype) *
-                            self.reader.get_boxsize(self.cosmo))[None, :]
+                        shift_original = (np.array([ix, iy, iz], dtype=self.reader.dtype) *
+                                          self.reader.get_boxsize())[None, :]
                         if self.apply_random_isometry:
                             shift = Ax(Abs[ishell][0], shift_original)
                         else:
@@ -398,7 +406,10 @@ class ShellBuilder(MapBuilder):
                         # 2 - remove particles out of octant if octant_only
                         # 3 - compute corresponding healpy pixels of all particles (removed particles fast set to -1) with vec2pix and loc2pix (translated into python from Healpix code)
                         # 4 - get unique pixels and counts (ignoring -1's)
-                        u, c = vec2pix_unique(self.nside, *(xyz.T), *(shift[0].T), rmin2, rmax2, self.octant_only)
+                        ipix = _vec2pix(
+                            nside, order, ncap, npix, *(xyz.T), *(shift[0].T), rmin2, rmax2, self.octant_onl)
+                        u, c = _unique_pix_pos(ipix, npix)
+                        # u, c = _vec2pix_unique(nside, order, ncap, npix, *(xyz.T), *(shift[0].T), rmin2, rmax2, self.octant_only)
 
                         if len(u) > 0:
                             if verbose:
@@ -471,3 +482,84 @@ class ShellBuilder(MapBuilder):
         density = -np.ones(self.npix)
         density[spix] = shell[spix] / self.get_pixel_density(ishell) - 1.
         return density
+
+    def construct_shell_sub_catalog(self, isub, Abs=None, com_shell_bins=None, verbose=False, **kwargs):
+
+        ishell = self.reader.get_ishell(isub)
+
+        # get shell radii
+        if com_shell_bins is None:
+            com_shell_bins = self.reader.get_com_shell_bins()
+        assert self.nshells == len(com_shell_bins) - 1
+        rmin2, rmax2 = com_shell_bins[ishell]**2, com_shell_bins[ishell + 1]**2
+
+        # get random isometries
+        if self.apply_random_isometry:
+            if Abs is None:
+                Abs = self.Abs
+            else:
+                Abs = Abs
+
+        # get number of repeats per direction
+        boxsize = self.reader.get_boxsize()
+        # not too sure about that 2, but it's fast to check...
+        nrepeat = int(np.ceil(np.sqrt(rmax2) / boxsize)) + 2
+
+        # read box
+        xyz, box_edges_original = self.reader.read_sub(isub, **kwargs)
+        if verbose:
+            print(f"Loaded box {isub} (shell {ishell}) with {len(xyz)} particles.")
+
+        idx, ra, dec, r = construct_shell_sub_catalog(
+            xyz, box_edges_original, Abs[ishell][0], Abs[ishell][1], nrepeat, boxsize, rmin2, rmax2,
+            self.apply_random_isometry, self.octant_only)
+
+        if len(idx) > 0:
+            return np.concatenate(idx), np.concatenate(ra), np.concatenate(dec), np.concatenate(r)
+        else:
+            return [np.array([])] * 4
+
+    def construct_shell_catalog(self, ishell, **kwargs):
+        isubs = self.reader.get_isubs_for_shell(ishell)
+
+        hdul = [fits.PrimaryHDU()]
+
+        for isub in self.tqdm(isubs, desc="[construct_shell_catalog]"):
+            res = self.construct_shell_sub_catalog(isub, **kwargs)
+            idx = fits.Column(name='ihaloes', format='I', array=res[0])
+            ra = fits.Column(name='ra', format='E', array=res[1])
+            dec = fits.Column(name='dec', format='E', array=res[2])
+            r = fits.Column(name='chi', format='E', array=res[3])
+            a = pyccl.scale_factor_of_chi(self.cosmo, res[3])
+            z = fits.Column(name='z', format='E', array=1. / a - 1.)
+            header = fits.Header()
+            header[f'ISUB'] = isub
+            header[f'ZSNAP'] = self.reader.zsnapshots[ishell]
+            hdul.append(fits.BinTableHDU.from_columns([idx, ra, dec, r, z], header))
+
+        fname = self.get_fname(ishell, what='haloes')
+        fits.HDUList(hdul).writeto(fname, overwrite=True)
+
+    def get_shell_catalog_props(self, ishell, variables):
+        fname = self.get_fname(ishell, what='haloes')
+        hdul = fits.open(fname)
+
+        out = {k: [] for k in variables}
+
+        catalog_variables = [v for v in variables if v in ['ra', 'dec', 'chi', 'z']]
+        props_variables = [v for v in variables if v not in ['ra', 'dec', 'chi', 'z']]
+        
+        for hdu in self.tqdm(hdul[1:], desc="[get_shell_catalog_props]"):
+            if len(props_variables) > 0:
+                isub = hdu.header['ISUB']
+                tmp = self.reader.read_props(isub, props_variables, ihaloes=hdu.data['ihaloes'])
+                for k in props_variables:
+                    out[k].append(tmp[k])
+            if len(catalog_variables) > 0:
+                for k in catalog_variables:
+                    out[k].append(hdu.data[k])
+
+        for k in variables:
+            out[k] = np.concatenate(out[k])
+
+        return out

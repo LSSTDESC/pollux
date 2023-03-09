@@ -18,7 +18,8 @@ class Reader:
     """A generic class to read particles from N-body simulations.
     """
 
-    def __init__(self, kind, unit, nparticles, zsnapshots, nsubs, binning_match, dtype=np.float64):
+    def __init__(self, cosmo, kind, unit, nparticles, zsnapshots, zmax, nsubs, binning_match, dtype=np.float64):
+        self.cosmo = cosmo
         self.kind = kind
 
         assert unit in ["Mpc", "Mpc_over_h"]
@@ -27,6 +28,9 @@ class Reader:
         self.nparticles = nparticles
 
         self.zsnapshots = zsnapshots
+        self.zmax = zmax
+        if zmax is not None:
+            assert np.all(self.zsnapshots < zmax)
         self.asnapshots = 1. / (1. + zsnapshots)
         self.nshells = len(zsnapshots)
         self.nsubs = nsubs
@@ -44,10 +48,10 @@ class Reader:
     def get_isubs_for_shell(self, ishell):
         return np.argwhere([x[0] == ishell for x in self._sub_args])[:, 0]
 
-    def get_com_shell_bins(self, cosmo):
-        return pyccl.comoving_radial_distance(cosmo, 1. / (1 + self.get_z_shell_bins(cosmo)))
+    def get_com_shell_bins(self):
+        return pyccl.comoving_radial_distance(self.cosmo, 1. / (1 + self.get_z_shell_bins()))
 
-    def get_z_shell_bins(self, cosmo, return_fzbins=False):
+    def get_z_shell_bins(self, return_fzbins=False):
         if hasattr(self, 'z_shell_bins'):
             return self.z_shell_bins
         else:
@@ -58,19 +62,20 @@ class Reader:
                 func = lambda z: 1. / (1. + z)
                 ifunc = lambda a: 1. / a - 1.
             elif self.binning_match == 'center_comoving_distance':
-                func = lambda z: 1e-3 * pyccl.comoving_radial_distance(cosmo, 1. / (1. + z))
+                func = lambda z: 1e-3 * pyccl.comoving_radial_distance(self.cosmo, 1. / (1. + z))
                 ifunc = None
             elif self.binning_match == 'center_comoving_volume':
-                func = lambda z: (1e-3 * pyccl.comoving_radial_distance(cosmo, 1. / (1. + z)))**3
+                func = lambda z: (1e-3 * pyccl.comoving_radial_distance(self.cosmo, 1. / (1. + z)))**3
                 ifunc = None
             else:
                 raise ValueError
-            self.z_shell_bins = get_z_shell_fz(self.zsnapshots, func=func, ifunc=ifunc, return_fzbins=return_fzbins)
+            self.z_shell_bins = get_z_shell_fz(
+                self.zsnapshots, func=func, ifunc=ifunc, zmax=self.zmax, return_fzbins=return_fzbins)
 
             return self.z_shell_bins
 
-    def get_shell_info(self, cosmo, fname=None):
-        z_shell_bins = self.get_z_shell_bins(cosmo)
+    def get_shell_info(self, fname=None):
+        z_shell_bins = self.get_z_shell_bins()
         names = ['ishell', 'zsnapshot', 'zmin', 'zmax', 'snapshot_id']
         dtypes = ['int', 'float', 'float', 'float', 'int']
         out = np.array(
@@ -80,20 +85,20 @@ class Reader:
             np.savetxt(fname, out, header=' '.join(names), fmt='%8i %16.8f %16.8f %16.8f %8i')
         return out
 
-    def get_boxsize(self, cosmo):
+    def get_boxsize(self):
         raise NotImplementedError
 
-    def read_sub(self, isub, verbose=False, assert_xyz_in_box=False, read_box_edges_only=False, h_to_divide_by=None):
+    def read_sub(self, isub, verbose=False, assert_xyz_in_box=False, read_box_edges_only=False):
         raise NotImplementedError
 
-    def get_box_comoving_density(self, cosmo):
+    def get_box_comoving_density(self):
         """Computes the comoving particle density of the simulation.
 
         Returns
         -------
             Comoving particle density of the simulation.
         """
-        return self.nparticles / self.get_boxsize(cosmo)**3
+        return self.nparticles / self.get_boxsize()**3
 
 
 class SLICSReader(Reader):
@@ -101,11 +106,13 @@ class SLICSReader(Reader):
     def __init__(
             self,
             path,
+            cosmo,
             boxsize=505. / 0.6898,
             nparticles=1536**3,
             nodes_dim=4,
             ncc=768,
             rnc=3072.0,
+            zmax=None,
             binning_match='center_comoving_distance'):
         """Reader for SLICS simulations by Joachim Harnois-Deraps.
 
@@ -136,12 +143,12 @@ class SLICSReader(Reader):
         # number of sub boxes (constant here)
         ncube = self.nodes_dim**3
 
-        super().__init__('slics', 'Mpc', nparticles, zsnapshots, ncube, binning_match, dtype=np.float32)
+        super().__init__(cosmo, 'slics', 'Mpc', nparticles, zsnapshots, zmax, ncube, binning_match, dtype=np.float32)
 
-    def get_boxsize(self, cosmo):
+    def get_boxsize(self):
         return self.boxsize
 
-    def read_sub(self, isub, verbose=False, assert_xyz_in_box=False, read_box_edges_only=False, h_to_divide_by=None):
+    def read_sub(self, isub, verbose=False, assert_xyz_in_box=False, read_box_edges_only=False):
         """Reads a sub volume of a simulation snapshot.
 
         Parameters
@@ -189,7 +196,7 @@ class SLICSReader(Reader):
             for i in range(3):
                 assert np.all(np.min(box_edges[:, i]) <= xyz[:, i]) and np.all(xyz[:, i] <= np.max(box_edges[:, i]))
 
-        assert h_to_divide_by is None
+        # assert h_to_divide_by is None
 
         return xyz, box_edges
 
@@ -199,6 +206,7 @@ class HACCReader(Reader):
     def __init__(
             self,
             path,
+            cosmo=None,
             read_cosmo_params=False,
             nsteps=500,
             sim_zmin=0.,
@@ -228,12 +236,14 @@ class HACCReader(Reader):
         self.path = path
         self.aminstep = aminstep
         self.group_along_x = group_along_x
+        self.variables = ['x', 'y', 'z']
 
         if read_cosmo_params:
+            assert cosmo is None
             fname = os.path.join(path, 'run/run000/indat.params')
             params = read_params(fname)
             # create cosmo object that can be used by builder
-            self.cosmo = pyccl.Cosmology(
+            cosmo = pyccl.Cosmology(
                 Omega_c=float(params['OMEGA_CDM']),
                 Omega_b=float(params['DEUT']) / float(params['HUBBLE'])**2,
                 h=float(params['HUBBLE']),
@@ -247,6 +257,7 @@ class HACCReader(Reader):
 
         # simulation snapshot redshifts : step are constant in scale factor, but only a fraction of steps are saved
         snapshot_dirs = os.listdir(os.path.join(path, 'output'))
+        snapshots_original = np.array([i for i in range(nsteps) if f'STEP{i}' in snapshot_dirs])
         snapshots = np.array([i for i in range(nsteps) if f'STEP{i}' in snapshot_dirs])
         print(f"Found {len(snapshots)} snapshots")
 
@@ -284,7 +295,7 @@ class HACCReader(Reader):
             if len(idx) < len(snapshots):
                 print(f"Subsampling snapshots : match distribution, returns {len(idx)} snapshots")
             snapshots = snapshots[idx]
-
+                    
         # done with subsampling !
         self.snapshots = snapshots[::-1]  # snapshots ordered by redshift
         zsnapshots = 1. / get_asnapshots(self.snapshots) - 1.
@@ -303,12 +314,34 @@ class HACCReader(Reader):
                               for ibox in range(64)])
 
         nsub = 16 if self.group_along_x else 64
-        super().__init__('hacc', 'Mpc_over_h', nparticles, zsnapshots, nsub, binning_match, dtype=dtype)
+        super().__init__(cosmo, 'hacc', 'Mpc_over_h', nparticles, zsnapshots, zmax, nsub, binning_match, dtype=dtype)
 
-    def get_boxsize(self, cosmo):
-        return self.boxsize_h / cosmo["h"]
+    def get_boxsize(self):
+        return self.boxsize_h / self.cosmo["h"]
 
-    def read_sub(self, isub, verbose=False, assert_xyz_in_box=False, read_box_edges_only=False, h_to_divide_by=None):
+    def _read_sub_helper(self, isub):
+        istep, ibox = self._sub_args[isub]
+        step = self.snapshots[istep]
+
+        boxsize = self.boxsize_h / self.cosmo["h"]
+
+        if self.group_along_x:
+            box_lims = np.array([[0, 4], self.lims[ibox][1], self.lims[ibox][2]]) * boxsize / 4.
+        else:
+            box_lims = np.array([self.lims[ibox][i] for i in range(3)]) * boxsize / 4.
+
+        cube_nodes = ((np.arange(8)[:, None] & (1 << np.arange(3))) > 0).astype(int)  #[(0,0,0),(0,0,1),...,(1,1,1)]
+        box_edges = np.zeros(cube_nodes.shape)
+
+        for i in range(3):
+            box_edges[:, i] = box_lims[i, cube_nodes[:, i]]  #there's propbably a fancy numpy way to do this...
+
+        return box_edges, ibox, step
+
+    def _get_name(self, step, ifile):
+        return os.path.join(self.path, 'output', f'STEP{step}/m000.full.mpicosmo.{step}#{ifile}')
+
+    def read_sub(self, isub, verbose=False, assert_xyz_in_box=False, read_box_edges_only=False):
         """Reads a sub volume of a simulation snapshot.
 
         Parameters
@@ -326,43 +359,26 @@ class HACCReader(Reader):
         -------
             Particle positions and sub-volume cube nodes, to quickly determine if volume/shell intersect.
         """
-        istep, ibox = self._sub_args[isub]
-        step = self.snapshots[istep]
 
-        if not hasattr(self, 'cosmo'):
-            assert h_to_divide_by is not None, "HACC uses Mpc/h units, so we need h here!"
-        else:
-            h_to_divide_by = self.cosmo['h']
-        boxsize = self.boxsize_h / h_to_divide_by
-
-        if self.group_along_x:
-            box_lims = np.array([[0, 4], self.lims[ibox][1], self.lims[ibox][2]]) * boxsize / 4.
-        else:
-            box_lims = np.array([self.lims[ibox][i] for i in range(3)]) * boxsize / 4.
-        cube_nodes = ((np.arange(8)[:, None] & (1 << np.arange(3))) > 0).astype(int)  #[(0,0,0),(0,0,1),...,(1,1,1)]
-        box_edges = np.zeros(cube_nodes.shape)
-        for i in range(3):
-            box_edges[:, i] = box_lims[i, cube_nodes[:, i]]  #there's propbably a fancy numpy way to do this...
+        box_edges, ibox, step = self._read_sub_helper(isub)
 
         if read_box_edges_only:
             return np.zeros((17, 3)), box_edges
 
-        variables = ['x', 'y', 'z']
-        out = {k: [] for k in variables}
+        out = {k: [] for k in self.variables}
 
         nx = 4 if self.group_along_x else 1
         for ix in range(nx):
             ifile = ix * 16 + ibox
-            name = os.path.join(self.path, 'output', f'STEP{step}/m000.full.mpicosmo.{step}#{ifile}')
-            print(name)
+            name = self._get_name(step, ifile)
             if verbose:
                 print("Reading", name)
-            data = pygio.read_genericio(name, variables=variables)
-            for k in variables:
+            data = pygio.read_genericio(name, variables=self.variables)
+            for k in self.variables:
                 out[k].append(data[k])
-        xyz = np.array([np.concatenate(out[k]) for k in variables]).T
+        xyz = np.array([np.concatenate(out[k]) for k in self.variables]).T
 
-        xyz /= h_to_divide_by
+        xyz /= self.cosmo["h"]
 
         if assert_xyz_in_box:
             for i in range(3):
@@ -371,20 +387,46 @@ class HACCReader(Reader):
         return xyz, box_edges.astype(self.dtype)
 
 
+class HACCHaloReader(HACCReader):
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.variables = ['fof_halo_center_x', 'fof_halo_center_y', 'fof_halo_center_z']
+        assert not self.group_along_x
+
+    def _get_name(self, step, ifile):
+        return os.path.join(self.path, 'analysis/Halos/b0168/Props', f'STEP{step}/m000-{step}.haloproperties#{ifile}')
+
+    def read_props(self, isub, props_variables, ihaloes=slice(-1), verbose=False):
+
+        istep, ibox = self._sub_args[isub]
+        step = self.snapshots[istep]
+
+        # nx = 4 if self.group_along_x else 1
+        # for ix in range(nx):
+        ix = 0
+        ifile = ix * 16 + ibox
+        name = self._get_name(step, ifile)
+        if verbose:
+            print("Reading", name)
+        data = pygio.read_genericio(name, variables=props_variables)
+
+        return {k: data[k][ihaloes] for k in props_variables}
+
+
 class DummyReader(Reader):
     """A generic class to read particles from N-body simulations.
     """
 
-    def __init__(self, boxsize=200., nshells=3, nsplit=2, nparticule_per_sub=10, zmax=2.):
+    def __init__(self, cosmo, boxsize=200., nshells=3, nsplit=2, nparticule_per_sub=10, zmax=2.):
         self.boxsize = boxsize
         self.xyzs = np.random.uniform(high=self.boxsize, size=(nsplit**3 * nshells, nparticule_per_sub, 3))
-        self.zmax = zmax
 
         nparticles = nsplit**3 * nparticule_per_sub
         zsnapshots = np.zeros(nshells)
         nsubs = nsplit**3
 
-        super().__init__('dummy', 'Mpc', nparticles, zsnapshots, nsubs, dtype=np.float64)
+        super().__init__(cosmo, 'dummy', 'Mpc', nparticles, zsnapshots, zmax, nsubs, dtype=np.float64)
 
     def get_com_shell_bins(self, cosmo):
         chi_max = pyccl.comoving_radial_distance(cosmo, 1. / (1. + self.zmax))
@@ -393,7 +435,7 @@ class DummyReader(Reader):
     def get_boxsize(self, cosmo):
         return self.boxsize
 
-    def read_sub(self, isub, verbose=False, assert_xyz_in_box=False, read_box_edges_only=False, h_to_divide_by=None):
+    def read_sub(self, isub, verbose=False, assert_xyz_in_box=False, read_box_edges_only=False):
         cube_nodes = ((np.arange(8)[:, None] & (1 << np.arange(3))) > 0).astype(int)  #[(0,0,0),(0,0,1),...,(1,1,1)]
         box_edges = cube_nodes * self.boxsize
         xyz = self.xyzs[isub]
@@ -408,6 +450,7 @@ class SkySimReader(HACCReader):
     def __init__(
             self,
             path,
+            cosmo,
             nsteps=500,
             sim_zmin=0.,
             sim_zmax=200.,
@@ -445,4 +488,4 @@ class SkySimReader(HACCReader):
         dtype = np.float32
         nsub = 1
 
-        Reader.__init__(self, 'skysim', 'Mpc_over_h', nparticles, zsnapshots, nsub, binning_match, dtype=dtype)
+        Reader.__init__(self, cosmo, 'skysim', 'Mpc_over_h', nparticles, zsnapshots, zmax, nsub, binning_match, dtype=dtype)

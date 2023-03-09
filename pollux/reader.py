@@ -15,10 +15,31 @@ except:
 
 
 class Reader:
-    """A generic class to read particles from N-body simulations.
-    """
 
     def __init__(self, cosmo, kind, unit, nparticles, zsnapshots, zmax, nsubs, binning_match, dtype=np.float64):
+        """Reader is a generic class to read particles from N-body simulations.
+
+        Parameters
+        ----------
+        cosmo
+            CCL cosmology object
+        kind
+            Kind of reader subclass (for saving files)
+        unit
+            Particle coordinate unit, 'Mpc' or 'Mpc_over_h'
+        nparticles
+            Total number of particles
+        zsnapshots
+            Redshifts of snapshots
+        zmax
+            Maximum redshift considered
+        nsubs
+            Number of sub-boxes
+        binning_match
+            Method to define shells for snapshots redshifts, must be 'center_redshift', 'center_scale_factor', 'center_comoving_distance' or 'center_comoving_volume'
+        dtype, optional
+            dtype of particle data, by default np.float64
+        """
         self.cosmo = cosmo
         self.kind = kind
 
@@ -43,15 +64,40 @@ class Reader:
         self.dtype = dtype
 
     def get_ishell(self, isub):
+        """
+        Get shell index from overall sub-volume/snapshot index
+        """
         return self._sub_args[isub][0]
 
     def get_isubs_for_shell(self, ishell):
+        """
+        Get sub-volume/snapshot indices for a given shell index
+        """
         return np.argwhere([x[0] == ishell for x in self._sub_args])[:, 0]
 
     def get_com_shell_bins(self):
+        """
+        Compute comoving distance to shell edges
+        """
         return pyccl.comoving_radial_distance(self.cosmo, 1. / (1 + self.get_z_shell_bins()))
 
     def get_z_shell_bins(self, return_fzbins=False):
+        """Compute redshift to shell edges
+
+        Parameters
+        ----------
+        return_fzbins, optional
+            Whether to return the value of the function used to find center between snapshot redshifts, by default False
+
+        Returns
+        -------
+            Redshifts of shell edges
+
+        Raises
+        ------
+        ValueError
+            _description_
+        """
         if hasattr(self, 'z_shell_bins'):
             return self.z_shell_bins
         else:
@@ -89,6 +135,23 @@ class Reader:
         raise NotImplementedError
 
     def read_sub(self, isub, verbose=False, assert_xyz_in_box=False, read_box_edges_only=False):
+        """Reads a sub volume of a simulation snapshot.
+
+        Parameters
+        ----------
+        isub
+            Index of the sub-volume/snapshot element. This should be computed automatically.
+        verbose, optional
+            Print feedback, by default False
+        assert_xyz_in_box, optional
+            Check whether particle , by default False
+        read_box_edges_only, optional
+            Read only the sub-volume cube nodes, by default False
+
+        Returns
+        -------
+            Particle positions and sub-volume cube nodes, to quickly determine if volume/shell intersect.
+        """
         raise NotImplementedError
 
     def get_box_comoving_density(self):
@@ -119,7 +182,9 @@ class SLICSReader(Reader):
         Parameters
         ----------
         path
-            Path of simulation snapshots.
+            Path of simulation snapshots
+        cosmo
+            CCL cosmology object
         boxsize, optional
             Box size in Mpc, by default 505./0.6898
         nparticles, optional
@@ -130,6 +195,10 @@ class SLICSReader(Reader):
             Integer, by default 768
         rnc, optional
             Scale, by default 3072.0
+        zmax, optional
+            Maximum redshift considered, by default None
+        binning_match, optional
+            Method to define shells, by default 'center_comoving_distance'
         """
         self.path = path
         self.boxsize = boxsize
@@ -149,23 +218,6 @@ class SLICSReader(Reader):
         return self.boxsize
 
     def read_sub(self, isub, verbose=False, assert_xyz_in_box=False, read_box_edges_only=False):
-        """Reads a sub volume of a simulation snapshot.
-
-        Parameters
-        ----------
-        isub
-            Index of the sub-volume element and the snapshot. This should be computed automatically.
-        verbose, optional
-            Print feedback, by default False
-        assert_xyz_in_box, optional
-            Check whether particle , by default False
-        read_box_edges_only, optional
-            Read only the sub-volume cube nodes, by default False
-
-        Returns
-        -------
-            Particle positions and sub-volume cube nodes, to quickly determine if volume/shell intersect.
-        """
         ishell, i = self._sub_args[isub]
         z = self.zsnapshots[ishell]
         filename = os.path.join(self.path, f'{z:.3f}xv{i}.dat')
@@ -216,22 +268,32 @@ class HACCReader(Reader):
             sampling_match_n=False,
             binning_match='center_scale_factor',
             group_along_x=False):
-        """Reader for SLICS simulations by Joachim Harnois-Deraps.
+        """Reader for HACC simulations
 
         Parameters
         ----------
         path
-            Path of simulation snapshots.
-        boxsize, optional
-            Box size in Mpc, by default 505./0.6898
-        nparticles, optional
-            Total number of particles, by default 1536**3
-        nodes_dim, optional
-            Number of MPI task per dimension (4^3 = 64 cubes), by default 4
-        ncc, optional
-            Integer, by default 768
-        rnc, optional
-            Scale, by default 3072.0
+            Root folder where particle data is located
+        cosmo, optional
+            CCL cosmology object, by default None
+        read_cosmo_params, optional
+            Whether to read cosmology from HACC run files, by default False
+        nsteps, optional
+            Number of steps in simulation, by default 500
+        sim_zmin, optional
+            Minimum redshift in simulation, by default 0.
+        sim_zmax, optional
+            Maximum redshift in simulation, by default 200.
+        zmax, optional
+            Maximum redshift considered, by default None
+        aminstep, optional
+            Minimum step in scale factor to downsample snapshots, by default 0.
+        sampling_match_n, optional
+            Number of snapshots to try to keep while matching roughly optimal distribution, by default False
+        binning_match, optional
+            Method to define shells, by default 'center_comoving_distance'
+        group_along_x, optional
+            Whether to group sub-boxes along x to define contiguous box volumes, by default False
         """
         self.path = path
         self.aminstep = aminstep
@@ -295,7 +357,7 @@ class HACCReader(Reader):
             if len(idx) < len(snapshots):
                 print(f"Subsampling snapshots : match distribution, returns {len(idx)} snapshots")
             snapshots = snapshots[idx]
-                    
+
         # done with subsampling !
         self.snapshots = snapshots[::-1]  # snapshots ordered by redshift
         zsnapshots = 1. / get_asnapshots(self.snapshots) - 1.
@@ -342,24 +404,6 @@ class HACCReader(Reader):
         return os.path.join(self.path, 'output', f'STEP{step}/m000.full.mpicosmo.{step}#{ifile}')
 
     def read_sub(self, isub, verbose=False, assert_xyz_in_box=False, read_box_edges_only=False):
-        """Reads a sub volume of a simulation snapshot.
-
-        Parameters
-        ----------
-        isub
-            Index of the sub-volume element and the snapshot. This should be computed automatically.
-        verbose, optional
-            Print feedback, by default False
-        assert_xyz_in_box, optional
-            Check whether particle , by default False
-        read_box_edges_only, optional
-            Read only the sub-volume cube nodes, by default False
-
-        Returns
-        -------
-            Particle positions and sub-volume cube nodes, to quickly determine if volume/shell intersect.
-        """
-
         box_edges, ibox, step = self._read_sub_helper(isub)
 
         if read_box_edges_only:
@@ -414,37 +458,6 @@ class HACCHaloReader(HACCReader):
         return {k: data[k][ihaloes] for k in props_variables}
 
 
-class DummyReader(Reader):
-    """A generic class to read particles from N-body simulations.
-    """
-
-    def __init__(self, cosmo, boxsize=200., nshells=3, nsplit=2, nparticule_per_sub=10, zmax=2.):
-        self.boxsize = boxsize
-        self.xyzs = np.random.uniform(high=self.boxsize, size=(nsplit**3 * nshells, nparticule_per_sub, 3))
-
-        nparticles = nsplit**3 * nparticule_per_sub
-        zsnapshots = np.zeros(nshells)
-        nsubs = nsplit**3
-
-        super().__init__(cosmo, 'dummy', 'Mpc', nparticles, zsnapshots, zmax, nsubs, dtype=np.float64)
-
-    def get_com_shell_bins(self, cosmo):
-        chi_max = pyccl.comoving_radial_distance(cosmo, 1. / (1. + self.zmax))
-        return np.linspace(0, chi_max, self.nshells + 1)
-
-    def get_boxsize(self, cosmo):
-        return self.boxsize
-
-    def read_sub(self, isub, verbose=False, assert_xyz_in_box=False, read_box_edges_only=False):
-        cube_nodes = ((np.arange(8)[:, None] & (1 << np.arange(3))) > 0).astype(int)  #[(0,0,0),(0,0,1),...,(1,1,1)]
-        box_edges = cube_nodes * self.boxsize
-        xyz = self.xyzs[isub]
-        return xyz, box_edges
-
-    def get_box_comoving_density(self, cosmo):
-        return self.nparticles / self.get_boxsize(cosmo)**3
-
-
 class SkySimReader(HACCReader):
 
     def __init__(
@@ -488,4 +501,34 @@ class SkySimReader(HACCReader):
         dtype = np.float32
         nsub = 1
 
-        Reader.__init__(self, cosmo, 'skysim', 'Mpc_over_h', nparticles, zsnapshots, zmax, nsub, binning_match, dtype=dtype)
+        Reader.__init__(
+            self, cosmo, 'skysim', 'Mpc_over_h', nparticles, zsnapshots, zmax, nsub, binning_match, dtype=dtype)
+
+
+class DummyReader(Reader):
+
+    def __init__(self, cosmo, boxsize=200., nshells=3, nsplit=2, nparticule_per_sub=10, zmax=2.):
+        self.boxsize = boxsize
+        self.xyzs = np.random.uniform(high=self.boxsize, size=(nsplit**3 * nshells, nparticule_per_sub, 3))
+
+        nparticles = nsplit**3 * nparticule_per_sub
+        zsnapshots = np.zeros(nshells)
+        nsubs = nsplit**3
+
+        super().__init__(cosmo, 'dummy', 'Mpc', nparticles, zsnapshots, zmax, nsubs, dtype=np.float64)
+
+    def get_com_shell_bins(self, cosmo):
+        chi_max = pyccl.comoving_radial_distance(cosmo, 1. / (1. + self.zmax))
+        return np.linspace(0, chi_max, self.nshells + 1)
+
+    def get_boxsize(self, cosmo):
+        return self.boxsize
+
+    def read_sub(self, isub, verbose=False, assert_xyz_in_box=False, read_box_edges_only=False):
+        cube_nodes = ((np.arange(8)[:, None] & (1 << np.arange(3))) > 0).astype(int)  #[(0,0,0),(0,0,1),...,(1,1,1)]
+        box_edges = cube_nodes * self.boxsize
+        xyz = self.xyzs[isub]
+        return xyz, box_edges
+
+    def get_box_comoving_density(self, cosmo):
+        return self.nparticles / self.get_boxsize(cosmo)**3

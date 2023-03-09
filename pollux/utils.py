@@ -1,15 +1,12 @@
-import itertools
 import warnings
 from functools import partial
 
 import healpy as hp
-import numba
 import numpy as np
 import pymaster as nmt
 from pynverse import inversefunc
 from scipy.integrate import quad as scipy_quad
 from scipy.spatial import KDTree
-from scipy.spatial.transform import Rotation
 from scipy.stats import truncnorm
 
 QUAD_EPS_REL = 1e-6
@@ -18,86 +15,10 @@ QUAD_LIMIT = 1000
 
 
 def quad(*args, **kwargs):
+    """
+    Simple wrapper to uniformize quad options
+    """
     return scipy_quad(*args, epsabs=QUAD_EPS_ABS, epsrel=QUAD_EPS_REL, limit=QUAD_LIMIT, **kwargs)[0]
-
-
-# @numba.njit(parallel=False)
-# def _add_at_one(a, index):
-#     n = len(index)
-#     for i in numba.prange(n):
-#         a[index[i]] += 1
-
-
-@numba.njit(parallel=True)
-def xyz2r2(xyz):
-    return xyz[:, 0]**2 + xyz[:, 1]**2 + xyz[:, 2]**2
-
-
-# @numba.njit(parallel=True)
-# def xyz2r(xyz):
-#     return np.sqrt(xyz2r2(xyz))
-
-# @numba.njit(parallel=True)
-# def xyzr2tp(xyz, r):
-#     assert len(xyz) == len(r)
-#     n = len(xyz)
-#     x = xyz[:, 0]
-#     y = xyz[:, 1]
-#     z = xyz[:, 2]
-#     theta = np.arccos(z / r)
-#     phi = np.arctan2(x, y)
-#     return theta, phi
-
-
-@numba.njit(parallel=True)
-def Axpb(A, b, xyz):
-    return np.dot(xyz + b, A)
-
-
-@numba.njit
-def Ax(A, xyz):
-    return np.dot(xyz, A)
-
-
-# @numba.njit(parallel=True)
-# def Axpb_inv(A, b, xyz):
-#     return np.dot(xyz, A.T) - b
-
-
-def random_isometry(rng, boxsize):
-    pcomb = list(itertools.product([1, -1], repeat=3))  # all permuted orders
-    r = Rotation.random(random_state=rng).as_matrix()
-    p = pcomb[rng.choice(len(pcomb))]
-    A = np.dot(r, np.diag(np.array(p)))
-    b = rng.random(3) * boxsize
-    return A, b
-
-
-def AABB_sphere_intersect(box_edges, s, r2):
-    # see https://stackoverflow.com/a/4579069
-    c1, c2 = box_edges.min(axis=0), box_edges.max(axis=0)
-    d2 = r2
-    for i in range(3):
-        if s[i] < c1[i]:
-            d2 -= (s[i] - c1[i])**2
-        elif s[i] > c2[i]:
-            d2 -= (s[i] - c2[i])**2
-    return d2 > 0.
-
-
-@numba.njit
-def _AABB_sphere_intersect(box_edges, s, r2):
-    # see https://stackoverflow.com/a/4579069
-    # c1, c2 = box_edges.min(axis=0), box_edges.max(axis=0)
-    d2 = r2
-    for i in range(3):
-        c1 = np.min(box_edges[:, i])
-        c2 = np.max(box_edges[:, i])
-        if s[i] < c1:
-            d2 -= (s[i] - c1)**2
-        elif s[i] > c2:
-            d2 -= (s[i] - c2)**2
-    return d2 > 0.
 
 
 def powspace(start, stop, num, power):
@@ -111,7 +32,7 @@ def powspace(start, stop, num, power):
 
 def radec2thetaphi(ra, dec):
     """
-    Converts ra and dec (in degrees) to theta and phi (Healpix conventions, in radians)
+    Convert ra and dec (in degrees) to theta and phi (Healpix conventions, in radians)
 
     """
     theta = np.pi / 2. - np.deg2rad(dec)
@@ -121,7 +42,7 @@ def radec2thetaphi(ra, dec):
 
 def thetaphi2radec(theta, phi):
     """
-    Converts theta and phi (Healpix conventions, in radians) to ra and dec (in degrees)
+    Convert theta and phi (Healpix conventions, in radians) to ra and dec (in degrees)
 
     """
     ra = np.rad2deg(phi)
@@ -130,8 +51,7 @@ def thetaphi2radec(theta, phi):
 
 
 def make_mask_radec_cuts(nside, ramin, ramax, decmin, decmax, dtype=float):
-    """
-    Generates a square mask limited by RA/DEC.
+    """Generate a square mask limited by RA/DEC
 
     Parameters
     ----------
@@ -171,6 +91,33 @@ def make_nmtbin(
         b_lmax=None,
         bins_ell=None,
         **kwargs):
+    """Create a NaMaster binning object `NmtBin`
+
+    Parameters
+    ----------
+    nside
+        `nside` parameter for healpix.
+    lmin
+        Minimum multipole
+    lmax
+        Maximum multipole
+    n_ell_bins
+        Number of bins
+    bin_func, optional
+        Binning function, by default np.linspace
+    f_ell, optional
+        Function of ell to include, can be `"pix"` to correct for the Healpix pixel window function, by default None
+    verbose, optional
+        Feedback, by default False
+    b_lmax, optional
+        Maximum multipole to include, by default None
+    bins_ell, optional
+        Directly provide bins in multipole, by default None
+
+    Returns
+    -------
+        A `NmtBin` object
+    """
     # Define ell range
     ells = np.arange(lmin, lmax + 1)
 
@@ -215,18 +162,30 @@ def make_nmtbin(
 
 
 def make_nmtbin_logspaced(nside, lmin, lmax, n_ell_bins, f_ell=None, **kwargs):
+    """
+    Helper to generate logarithmically spaced `NmtBin`
+    """
     return make_nmtbin(nside, lmin, lmax, n_ell_bins, bin_func=np.geomspace, f_ell=f_ell, **kwargs)
 
 
 def make_nmtbin_linspaced(nside, lmin, lmax, n_ell_bins, f_ell=None, **kwargs):
+    """
+    Helper to generate linearly spaced `NmtBin`
+    """
     return make_nmtbin(nside, lmin, lmax, n_ell_bins, bin_func=np.linspace, f_ell=f_ell, **kwargs)
 
 
 def make_nmtbin_powspaced(nside, lmin, lmax, n_ell_bins, power, f_ell=None, **kwargs):
+    """
+    Helper to generate power-law spaced `NmtBin`
+    """
     return make_nmtbin(nside, lmin, lmax, n_ell_bins, bin_func=partial(powspace, power=power), f_ell=f_ell, **kwargs)
 
 
 def trim_array_min_diff(a, mindiff, return_indices=False):
+    """
+    Trim a monotonously increasing array such that the difference between adjacent values is the largest possible below `mindiff`
+    """
     x = [a[0]]
     idx = [0]
     for i in range(1, len(a) - 1):
@@ -241,328 +200,10 @@ def trim_array_min_diff(a, mindiff, return_indices=False):
         return np.array(x)
 
 
-inv_halfpi = 2. / np.pi
-
-
-@numba.njit
-def _loc2pix(nside, order, ncap, npix, z, phi, sth):
-    """"
-    Healpix function loc2pix
-    """
-    za = np.abs(z)
-    tt = phi * inv_halfpi % 4.
-    if za <= 2. / 3.:
-        nl4 = 4 * nside
-        temp1 = nside * (0.5 + tt)
-        temp2 = nside * z * 0.75
-        jp = int(temp1 - temp2)  # index of  ascending edge line
-        jm = int(temp1 + temp2)  # index of descending edge line
-
-        # ring number counted from z=2/3
-        ir = nside + 1 + jp - jm  # in {1,2n+1}
-        kshift = 1 - (ir % 2)  # kshift=1 if ir even, 0 otherwise
-
-        t1 = jp + jm - nside + kshift + 1 + nl4 + nl4
-        if order > 0:
-            ip = (t1 >> 1) & (nl4 - 1)
-        else:
-            ip = ((t1 >> 1) % nl4)  # in {0,4n-1}
-
-        return ncap + (ir - 1) * nl4 + ip
-
-    else:  # Equatorial region
-        tp = tt - np.floor(tt)
-        if za < 0.99:
-            tmp = nside * np.sqrt(3 * (1 - za))
-        else:
-            tmp = nside * sth / np.sqrt((1. + za) / 3.)
-
-        jp = int(tp * tmp)  # increasing edge line index
-        jm = int((1. - tp) * tmp)  # decreasing edge line index
-
-        ir = jp + jm + 1  # ring number counted from the closest pole
-        ip = int(tt * ir)  # in {0,4*ir-1}
-
-        if z > 0:
-            return 2 * ir * (ir - 1) + ip
-        else:
-            return npix - 2 * ir * (ir + 1) + ip
-
-
-@numba.njit
-def _vec2pix_sub(nside, order, ncap, npix, x, y, z, shiftx, shifty, shiftz, rmin2, rmax2, octant_only):
-    """
-    Healpix function vec2pix with extra checks (radii and octant)
-    """
-    # apply shift
-    tmpx = x + shiftx
-    tmpy = y + shifty
-    tmpz = z + shiftz
-
-    # get radius and remove particles out of shel
-    r2 = tmpx**2 + tmpy**2 + tmpz**2
-    if r2 < rmin2 or r2 >= rmax2:
-        return -1
-
-    # remove particles out of octant if octant_only
-    if octant_only:  # check if particle out of octant
-        if (tmpx < 0.) or (tmpy < 0.) or (tmpz < 0.):
-            return -1
-
-    # get longitude (phi), altitude (nz) and distance to z-axis (sth) of particle projected on the unit sphere
-    phi = np.arctan2(tmpy, tmpx)
-    xl = 1. / np.sqrt(r2)
-    nz = tmpz * xl
-    sth = np.sqrt(tmpx**2 + tmpy**2) * xl
-
-    return _loc2pix(nside, order, ncap, npix, nz, phi, sth)
-
-
-@numba.njit(parallel=True)
-def _vec2pix(nside, order, ncap, npix, x, y, z, shiftx, shifty, shiftz, rmin2, rmax2, octant_only):
-    """"
-    Parallelized Healpix function vec2pix to go from x,y,z to healpix pixel
-    """
-    n = len(x)
-    ipix = np.zeros(n, dtype=np.int_)
-    for i in numba.prange(n):
-        ipix[i] = _vec2pix_sub(
-            nside, order, ncap, npix, x[i], y[i], z[i], shiftx, shifty, shiftz, rmin2, rmax2, octant_only)
-    return ipix
-
-
-@numba.njit
-def _vec2radec_sub(x, y, z, shiftx, shifty, shiftz, rmin2, rmax2, octant_only):
-    """
-    Healpix function vec2pix with extra checks (radii and octant)
-    """
-    # apply shift
-    tmpx = x + shiftx
-    tmpy = y + shifty
-    tmpz = z + shiftz
-
-    # get radius and remove particles out of shel
-    r2 = tmpx**2 + tmpy**2 + tmpz**2
-    if r2 < rmin2 or r2 >= rmax2:
-        return (False, 0., 0., 0.)
-
-    # remove particles out of octant if octant_only
-    if octant_only:  # check if particle out of octant
-        if (tmpx < 0.) or (tmpy < 0.) or (tmpz < 0.):
-            return (False, 0., 0, 0.)
-
-    r = np.sqrt(r2)
-    theta = np.arccos(tmpz / r)
-    phi = np.arctan2(tmpx, tmpy)
-
-    ra = np.rad2deg(phi)
-    dec = 90. - np.rad2deg(theta)
-
-    return (True, ra, dec, r)
-
-
-@numba.njit(parallel=True)
-def _vec2radec(x, y, z, shiftx, shifty, shiftz, rmin2, rmax2, octant_only):
-    """"
-    Parallelized Healpix function vec2pix to go from x,y,z to healpix pixel
-    """
-    n = len(x)
-    ra = np.zeros(n, dtype=x.dtype)
-    dec = np.zeros(n, dtype=x.dtype)
-    r = np.zeros(n, dtype=x.dtype)
-    idx =  np.zeros(n, dtype=np.int_)
-    for i in numba.prange(n):
-        good, tmpra, tmpdec, tmpr = _vec2radec_sub(x[i], y[i], z[i], shiftx, shifty, shiftz, rmin2, rmax2, octant_only)
-        if good:
-            idx[i] = i
-            ra[i] = tmpra
-            dec[i] = tmpdec
-            r[i] = tmpr
-        else:
-            idx[i] = -1
-
-    return idx, ra, dec, r
-
-
-@numba.njit
-def _unique_pix_pos(ipix, npix):
-    n = len(ipix)
-    c = np.zeros(npix, dtype=np.int_)
-    for i in range(n):
-        pos = ipix[i]
-        if pos >= 0:
-            c[pos] += 1
-    u = np.argwhere(c)[:, 0]
-    return u, c[u]
-
-
-# @numba.njit
-# def _vec2pix_unique(nside, order, ncap, npix, x, y, z, shiftx, shifty, shiftz, rmin2, rmax2, octant_only):
-#     ipix = _vec2pix(nside, order, ncap, npix, x, y, z, shiftx, shifty, shiftz, rmin2, rmax2, octant_only)
-#     return unique_pix_pos(ipix, npix)
-
-# def vec2pix_unique(nside, x, y, z, shiftx, shifty, shiftz, rmin2, rmax2, octant_only):
-#     order = hp.nside2order(nside)
-#     ncap = (nside * nside - nside) << 1
-#     npix = hp.nside2npix(nside)
-#     return _vec2pix_unique(nside, order, ncap, npix, x, y, z, shiftx, shifty, shiftz, rmin2, rmax2, octant_only)
-
-@numba.njit
-def construct_shell_sub(
-        xyz, box_edges_original, A, b, nrepeat, boxsize, rmin2, rmax2, apply_random_isometry, octant_only, nside, order,
-        ncap, npix):
-    n = len(xyz)
-
-    # precompute isometry on particles (since repeats are then only a shift away)
-    if apply_random_isometry:
-        xyz = Axpb(A, b, xyz)
-        box_edges = Axpb(A, b, box_edges_original)
-    else:
-        box_edges = box_edges_original
-
-    count = np.zeros(npix, dtype=np.uint)
-
-    # repeats = []
-
-    dtype = xyz.dtype
-
-    # repeat the box
-    for ix in range(-nrepeat, nrepeat + 1):
-        for iy in range(-nrepeat, nrepeat + 1):
-            for iz in range(-nrepeat, nrepeat + 1):
-                # compute shift
-                shift_original = np.expand_dims(np.array([ix, iy, iz]) * boxsize, 0).astype(dtype)
-                if apply_random_isometry:
-                    shift = Ax(A, shift_original)
-                else:
-                    shift = shift_original
-
-                # apply isometry to box edges
-                tmp_box_edges = shift + box_edges
-
-                # check if intersects octant, otherwise skip
-                if octant_only:
-                    found_edge_in_octant = False
-                    for e in tmp_box_edges:
-                        if np.all(e > 0.):
-                            found_edge_in_octant = True
-                    if not found_edge_in_octant:
-                        continue
-
-                ## check if box intersects with shell, otherwise skip
-                # first, check if box fully inside inner sphere
-                if np.all(xyz2r2(tmp_box_edges) < rmin2):
-                    continue
-
-                # second, check if box intersects with outer sphere
-                sphere_center = -b if apply_random_isometry else np.zeros(3, dtype=dtype)
-                if not _AABB_sphere_intersect(box_edges_original + shift_original, sphere_center, rmax2):
-                    continue
-
-                # if we got this far, then this repeat intersects with the shell
-                # repeats.append([ix, iy, iz])
-
-                ## add particles to shell
-                # compute corresponding healpy pixels of all particles (particles out of shell/octant quickly set to -1) with vec2pix and loc2pix (translated into python from Healpix code)
-                ipix = _vec2pix(
-                    nside, order, ncap, npix, xyz[:, 0], xyz[:, 1], xyz[:, 2], shift[0, 0], shift[0, 1], shift[0, 2],
-                    rmin2, rmax2, octant_only)
-
-                for i in range(n):
-                    pos = ipix[i]
-                    if pos >= 0:
-                        count[pos] += 1
-
-    u = np.argwhere(count)[:, 0]
-    return u, count[u]
-
-
-@numba.njit
-def construct_shell_sub_catalog(
-        xyz, box_edges_original, A, b, nrepeat, boxsize, rmin2, rmax2, apply_random_isometry, octant_only):
-    n = len(xyz)
-
-    # precompute isometry on particles (since repeats are then only a shift away)
-    if apply_random_isometry:
-        xyz = Axpb(A, b, xyz)
-        box_edges = Axpb(A, b, box_edges_original)
-    else:
-        box_edges = box_edges_original
-
-    idx = []
-    ra = []
-    dec = []
-    r = []
-
-    dtype = xyz.dtype
-    
-    # repeat the box
-    for ix in range(-nrepeat, nrepeat + 1):
-        for iy in range(-nrepeat, nrepeat + 1):
-            for iz in range(-nrepeat, nrepeat + 1):
-                # compute shift
-                shift_original = np.expand_dims(np.array([ix, iy, iz]) * boxsize, 0).astype(dtype)
-                if apply_random_isometry:
-                    shift = Ax(A, shift_original)
-                else:
-                    shift = shift_original
-
-                # apply isometry to box edges
-                tmp_box_edges = shift + box_edges
-
-                # check if intersects octant, otherwise skip
-                if octant_only:
-                    found_edge_in_octant = False
-                    for e in tmp_box_edges:
-                        if np.all(e > 0.):
-                            found_edge_in_octant = True
-                    if not found_edge_in_octant:
-                        continue
-
-                ## check if box intersects with shell, otherwise skip
-                # first, check if box fully inside inner sphere
-                if np.all(xyz2r2(tmp_box_edges) < rmin2):
-                    continue
-
-                # second, check if box intersects with outer sphere
-                sphere_center = -b if apply_random_isometry else np.zeros(3, dtype=dtype)
-                if not _AABB_sphere_intersect(box_edges_original + shift_original, sphere_center, rmax2):
-                    continue
-
-                # if we got this far, then this repeat intersects with the shell
-                # repeats.append([ix, iy, iz])
-
-                # if catalog_mode:
-                tmpidx, tmpra, tmpdec, tmpr = _vec2radec(
-                    xyz[:, 0], xyz[:, 1], xyz[:, 2], shift[0, 0], shift[0, 1], shift[0, 2], rmin2, rmax2,
-                    octant_only)
-                
-                w = tmpidx >= 0
-                if np.any(w):
-                    idx.append(tmpidx[w])
-                    ra.append(tmpra[w])
-                    dec.append(tmpdec[w])
-                    r.append(tmpr[w])
-                # else:
-                #     ## add particles to shell
-                #     # compute corresponding healpy pixels of all particles (particles out of shell/octant quickly set to -1) with vec2pix and loc2pix (translated into python from Healpix code)
-                #     ipix = _vec2pix(
-                #         nside, order, ncap, npix, xyz[:, 0], xyz[:, 1], xyz[:, 2], shift[0, 0], shift[0, 1],
-                #         shift[0, 2], rmin2, rmax2, octant_only)
-
-                #     for i in range(n):
-                #         pos = ipix[i]
-                #         if pos >= 0:
-                #             count[pos] += 1
-
-    # if catalog_mode:
-    return idx, ra, dec, r
-    # else:
-    #     u = np.argwhere(count)[:, 0]
-    #     return u, count[u]
-
-
 def read_params(fname):
+    """
+    Read cosmology from HACC run files
+    """
     with open(fname, 'r') as f:
         params = {}
         for x in f:
@@ -576,6 +217,9 @@ def read_params(fname):
 
 
 def get_z_shell_fz(zsnapshots, func=None, ifunc=None, zmax=None, return_fzbins=False):
+    """
+    Compute the redshift of the shell edges, set at the center in some space defined by `func` or its inverse `ifunc`
+    """
     assert func or ifunc
     if func is None:
         func = inversefunc(ifunc, domain=[0., None], image=[0., None])
@@ -595,25 +239,17 @@ def get_z_shell_fz(zsnapshots, func=None, ifunc=None, zmax=None, return_fzbins=F
 
 
 def get_trunc_norm(myclip_a, myclip_b, loc, scale):
+    """
+    Create a truncated normal distribution
+    """
     a, b = (myclip_a - loc) / scale, (myclip_b - loc) / scale
     return truncnorm(loc=loc, scale=scale, a=a, b=b)
 
 
-# def subsample_ppf(z, n, ppf, check_unique=True, keep_first_last=True):
-#     tree = KDTree(z[:, None])
-#     u = np.linspace(0, 1, n + 1)
-#     if keep_first_last:
-#         u = np.linspace(0, 1, n)
-#         best_idx = tree.query(ppf(u)[:, None])[1]
-#     else:
-#         umid = 0.5 * (u[1:] + u[:-1])
-#         best_idx = tree.query(ppf(umid)[:, None])[1]
-#     if check_unique:
-#         assert len(np.unique(best_idx)) == len(best_idx)
-#     return best_idx, z[best_idx]
-
-
 def subsample_ppf(z, n, ppf, keep_first_last=True):
+    """
+    Compute the redshifts `z` that are the closest to points spread uniformly for the distribution defined by its percent point function `ppf`
+    """
     tree = KDTree(z[:, None])
     for usize in range(n, len(z) + 1):
         if keep_first_last:

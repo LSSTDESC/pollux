@@ -552,7 +552,7 @@ class ShellBuilder(MapBuilder):
 
         hdul = [fits.PrimaryHDU()]
 
-        for isub in self.tqdm(isubs, desc="[construct_shell_catalog]"):
+        for isub in self.tqdm(isubs, desc=f"[construct_shell_catalog: shell {ishell}]"):
             res = self.construct_shell_sub_catalog(isub, **kwargs)
             idx = fits.Column(name='ihaloes', format='I', array=res[0])
             ra = fits.Column(name='ra', format='E', array=res[1])
@@ -568,7 +568,7 @@ class ShellBuilder(MapBuilder):
         fname = self.get_fname(ishell, what='haloes')
         fits.HDUList(hdul).writeto(fname, overwrite=True)
 
-    def get_shell_catalog_props(self, ishell, variables):
+    def read_shell_catalog_props(self, ishell, variables):
         """Get particle (eg haloes) properties from a precomputed catalog
 
         Parameters
@@ -809,7 +809,7 @@ def _vec2radec_sub(x, y, z, shiftx, shifty, shiftz, rmin2, rmax2, octant_only):
 
     r = np.sqrt(r2)
     theta = np.arccos(tmpz / r)
-    phi = np.arctan2(tmpx, tmpy)
+    phi = np.arctan2(tmpy, tmpx)
 
     ra = np.rad2deg(phi)
     dec = 90. - np.rad2deg(theta)
@@ -821,7 +821,7 @@ def _vec2radec_sub(x, y, z, shiftx, shifty, shiftz, rmin2, rmax2, octant_only):
 def _vec2radec(x, y, z, shiftx, shifty, shiftz, rmin2, rmax2, octant_only):
     """
     Parallelized function to go from x,y,z to RA, DEC and radius with extra checks (radii and octant)
-    """    
+    """
     n = len(x)
     ra = np.zeros(n, dtype=x.dtype)
     dec = np.zeros(n, dtype=x.dtype)
@@ -940,7 +940,7 @@ def construct_shell_sub(
 @numba.njit
 def construct_shell_sub_catalog(
         xyz, box_edges_original, A, b, nrepeat, boxsize, rmin2, rmax2, apply_random_isometry, octant_only):
-        """
+    """
     Parallelized helper function for ShellBuilder.construct_shell_sub_catalog
     """
     n = len(xyz)

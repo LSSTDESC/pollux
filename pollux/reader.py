@@ -92,11 +92,6 @@ class Reader:
         Returns
         -------
             Redshifts of shell edges
-
-        Raises
-        ------
-        ValueError
-            _description_
         """
         if hasattr(self, 'z_shell_bins'):
             return self.z_shell_bins
@@ -115,8 +110,13 @@ class Reader:
                 ifunc = None
             else:
                 raise ValueError
-            self.z_shell_bins = get_z_shell_fz(
+            
+            res = get_z_shell_fz(
                 self.zsnapshots, func=func, ifunc=ifunc, zmax=self.zmax, return_fzbins=return_fzbins)
+            if return_fzbins:
+                self.z_shell_bins = res[0]
+            else:
+                self.z_shell_bins = res
 
             return self.z_shell_bins
 

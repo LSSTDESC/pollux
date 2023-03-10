@@ -14,7 +14,7 @@ from .utils import quad
 class MyCMBLensingTracer(pyccl.CMBLensingTracer):
 
     def __init__(self, cosmo, z_source, n_samples=100):
-        super().__init__(cosmo, z_source, n_samples=100)
+        super().__init__(cosmo, z_source, n_samples=n_samples)
         self.z_source = z_source
 
 
@@ -26,9 +26,13 @@ class LensingBuilder(MapBuilder):
         Parameters
         ----------
         shell_builder
-            ShellBuilder object.
+            Shell builder object
         nzs
             List of callables representing redshift distributions.
+        kappa_dir, optional
+            Folder where to save maps, by default None
+        dtype, optional
+            dtype of maps, by default np.float32
         """
         self.shell_builder = shell_builder
         if kappa_dir is None:
@@ -40,8 +44,6 @@ class LensingBuilder(MapBuilder):
         self.nshells = shell_builder.nshells
         self.nzs = nzs
 
-        # self.tracers = self.get_tracers()
-        # self.nkappas = len(self.tracers)
         if nzs == 'zsnapshots':
             self.nkappas = self.shell_builder.nshells
         else:
@@ -59,7 +61,7 @@ class LensingBuilder(MapBuilder):
             **kwargs)
 
     def get_tracers(self, Nz=1000):
-        z_shell_bins = self.reader.get_z_shell_bins(self.cosmo)
+        z_shell_bins = self.reader.get_z_shell_bins()
 
         tracers = []
         if self.nzs == 'zsnapshots':
@@ -76,7 +78,7 @@ class LensingBuilder(MapBuilder):
         return tracers
 
     def get_tracers_sacc(self, Nz=1000):
-        z_shell_bins = self.reader.get_z_shell_bins(self.cosmo)
+        z_shell_bins = self.reader.get_z_shell_bins()
 
         tracers = []
         if self.nzs == 'zsnapshots':
@@ -103,6 +105,27 @@ class LensingBuilder(MapBuilder):
             skip_existing=False,
             check_read_existing=True,
             use_precomputed_alms=False):
+        """Compute shear maps from convergence maps
+
+        Parameters
+        ----------
+        ikappas, optional
+            Map indices, by default None
+        return_alms, optional
+            Whether to return alm's, by default False
+        lmax, optional
+            Maximum multipole, by default None
+        skip_existing, optional
+            Whether to skip if map file exsists, by default False
+        check_read_existing, optional
+            Whether to try reading the file before skipping, by default True
+        use_precomputed_alms, optional
+            Whether to use precomputed alm files instead of computing them from convergence maps (faster!), by default False
+
+        Returns
+        -------
+            Shear maps and alm's if requested
+        """
         if lmax is None:
             lmax = 3 * self.shell_builder.nside - 1
 
@@ -171,14 +194,14 @@ class BornLensingBuilder(LensingBuilder):
 
         if multiple_planes:
             rho_m = pyccl.background.rho_x(self.cosmo, 1., 'matter', is_comoving=True)  #  in units of Msun / Mpc^3
-            vol = self.reader.get_boxsize(self.cosmo)**3  # in Mpc^3
+            vol = self.reader.get_boxsize()**3  # in Mpc^3
             mpart = rho_m * vol / self.reader.nparticles  # in Msun
 
             area = hp.nside2pixarea(self.nside)
 
             self.mpart_over_area = mpart / area
 
-            zmax = self.reader.get_z_shell_bins(self.cosmo)[-1]
+            zmax = self.reader.zmax
             self.dndz_norm = [
                 quad(lambda z: t.get_dndz(z), 0., zmax) if isinstance(t, pyccl.tracers.WeakLensingTracer) else np.nan
                 for t in self.get_tracers()
@@ -186,7 +209,7 @@ class BornLensingBuilder(LensingBuilder):
 
     def compute_weight(self, ishell, tracer, dndz_norm=None, zlens=None):
         if self.multiple_planes:
-            zmax = self.reader.get_z_shell_bins(self.cosmo)[-1]
+            zmax = self.reader.zmax
 
             if zlens is None:
                 zlens = self.shell_builder.get_mean_z(ishell)
@@ -217,22 +240,10 @@ class BornLensingBuilder(LensingBuilder):
 
             return w * self.mpart_over_area / d_A_lens**2
         else:
-            chi_min, chi_max = self.reader.get_com_shell_bins(self.cosmo)[ishell:ishell + 2]
+            chi_min, chi_max = self.reader.get_com_shell_bins()[ishell:ishell + 2]
             return quad(lambda chi: tracer.get_kernel(chi), chi_min, chi_max)
 
     def construct_maps(self, ikappas=None, skip_existing=False, check_read_existing=True):
-        """Constructs and saves convergence maps from particle shells in the Born approximation, ie by summing the particle overdensity maps with appropriate weights computed with CCL.
-
-        Parameters
-        ----------
-        dtype, optional
-            Dtype of the convergence map, by default np.float32
-
-        Returns
-        -------
-            List of convergence maps and weights used in the summation.
-        """
-
         if ikappas is None:
             ikappas = range(self.nkappas)
         elif type(ikappas) is int:

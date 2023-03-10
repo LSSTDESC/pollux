@@ -29,6 +29,35 @@ class MapBuilder:
             sacc_type=None,
             b=None,
             nlb=20):
+        """MapBuilder is a generic class to build maps that groups functions for I/O, Cl's computations, etc.
+
+        Parameters
+        ----------
+        nside
+            `nside` parameter for healpix
+        dtype
+            dtype of maps
+        save_dir
+            Folder where to save maps
+        base_fname
+            Basis of file names
+        nmaps
+            Number of maps
+        nside_c, optional
+            `nside_c` parameter for healsparse, by default 32
+        octant_only, optional
+            Whether to limit maps to the octant, by default True
+        save_format, optional
+            File format, by default 'fits'
+        wsp_dir, optional
+            Folder where to find the NaMaster workspace object, by default None
+        sacc_type, optional
+            Tracer type in SACC, by default None
+        b, optional
+            NaMaster binning object, by default None
+        nlb, optional
+            Number of multipole bins, by default 20
+        """
         self.nside = nside
         self.npix = hp.nside2npix(nside)
         self.dtype = dtype
@@ -57,6 +86,9 @@ class MapBuilder:
                 os.makedirs(self.save_dir, exist_ok=True)
 
     def tqdm(self, it, **kwargs):
+        """
+        Helper function for progress bars
+        """
         if it is None:
             return trange(self.nmaps, **kwargs)
         elif isinstance(it, Iterable):
@@ -67,6 +99,9 @@ class MapBuilder:
             raise ValueError
 
     def get_fname(self, imap=None, sub=None, what=None, force_fits=False):
+        """
+        Helper function to generate file names
+        """
         fname = self.base_fname + f'_nside{self.nside}'
 
         if what is not None:
@@ -85,16 +120,58 @@ class MapBuilder:
 
         return os.path.join(self.save_dir, fname)
 
-    def get_tracers(self):
+    def get_tracers(self, Nz=1000):
+        """Create CCL Tracer object for theory computations
+
+        Parameters
+        ----------
+        Nz, optional
+            Number of points to define splines, by default 1000
+        """
         raise NotImplementedError
 
-    def get_tracers_sacc(self):
+    def get_tracers_sacc(self, Nz=1000):
+        """Create SACC tracer object for measured angular power spectra
+
+        Parameters
+        ----------
+        Nz, optional
+            Number of points to define splines, by default 1000
+        """
         raise NotImplementedError
 
     def construct_maps(self, imaps=None, skip_existing=False, check_read_existing=True, **kwargs):
+        """Construct maps
+
+        Parameters
+        ----------
+        imaps, optional
+            Map indices, by default None
+        skip_existing, optional
+            Whether to skip if map file exsists, by default False
+        check_read_existing, optional
+            Whether to try reading the file before skipping, by default True
+        """
         raise NotImplementedError
 
     def check_maps(self, imaps=None, read=False, fname=None, check_finite=False):
+        """Check map files
+
+        Parameters
+        ----------
+        imaps, optional
+            Map indices, by default None
+        read, optional
+            Whether to try reading the files, by default False
+        fname, optional
+            Provide file names to test other files, by default None
+        check_finite, optional
+            Whether to check if the map values are finite within the mask, by default False
+
+        Returns
+        -------
+            Result(s) of the tests
+        """
         assert (imaps is None) or (fname is None)
 
         def check_one(filename):
@@ -135,7 +212,7 @@ class MapBuilder:
         Parameters
         ----------
         imaps, optional
-            Indices of maps, by default None
+            Map indices, by default None
 
         Returns
         -------
@@ -189,6 +266,9 @@ class MapBuilder:
         hp.graticule(verbose=False)
 
     def get_mask(self, return_ipix=False):
+        """
+        Helper function to compute the mask
+        """
         if not hasattr(self, 'mask'):
             if self.octant_only:
                 self.mask = make_mask_radec_cuts(self.nside, 0, 90, 0, 90)
@@ -202,20 +282,15 @@ class MapBuilder:
             return self.mask
 
     def get_cls_b(self):
-        # Workaround to keep MapBuilder serializable...
+        """
+        Workaround to keep MapBuilder serializable...
+        """
         if not hasattr(self, 'b'):
             self.b = make_nmtbin_logspaced(self.nside, 8, 2 * self.nside, self._nlb, f_ell='pixwin')
         return self.b
 
     def get_cls_wsp(self):
-        """Gets the Namaster workspace object for the shell (same for all shells here).
-
-        Parameters
-        ----------
-        b, optional
-            Namaster binning scheme, by default None
-        nlb, optional
-            Number of multipole bins, by default 50
+        """Get the Namaster workspace object for the shell (same for all shells here).
 
         Returns
         -------
@@ -239,9 +314,29 @@ class MapBuilder:
             return self.wsp
 
     def get_field_map(self, imap):
+        """"
+        Create NaMaster field object of a map
+        """
         raise NotImplementedError
 
     def compute_alms(self, imaps=None, save=True, skip_existing=False, check_read_existing=True):
+        """Compute spherical harmonic coefficients
+
+        Parameters
+        ----------
+        imaps, optional
+            Map indices, by default None
+        save, optional
+            Whether to save the alm's, by default True
+        skip_existing, optional
+            Whether to skip existing files, by default False
+        check_read_existing, optional
+            Whether to try reading files before skipping, by default True
+
+        Returns
+        -------
+            Dictionary of alm's
+        """
         mask = self.get_mask()
 
         alms = {}
@@ -264,6 +359,19 @@ class MapBuilder:
         return alms
 
     def compute_maps_from_alms(self, imaps=None, save=True):
+        """Compute maps from their alm's
+
+        Parameters
+        ----------
+        imaps, optional
+            Map indices, by default None
+        save, optional
+            Whether to save the maps, by default True
+
+        Returns
+        -------
+            List of maps
+        """
         _, ipix = self.get_mask(return_ipix=True)
 
         maps = []
@@ -280,6 +388,9 @@ class MapBuilder:
         return maps
 
     def _save_cls(self, ell, cl):
+        """
+        Helper function to save angular power spectra with SACC
+        """
         s = sacc.Sacc()
         tracers = self.get_tracers_sacc()
         for t in tracers:
@@ -291,24 +402,25 @@ class MapBuilder:
         s.save_fits(fname, overwrite=True)
 
     def compute_cls(self, imaps=None, auto_only=False, save=True, use_precomputed_alms=False, pair_job=None):
-        """Computes the (auto- and cross-) angular power spectra of convergence maps.
+        """Compute the (auto- and cross-) angular power spectra of convergence maps
 
         Parameters
         ----------
-        maps, optional
-            List of convergence maps, by default None
         imaps, optional
-            Indices of convergence maps, by default None
-        b, optional
-            Namaster binning scheme, by default None
-        nlb, optional
-            Number of multipole bins, by default 50
+            Map indices, by default None
+        auto_only, optional
+            Whether to only compute auto-correlations, by default False
+        save, optional
+            Whether to save the angular power spectra, by default True
+        use_precomputed_alms, optional
+            Whether to use precomputed alm files, by default False
+        pair_job, optional
+            Index in the pair list to compute only one correlation (useful for parallelization), by default None
 
         Returns
         -------
             Multipole bin centers and dictionary of spectra.
         """
-
         if imaps is None:
             imaps = range(self.nmaps)
 
@@ -356,6 +468,17 @@ class MapBuilder:
         return ell, cl
 
     def load_cls(self, return_dict=False):
+        """Load angular power spectra from files
+
+        Parameters
+        ----------
+        return_dict, optional
+            Whether to return as a dictionary or SACC object, by default False
+
+        Returns
+        -------
+            Angular power spectra in dictionary or SACC format
+        """
         fname = self.get_fname(what='cls', force_fits=True)
         s = sacc.Sacc.load_fits(fname)
         if return_dict:
@@ -371,20 +494,20 @@ class MapBuilder:
             return s
 
     def predict_cls(self, imaps=None, auto_only=False, approximate=False):
-        """Computes theory angular power spectra of convergence maps with CCL.
+        """Compute theory angular power spectra of convergence maps with CCL
 
         Parameters
         ----------
         imaps, optional
-            Indices of convergence maps, by default None
-        b, optional
-            Namaster binning scheme, by default None
-        nlb, optional
-            Number of multipole bins, by default 50
+            Map indices, by default None
+        auto_only, optional
+            Whether to only compute auto-correlations, by default False
+        approximate, optional
+            Use approximate binning instead of using bandpower window matrices, by default False
 
         Returns
         -------
-            Multipole bin centers and dictionary of spectra.
+            Multipole bin centers and dictionary of spectra
         """
         if imaps is None:
             imaps = range(self.nmaps)
@@ -423,6 +546,25 @@ class MapBuilder:
             ratio_data_theory=False,
             save=True,
             sharey=None):
+        """Plot predicted and/or measured angular power spectra of maps
+
+        Parameters
+        ----------
+        auto_only, optional
+            Whether to only plot auto-correlations, by default False
+        logy, optional
+            Use log scale on y-axis, by default False
+        theory_only, optional
+            Plot predicted spectra only, by default False
+        data_only, optional
+            Plot measured spectra only, by default False
+        ratio_data_theory, optional
+            Plot ratio of measured and predicted spectra, by default False
+        save, optional
+            Whether to save the plot, by default True
+        sharey, optional
+            Share y-axis scaling (can be "row" or True), by default None
+        """
         n = self.nmaps
         m = 1 if auto_only else n
         sharey = sharey or False  #False if auto_only else 'row'

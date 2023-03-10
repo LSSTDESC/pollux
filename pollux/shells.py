@@ -1,12 +1,18 @@
+import itertools
+import warnings
+
 import healpy as hp
 import healsparse
+import numba
 import numpy as np
 import pyccl
 import sacc
+from astropy.io import fits
+from scipy.spatial.transform import Rotation
 from tqdm.auto import tqdm, trange
 
 from .map_builder import MapBuilder
-from .utils import *
+from .utils import quad
 
 
 class ShellBuilder(MapBuilder):
@@ -14,7 +20,6 @@ class ShellBuilder(MapBuilder):
     def __init__(
             self,
             reader,
-            cosmo,
             nside,
             save_dir,
             apply_random_isometry=False,
@@ -24,14 +29,12 @@ class ShellBuilder(MapBuilder):
             z_subsample_auto=2.,
             group_isometries=None,
             **kwargs):
-        """An object to handle the computation of particle shells from an N-body simulation.
+        """ShellBuilder is a class to handle the computation of particle shells from snapshots of an N-body simulation.
 
         Parameters
         ----------
         reader
             N-body simulation reader.
-        cosmo
-            Cosmology object from CCL.
         nside
             Resolution parameter nside of the shells.
         save_dir, optional
@@ -51,7 +54,7 @@ class ShellBuilder(MapBuilder):
         """
 
         self.reader = reader
-        self.cosmo = cosmo
+        self.cosmo = reader.cosmo
         self.apply_random_isometry = apply_random_isometry
         self.seed = seed
         self.subsample_box = subsample_box
@@ -76,6 +79,20 @@ class ShellBuilder(MapBuilder):
         if dtype == np.int32:
             print(f"Warning: the max value for {dtype} might not be enough : {np.iinfo(dtype)}")
 
+        # Make sure snapshots are larger than the shells
+        z_shell_bins = self.reader.get_z_shell_bins()
+        com_shell_bins = self.reader.get_com_shell_bins()
+        boxsize = self.reader.get_boxsize()
+        diff = np.diff(com_shell_bins)
+        print(f"Box size = {boxsize:.2f} Mpc")
+        print(f"Number of shells = {self.nmaps}")
+        if not np.all(diff < boxsize):
+            message = "Some shells are deeper than the simulation box!\n"
+            for ishell in range(self.nmaps):
+                if diff[ishell] > boxsize:
+                    message += f"Shell {ishell} ({z_shell_bins[ishell]:.2f}<z<{z_shell_bins[ishell+1]:.2f}) has width {diff[ishell]:.2f} Mpc\n"
+            warnings.warn(message)
+
         # Draw random isometries
         if apply_random_isometry:
             self.Abs = self.get_random_isometries()
@@ -84,12 +101,15 @@ class ShellBuilder(MapBuilder):
         assert subsample_box == 'auto' or type(subsample_box) is float or subsample_box is None
 
     def _get_dndz(self, zz):
+        """
+        Helper function to get redshift distribution proportional to volume, ie $dn/dz \propto dV/dz$
+        """
         aa = 1. / (1. + zz)
         dVdz = pyccl.comoving_angular_distance(self.cosmo, aa)**2 / pyccl.background.h_over_h0(self.cosmo, aa)
         return dVdz / np.trapz(dVdz, zz)  # rough normalization
 
     def get_tracers(self, Nz=1000):
-        z_shell_bins = self.reader.get_z_shell_bins(self.cosmo)
+        z_shell_bins = self.reader.get_z_shell_bins()
 
         tracers = []
         for ishell in range(self.nshells):
@@ -100,7 +120,7 @@ class ShellBuilder(MapBuilder):
         return tracers
 
     def get_tracers_sacc(self, Nz=1000):
-        z_shell_bins = self.reader.get_z_shell_bins(self.cosmo)
+        z_shell_bins = self.reader.get_z_shell_bins()
 
         tracers = []
         for ishell in range(self.nshells):
@@ -111,7 +131,10 @@ class ShellBuilder(MapBuilder):
         return tracers
 
     def get_mean_z(self, ishell):
-        z_shell_bins = self.reader.get_z_shell_bins(self.cosmo)
+        """
+        Compute the mean redshift of a shell
+        """
+        z_shell_bins = self.reader.get_z_shell_bins()
         amin = 1. / (1. + z_shell_bins[ishell + 1])
         amax = 1. / (1. + z_shell_bins[ishell])
         dVdz = lambda a: pyccl.comoving_angular_distance(self.cosmo, a)**2 / pyccl.background.h_over_h0(self.cosmo, a)
@@ -121,19 +144,19 @@ class ShellBuilder(MapBuilder):
         return 1. / amean - 1.
 
     def get_random_isometries(self):
-        """Generates random isometries for each shell.
+        """Generate random isometries for each shell
 
         Returns
         -------
             A list of (A,b) with an isometry A (rotations and flips) and translation by shift b.
         """
         rng = np.random.default_rng(self.seed)
-        boxsize = self.reader.get_boxsize(self.cosmo)
+        boxsize = self.reader.get_boxsize()
 
         # find number of isometries (can be grouped for adjacent shells)
         n_isometries = self.nshells
         if self.group_isometries is not None:
-            com_shell_bins = self.reader.get_com_shell_bins(self.cosmo)
+            com_shell_bins = self.reader.get_com_shell_bins()
             if type(self.group_isometries) is bool:
                 assert self.group_isometries
                 com_iso_depth = boxsize
@@ -168,8 +191,11 @@ class ShellBuilder(MapBuilder):
         return self.Abs
 
     def estimate_repeats(self, ishell):
-        com_shell_bins = self.reader.get_com_shell_bins(self.cosmo)
-        box_volume = self.reader.get_boxsize(self.cosmo)**3
+        """
+        Estimate the number of simulation repeats needed with a simple volume ratio
+        """
+        com_shell_bins = self.reader.get_com_shell_bins()
+        box_volume = self.reader.get_boxsize()**3
 
         shell_volume = 4. / 3. * np.pi * (com_shell_bins[ishell + 1]**3 - com_shell_bins[ishell]**3)
         if self.octant_only:
@@ -178,11 +204,8 @@ class ShellBuilder(MapBuilder):
         return shell_volume / box_volume
 
     def get_repeats(self, **kwargs):
-        """Computes the list of repeat indices (ix,iy,iz) for all the sub-volumes and snapshots. 
-
-        Returns
-        -------
-            List of repeat indices.
+        """
+        Compute the list of repeat indices (ix,iy,iz) for all the sub-volumes and snapshots
         """
         repeats = []
         for isub in trange(self.reader.nsubs, desc='[get_repeats]'):
@@ -190,6 +213,9 @@ class ShellBuilder(MapBuilder):
         return repeats
 
     def get_subsample_ratio(self, ishell):
+        """
+        Compute the sub-sampling ratio
+        """
         if self.subsample_box == 'auto':
             if not hasattr(self, 'subsample_ratios'):
                 # estimated number of galaxies per pixel
@@ -210,7 +236,7 @@ class ShellBuilder(MapBuilder):
         return ratio
 
     def get_box_comoving_density(self, ishell):
-        return self.reader.get_box_comoving_density(self.cosmo) * self.get_subsample_ratio(ishell)
+        return self.reader.get_box_comoving_density() * self.get_subsample_ratio(ishell)
 
     def get_pixel_density(self, ishell):
         """Computes the expected mean number of particle per pixels from the simulation density.
@@ -219,8 +245,6 @@ class ShellBuilder(MapBuilder):
         ----------
         ishell
             Index of the shell.
-        cosmo
-            Cosmology object from CCL.
         nside
             Resolution parameter nside of the shell.
 
@@ -229,7 +253,7 @@ class ShellBuilder(MapBuilder):
             Mean number of particles per pixel.
         """
         npix = hp.nside2npix(self.nside)
-        com_shell_bins = self.reader.get_com_shell_bins(self.cosmo)
+        com_shell_bins = self.reader.get_com_shell_bins()
 
         chi_max = com_shell_bins[ishell + 1]
         chi_min = com_shell_bins[ishell]
@@ -245,11 +269,10 @@ class ShellBuilder(MapBuilder):
             skip_existing=False,
             check_read_existing=True,
             verbose=False,
-            debug=False,
             repeat_ixyz=None,
             get_repeats_only=False,
             fast=True):
-        """Constructs a single shell from a simulation sub-volume/snapshot, applying isometries and repeating it as necessary.
+        """Construct a single shell from a simulation sub-volume/snapshot, applying isometries and repeating it as necessary.
 
         Parameters
         ----------
@@ -260,25 +283,20 @@ class ShellBuilder(MapBuilder):
         com_shell_bins, optional
             Comoving distance of shell edges, if pre-computed, by default None
         skip_existing, optional
-            Skips the computation if a saved file was found, by default False
+            Whether to skip if map file exsists, by default False
+        check_read_existing, optional
+            Whether to try reading the file before skipping, by default True
         verbose, optional
             Prints feedback, by default False
-        debug, optional
-            Enables debugging features, by default False
         repeat_ixyz, optional
             Tuple (ix,iy,iz) of the specific repeat to compute, by default None
         get_repeats_only, optional
             If True, returns the list of repeat tuples (ix,iy,iz) where the sub-volume and the shell intersect, by default False
-
-        Returns
-        -------
-            Filenames and shell index.
         """
 
         ishell = self.reader.get_ishell(isub)
 
         # check if shell exists and/or can be saved
-        # if self.save_dir is not None:
         fname = self.get_fname(ishell, sub=isub)
 
         # check if shell has already been created
@@ -288,7 +306,7 @@ class ShellBuilder(MapBuilder):
 
         # get shell radii
         if com_shell_bins is None:
-            com_shell_bins = self.reader.get_com_shell_bins(self.cosmo)
+            com_shell_bins = self.reader.get_com_shell_bins()
         assert self.nshells == len(com_shell_bins) - 1
         rmin2, rmax2 = com_shell_bins[ishell]**2, com_shell_bins[ishell + 1]**2
 
@@ -300,15 +318,12 @@ class ShellBuilder(MapBuilder):
                 Abs = Abs
 
         # get number of repeats per direction
-        boxsize = self.reader.get_boxsize(self.cosmo)
+        boxsize = self.reader.get_boxsize()
         # not too sure about that 2, but it's fast to check...
         nrepeat = int(np.ceil(np.sqrt(rmax2) / boxsize)) + 2
 
         # read box
-        xyz, box_edges_original = self.reader.read_sub(
-            isub,
-            read_box_edges_only=get_repeats_only,
-            h_to_divide_by=None if self.reader.unit == 'Mpc' else np.float64(self.cosmo["h"]))
+        xyz, box_edges_original = self.reader.read_sub(isub, read_box_edges_only=get_repeats_only)
         if verbose:
             print(f"Loaded box {isub} (shell {ishell}) with {len(xyz)} particles.")
 
@@ -326,12 +341,14 @@ class ShellBuilder(MapBuilder):
         # initialize shell
         shell = healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
 
+        nside = self.nside
+        order = hp.nside2order(nside)
+        ncap = (nside * nside - nside) << 1
+        npix = hp.nside2npix(nside)
+
         if fast:
-            nside = self.nside
-            order = hp.nside2order(nside)
-            ncap = (nside * nside - nside) << 1
-            npix = hp.nside2npix(nside)
-            u, c = _construct_shell_sub(
+
+            u, c = construct_shell_sub(
                 xyz, box_edges_original, Abs[ishell][0], Abs[ishell][1], nrepeat, boxsize, rmin2, rmax2,
                 self.apply_random_isometry, self.octant_only, nside, order, ncap, npix)
             if len(u) > 0:
@@ -356,9 +373,8 @@ class ShellBuilder(MapBuilder):
                                 continue
 
                         # compute shift
-                        shift_original = (
-                            np.array([ix, iy, iz], dtype=self.reader.dtype) *
-                            self.reader.get_boxsize(self.cosmo))[None, :]
+                        shift_original = (np.array([ix, iy, iz], dtype=self.reader.dtype) *
+                                          self.reader.get_boxsize())[None, :]
                         if self.apply_random_isometry:
                             shift = Ax(Abs[ishell][0], shift_original)
                         else:
@@ -398,7 +414,10 @@ class ShellBuilder(MapBuilder):
                         # 2 - remove particles out of octant if octant_only
                         # 3 - compute corresponding healpy pixels of all particles (removed particles fast set to -1) with vec2pix and loc2pix (translated into python from Healpix code)
                         # 4 - get unique pixels and counts (ignoring -1's)
-                        u, c = vec2pix_unique(self.nside, *(xyz.T), *(shift[0].T), rmin2, rmax2, self.octant_only)
+                        ipix = _vec2pix(
+                            nside, order, ncap, npix, *(xyz.T), *(shift[0].T), rmin2, rmax2, self.octant_onl)
+                        u, c = _unique_pix_pos(ipix, npix)
+                        # u, c = _vec2pix_unique(nside, order, ncap, npix, *(xyz.T), *(shift[0].T), rmin2, rmax2, self.octant_only)
 
                         if len(u) > 0:
                             if verbose:
@@ -425,12 +444,8 @@ class ShellBuilder(MapBuilder):
                 print(f"Saved to file {fname}")
 
     def construct_shells(self, isubs=None, **kwargs):
-        """Computes all shells.
-
-        Parameters
-        ----------
-        isubs, optional
-            Index of sub-volume/snapshot list to compute, by default None
+        """
+        Construct all shells
         """
         if isubs is None:
             # Run all files
@@ -440,7 +455,8 @@ class ShellBuilder(MapBuilder):
             self.construct_shell_sub(isub, **kwargs)
 
     def combine_shells(self, ishells=None, skip_existing=False, check_read_existing=True):
-        """Sums the particles shells computed independently for each sub-volume/snapshot with construct_shell_sub
+        """
+        Sums the particle shells computed independently for each sub-volume/snapshot with construct_shell_sub
         """
         for ishell in self.tqdm(ishells, desc="[combine_shells]"):
             fname = self.get_fname(ishell)
@@ -471,3 +487,520 @@ class ShellBuilder(MapBuilder):
         density = -np.ones(self.npix)
         density[spix] = shell[spix] / self.get_pixel_density(ishell) - 1.
         return density
+
+    def construct_shell_sub_catalog(self, isub, Abs=None, com_shell_bins=None, verbose=False, **kwargs):
+        """Construct a particle catalog for a given sub-volume/snapshot
+
+        Parameters
+        ----------
+        isub
+            Index of the sub-volume element and the snapshot. This should be computed automatically.
+        Abs, optional
+            Random isometries, if pre-computed, by default None
+        com_shell_bins, optional
+            Comoving distance of shell edges, if pre-computed, by default None
+        verbose, optional
+            Prints feedback, by default False
+
+        Returns
+        -------
+            Indices in particle files, RA, DEC, and radial comoving distance
+        """
+        ishell = self.reader.get_ishell(isub)
+
+        # get shell radii
+        if com_shell_bins is None:
+            com_shell_bins = self.reader.get_com_shell_bins()
+        assert self.nshells == len(com_shell_bins) - 1
+        rmin2, rmax2 = com_shell_bins[ishell]**2, com_shell_bins[ishell + 1]**2
+
+        # get random isometries
+        if self.apply_random_isometry:
+            if Abs is None:
+                Abs = self.Abs
+            else:
+                Abs = Abs
+
+        # get number of repeats per direction
+        boxsize = self.reader.get_boxsize()
+        # not too sure about that 2, but it's fast to check...
+        nrepeat = int(np.ceil(np.sqrt(rmax2) / boxsize)) + 2
+
+        # read box
+        xyz, box_edges_original = self.reader.read_sub(isub, **kwargs)
+        if verbose:
+            print(f"Loaded box {isub} (shell {ishell}) with {len(xyz)} particles.")
+
+        idx, ra, dec, r = construct_shell_sub_catalog(
+            xyz, box_edges_original, Abs[ishell][0], Abs[ishell][1], nrepeat, boxsize, rmin2, rmax2,
+            self.apply_random_isometry, self.octant_only)
+
+        if len(idx) > 0:
+            return np.concatenate(idx), np.concatenate(ra), np.concatenate(dec), np.concatenate(r)
+        else:
+            return [np.array([])] * 4
+
+    def construct_shell_catalog(self, ishell, **kwargs):
+        """Construct and save a particle catalog for a given shell
+
+        Parameters
+        ----------
+        ishell
+            Shell index
+        """
+        isubs = self.reader.get_isubs_for_shell(ishell)
+
+        hdul = [fits.PrimaryHDU()]
+
+        for isub in self.tqdm(isubs, desc=f"[construct_shell_catalog: shell {ishell}]"):
+            res = self.construct_shell_sub_catalog(isub, **kwargs)
+            idx = fits.Column(name='ihaloes', format='I', array=res[0])
+            ra = fits.Column(name='ra', format='E', array=res[1])
+            dec = fits.Column(name='dec', format='E', array=res[2])
+            r = fits.Column(name='chi', format='E', array=res[3])
+            a = pyccl.scale_factor_of_chi(self.cosmo, res[3])
+            z = fits.Column(name='z', format='E', array=1. / a - 1.)
+            header = fits.Header()
+            header[f'ISUB'] = isub
+            header[f'ZSNAP'] = self.reader.zsnapshots[ishell]
+            hdul.append(fits.BinTableHDU.from_columns([idx, ra, dec, r, z], header))
+
+        fname = self.get_fname(ishell, what='haloes')
+        fits.HDUList(hdul).writeto(fname, overwrite=True)
+
+    def read_shell_catalog_props(self, ishell, variables):
+        """Get particle (eg haloes) properties from a precomputed catalog
+
+        Parameters
+        ----------
+        ishell
+            Shell index
+        variables
+            Variables to recover from the particle data and the computed catalog (adds RA, DEC, redshift `z` and radial comoving distance `chi`)
+
+        Returns
+        -------
+            Dictionary of properties
+        """
+        fname = self.get_fname(ishell, what='haloes')
+        hdul = fits.open(fname)
+
+        out = {k: [] for k in variables}
+
+        catalog_variables = [v for v in variables if v in ['ra', 'dec', 'chi', 'z']]
+        props_variables = [v for v in variables if v not in ['ra', 'dec', 'chi', 'z']]
+
+        for hdu in self.tqdm(hdul[1:], desc="[get_shell_catalog_props]"):
+            if len(props_variables) > 0:
+                isub = hdu.header['ISUB']
+                tmp = self.reader.read_props(isub, props_variables, ihaloes=hdu.data['ihaloes'])
+                for k in props_variables:
+                    out[k].append(tmp[k])
+            if len(catalog_variables) > 0:
+                for k in catalog_variables:
+                    out[k].append(hdu.data[k])
+
+        for k in variables:
+            out[k] = np.concatenate(out[k])
+
+        return out
+
+
+# @numba.njit(parallel=False)
+# def _add_at_one(a, index):
+#     n = len(index)
+#     for i in numba.prange(n):
+#         a[index[i]] += 1
+
+
+@numba.njit(parallel=True)
+def xyz2r2(xyz):
+    """
+    x,y,z to radius squared
+    """
+    return xyz[:, 0]**2 + xyz[:, 1]**2 + xyz[:, 2]**2
+
+
+# @numba.njit(parallel=True)
+# def xyz2r(xyz):
+#     return np.sqrt(xyz2r2(xyz))
+
+# @numba.njit(parallel=True)
+# def xyzr2tp(xyz, r):
+#     assert len(xyz) == len(r)
+#     n = len(xyz)
+#     x = xyz[:, 0]
+#     y = xyz[:, 1]
+#     z = xyz[:, 2]
+#     theta = np.arccos(z / r)
+#     phi = np.arctan2(x, y)
+#     return theta, phi
+
+
+@numba.njit(parallel=True)
+def Axpb(A, b, xyz):
+    """
+    Affine transformation A(xyx+b)
+    """
+    return np.dot(xyz + b, A)
+
+
+@numba.njit
+def Ax(A, xyz):
+    """
+    Linear transformation A(xyz)
+    """
+    return np.dot(xyz, A)
+
+
+# @numba.njit(parallel=True)
+# def Axpb_inv(A, b, xyz):
+#     return np.dot(xyz, A.T) - b
+
+
+def random_isometry(rng, boxsize):
+    """
+    Generate a random isometry defined by a matrix representing rotations/permutations/flips and a vector translation
+    """
+    pcomb = list(itertools.product([1, -1], repeat=3))  # all permuted orders
+    r = Rotation.random(random_state=rng).as_matrix()
+    p = pcomb[rng.choice(len(pcomb))]
+    A = np.dot(r, np.diag(np.array(p)))
+    b = rng.random(3) * boxsize
+    return A, b
+
+
+def AABB_sphere_intersect(box_edges, s, r2):
+    """Test overlap between a box defined by its edges and a sphere (center s, radius squared r2) see https://stackoverflow.com/a/4579069"""
+    c1, c2 = box_edges.min(axis=0), box_edges.max(axis=0)
+    d2 = r2
+    for i in range(3):
+        if s[i] < c1[i]:
+            d2 -= (s[i] - c1[i])**2
+        elif s[i] > c2[i]:
+            d2 -= (s[i] - c2[i])**2
+    return d2 > 0.
+
+
+@numba.njit
+def _AABB_sphere_intersect(box_edges, s, r2):
+    """Test overlap between a box defined by its edges and a sphere (center s, radius squared r2) see https://stackoverflow.com/a/4579069"""
+    # c1, c2 = box_edges.min(axis=0), box_edges.max(axis=0)
+    d2 = r2
+    for i in range(3):
+        c1 = np.min(box_edges[:, i])
+        c2 = np.max(box_edges[:, i])
+        if s[i] < c1:
+            d2 -= (s[i] - c1)**2
+        elif s[i] > c2:
+            d2 -= (s[i] - c2)**2
+    return d2 > 0.
+
+
+inv_halfpi = 2. / np.pi
+
+
+@numba.njit
+def _loc2pix(nside, order, ncap, npix, z, phi, sth):
+    """"
+    Healpix function loc2pix
+    """
+    za = np.abs(z)
+    tt = phi * inv_halfpi % 4.
+    if za <= 2. / 3.:
+        nl4 = 4 * nside
+        temp1 = nside * (0.5 + tt)
+        temp2 = nside * z * 0.75
+        jp = int(temp1 - temp2)  # index of  ascending edge line
+        jm = int(temp1 + temp2)  # index of descending edge line
+
+        # ring number counted from z=2/3
+        ir = nside + 1 + jp - jm  # in {1,2n+1}
+        kshift = 1 - (ir % 2)  # kshift=1 if ir even, 0 otherwise
+
+        t1 = jp + jm - nside + kshift + 1 + nl4 + nl4
+        if order > 0:
+            ip = (t1 >> 1) & (nl4 - 1)
+        else:
+            ip = ((t1 >> 1) % nl4)  # in {0,4n-1}
+
+        return ncap + (ir - 1) * nl4 + ip
+
+    else:  # Equatorial region
+        tp = tt - np.floor(tt)
+        if za < 0.99:
+            tmp = nside * np.sqrt(3 * (1 - za))
+        else:
+            tmp = nside * sth / np.sqrt((1. + za) / 3.)
+
+        jp = int(tp * tmp)  # increasing edge line index
+        jm = int((1. - tp) * tmp)  # decreasing edge line index
+
+        ir = jp + jm + 1  # ring number counted from the closest pole
+        ip = int(tt * ir)  # in {0,4*ir-1}
+
+        if z > 0:
+            return 2 * ir * (ir - 1) + ip
+        else:
+            return npix - 2 * ir * (ir + 1) + ip
+
+
+@numba.njit
+def _vec2pix_sub(nside, order, ncap, npix, x, y, z, shiftx, shifty, shiftz, rmin2, rmax2, octant_only):
+    """
+    Helper function for _vec2pix
+    """
+    # apply shift
+    tmpx = x + shiftx
+    tmpy = y + shifty
+    tmpz = z + shiftz
+
+    # get radius and remove particles out of shel
+    r2 = tmpx**2 + tmpy**2 + tmpz**2
+    if r2 < rmin2 or r2 >= rmax2:
+        return -1
+
+    # remove particles out of octant if octant_only
+    if octant_only:  # check if particle out of octant
+        if (tmpx < 0.) or (tmpy < 0.) or (tmpz < 0.):
+            return -1
+
+    # get longitude (phi), altitude (nz) and distance to z-axis (sth) of particle projected on the unit sphere
+    phi = np.arctan2(tmpy, tmpx)
+    xl = 1. / np.sqrt(r2)
+    nz = tmpz * xl
+    sth = np.sqrt(tmpx**2 + tmpy**2) * xl
+
+    return _loc2pix(nside, order, ncap, npix, nz, phi, sth)
+
+
+@numba.njit(parallel=True)
+def _vec2pix(nside, order, ncap, npix, x, y, z, shiftx, shifty, shiftz, rmin2, rmax2, octant_only):
+    """"
+    Parallelized healpix function vec2pix to go from x,y,z to healpix pixel with extra checks (radii and octant)
+    """
+    n = len(x)
+    ipix = np.zeros(n, dtype=np.int_)
+    for i in numba.prange(n):
+        ipix[i] = _vec2pix_sub(
+            nside, order, ncap, npix, x[i], y[i], z[i], shiftx, shifty, shiftz, rmin2, rmax2, octant_only)
+    return ipix
+
+
+@numba.njit
+def _vec2radec_sub(x, y, z, shiftx, shifty, shiftz, rmin2, rmax2, octant_only):
+    """
+    Helper function for _vec2radec
+    """
+    # apply shift
+    tmpx = x + shiftx
+    tmpy = y + shifty
+    tmpz = z + shiftz
+
+    # get radius and remove particles out of shel
+    r2 = tmpx**2 + tmpy**2 + tmpz**2
+    if r2 < rmin2 or r2 >= rmax2:
+        return (False, 0., 0., 0.)
+
+    # remove particles out of octant if octant_only
+    if octant_only:  # check if particle out of octant
+        if (tmpx < 0.) or (tmpy < 0.) or (tmpz < 0.):
+            return (False, 0., 0, 0.)
+
+    r = np.sqrt(r2)
+    theta = np.arccos(tmpz / r)
+    phi = np.arctan2(tmpy, tmpx)
+
+    ra = np.rad2deg(phi)
+    dec = 90. - np.rad2deg(theta)
+
+    return (True, ra, dec, r)
+
+
+@numba.njit(parallel=True)
+def _vec2radec(x, y, z, shiftx, shifty, shiftz, rmin2, rmax2, octant_only):
+    """
+    Parallelized function to go from x,y,z to RA, DEC and radius with extra checks (radii and octant)
+    """
+    n = len(x)
+    ra = np.zeros(n, dtype=x.dtype)
+    dec = np.zeros(n, dtype=x.dtype)
+    r = np.zeros(n, dtype=x.dtype)
+    idx = np.zeros(n, dtype=np.int_)
+    for i in numba.prange(n):
+        good, tmpra, tmpdec, tmpr = _vec2radec_sub(x[i], y[i], z[i], shiftx, shifty, shiftz, rmin2, rmax2, octant_only)
+        if good:
+            idx[i] = i
+            ra[i] = tmpra
+            dec[i] = tmpdec
+            r[i] = tmpr
+        else:
+            idx[i] = -1
+
+    return idx, ra, dec, r
+
+
+@numba.njit
+def _unique_pix_pos(ipix, npix):
+    """
+    Count the unique (positive) indices
+    """
+    n = len(ipix)
+    c = np.zeros(npix, dtype=np.int_)
+    for i in range(n):
+        pos = ipix[i]
+        if pos >= 0:
+            c[pos] += 1
+    u = np.argwhere(c)[:, 0]
+    return u, c[u]
+
+
+# @numba.njit
+# def _vec2pix_unique(nside, order, ncap, npix, x, y, z, shiftx, shifty, shiftz, rmin2, rmax2, octant_only):
+#     ipix = _vec2pix(nside, order, ncap, npix, x, y, z, shiftx, shifty, shiftz, rmin2, rmax2, octant_only)
+#     return unique_pix_pos(ipix, npix)
+
+# def vec2pix_unique(nside, x, y, z, shiftx, shifty, shiftz, rmin2, rmax2, octant_only):
+#     order = hp.nside2order(nside)
+#     ncap = (nside * nside - nside) << 1
+#     npix = hp.nside2npix(nside)
+#     return _vec2pix_unique(nside, order, ncap, npix, x, y, z, shiftx, shifty, shiftz, rmin2, rmax2, octant_only)
+
+
+@numba.njit
+def construct_shell_sub(
+        xyz, box_edges_original, A, b, nrepeat, boxsize, rmin2, rmax2, apply_random_isometry, octant_only, nside, order,
+        ncap, npix):
+    """
+    Parallelized helper function for ShellBuilder.construct_shell_sub
+    """
+    n = len(xyz)
+
+    # precompute isometry on particles (since repeats are then only a shift away)
+    if apply_random_isometry:
+        xyz = Axpb(A, b, xyz)
+        box_edges = Axpb(A, b, box_edges_original)
+    else:
+        box_edges = box_edges_original
+
+    count = np.zeros(npix, dtype=np.uint)
+
+    # repeats = []
+
+    dtype = xyz.dtype
+
+    # repeat the box
+    for ix in range(-nrepeat, nrepeat + 1):
+        for iy in range(-nrepeat, nrepeat + 1):
+            for iz in range(-nrepeat, nrepeat + 1):
+                # compute shift
+                shift_original = np.expand_dims(np.array([ix, iy, iz]) * boxsize, 0).astype(dtype)
+                if apply_random_isometry:
+                    shift = Ax(A, shift_original)
+                else:
+                    shift = shift_original
+
+                # apply isometry to box edges
+                tmp_box_edges = shift + box_edges
+
+                # check if intersects octant, otherwise skip
+                if octant_only:
+                    found_edge_in_octant = False
+                    for e in tmp_box_edges:
+                        if np.all(e > 0.):
+                            found_edge_in_octant = True
+                    if not found_edge_in_octant:
+                        continue
+
+                ## check if box intersects with shell, otherwise skip
+                # first, check if box fully inside inner sphere
+                if np.all(xyz2r2(tmp_box_edges) < rmin2):
+                    continue
+
+                # second, check if box intersects with outer sphere
+                sphere_center = -b if apply_random_isometry else np.zeros(3, dtype=dtype)
+                if not _AABB_sphere_intersect(box_edges_original + shift_original, sphere_center, rmax2):
+                    continue
+
+                ## add particles to shell
+                # compute corresponding healpy pixels of all particles (particles out of shell/octant quickly set to -1) with vec2pix and loc2pix (translated into python from Healpix code)
+                ipix = _vec2pix(
+                    nside, order, ncap, npix, xyz[:, 0], xyz[:, 1], xyz[:, 2], shift[0, 0], shift[0, 1], shift[0, 2],
+                    rmin2, rmax2, octant_only)
+
+                for i in range(n):
+                    pos = ipix[i]
+                    if pos >= 0:
+                        count[pos] += 1
+
+    u = np.argwhere(count)[:, 0]
+    return u, count[u]
+
+
+@numba.njit
+def construct_shell_sub_catalog(
+        xyz, box_edges_original, A, b, nrepeat, boxsize, rmin2, rmax2, apply_random_isometry, octant_only):
+    """
+    Parallelized helper function for ShellBuilder.construct_shell_sub_catalog
+    """
+    n = len(xyz)
+
+    # precompute isometry on particles (since repeats are then only a shift away)
+    if apply_random_isometry:
+        xyz = Axpb(A, b, xyz)
+        box_edges = Axpb(A, b, box_edges_original)
+    else:
+        box_edges = box_edges_original
+
+    idx = []
+    ra = []
+    dec = []
+    r = []
+
+    dtype = xyz.dtype
+
+    # repeat the box
+    for ix in range(-nrepeat, nrepeat + 1):
+        for iy in range(-nrepeat, nrepeat + 1):
+            for iz in range(-nrepeat, nrepeat + 1):
+                # compute shift
+                shift_original = np.expand_dims(np.array([ix, iy, iz]) * boxsize, 0).astype(dtype)
+                if apply_random_isometry:
+                    shift = Ax(A, shift_original)
+                else:
+                    shift = shift_original
+
+                # apply isometry to box edges
+                tmp_box_edges = shift + box_edges
+
+                # check if intersects octant, otherwise skip
+                if octant_only:
+                    found_edge_in_octant = False
+                    for e in tmp_box_edges:
+                        if np.all(e > 0.):
+                            found_edge_in_octant = True
+                    if not found_edge_in_octant:
+                        continue
+
+                ## check if box intersects with shell, otherwise skip
+                # first, check if box fully inside inner sphere
+                if np.all(xyz2r2(tmp_box_edges) < rmin2):
+                    continue
+
+                # second, check if box intersects with outer sphere
+                sphere_center = -b if apply_random_isometry else np.zeros(3, dtype=dtype)
+                if not _AABB_sphere_intersect(box_edges_original + shift_original, sphere_center, rmax2):
+                    continue
+
+                # if catalog_mode:
+                tmpidx, tmpra, tmpdec, tmpr = _vec2radec(
+                    xyz[:, 0], xyz[:, 1], xyz[:, 2], shift[0, 0], shift[0, 1], shift[0, 2], rmin2, rmax2, octant_only)
+
+                w = tmpidx >= 0
+                if np.any(w):
+                    idx.append(tmpidx[w])
+                    ra.append(tmpra[w])
+                    dec.append(tmpdec[w])
+                    r.append(tmpr[w])
+
+    return idx, ra, dec, r

@@ -458,6 +458,8 @@ class ShellBuilder(MapBuilder):
         """
         Sums the particle shells computed independently for each sub-volume/snapshot with construct_shell_sub
         """
+        shells = []
+
         for ishell in self.tqdm(ishells, desc="[combine_shells]"):
             fname = self.get_fname(ishell)
             if skip_existing:
@@ -472,6 +474,10 @@ class ShellBuilder(MapBuilder):
 
             shell.write(fname, clobber=True, format=self.save_format)
 
+            shells.append(shell)
+
+        return shells
+
     def construct_maps(self, imaps=None, skip_existing=False, check_read_existing=True, **kwargs):
         # first construct shells on simulation subs
         for ishell in self.tqdm(imaps, desc="[construct_maps]"):
@@ -479,7 +485,7 @@ class ShellBuilder(MapBuilder):
             self.construct_shell(isubs, skip_existing=skip_existing, check_read_existing=check_read_existing, **kwargs)
 
         # then combine into final shells
-        self.combine_shells(imaps, skip_existing=skip_existing, check_read_existing=check_read_existing)
+        return self.combine_shells(imaps, skip_existing=skip_existing, check_read_existing=check_read_existing)
 
     def get_field_map(self, ishell):
         shell = self.load_maps(ishell)

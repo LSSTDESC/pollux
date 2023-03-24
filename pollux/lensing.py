@@ -187,6 +187,23 @@ class BornLensingBuilder(LensingBuilder):
             multiple_planes=False,
             nbar_from_maps=False,
             **kwargs):
+        """Lensing builder object in the Born approximation
+
+        Parameters
+        ----------
+        shell_builder
+            Light-cone builder object
+        nzs
+            List of callables representing redshift distributions.
+        kappa_dir, optional
+            Folder where to save maps, by default None
+        dtype, optional
+            dtype of maps, by default np.float32
+        multiple_planes, optional
+            Compute weights in the multiple lens planes approximation, instead of using Limber integrals, by default False
+        nbar_from_maps, optional
+            Compute the mean density from the maps themselves (less accurate as it removes the monopole), by default False
+        """
         super().__init__(shell_builder, nzs, kappa_dir=kappa_dir, dtype=dtype, **kwargs)
 
         self.multiple_planes = multiple_planes
@@ -206,10 +223,28 @@ class BornLensingBuilder(LensingBuilder):
                 quad(lambda z: t.get_dndz(z), 0., zmax) if isinstance(t, pyccl.tracers.WeakLensingTracer) else np.nan
                 for t in self.get_tracers()
             ]
+            self.zlens = [self.shell_builder.get_mean_z(ishell) for ishell in range(self.nshells)]
 
-    def compute_weight(self, ishell, tracer, dndz_norm=None, zlens=None):
+    def get_tracer(self, ikappa):
+        if not hasattr(self, 'tracers'):
+            self.tracers = self.get_tracers()
+        return self.tracers[ikappa]
+
+    def compute_weight(self, ishell, ikappa):
+        """Compute lensing weights to form convergence maps from particle shells
+
+        Parameters
+        ----------
+        ishell
+            Shell index
+        ikappa
+            Convergence map index
+        """
+        tracer = self.get_tracer(ikappa)
+
         if self.multiple_planes:
             zmax = self.reader.zmax
+            zlens = self.zlens[ishell]
 
             if zlens is None:
                 zlens = self.shell_builder.get_mean_z(ishell)
@@ -218,15 +253,13 @@ class BornLensingBuilder(LensingBuilder):
                 self.cosmo, 1. / (1. + zlens))  # needed to obtain surface mass density in 1/Mpc^2
 
             if isinstance(tracer, pyccl.tracers.WeakLensingTracer):
-                if dndz_norm is None:
-                    dndz_norm = quad(lambda z: tracer.get_dndz(z), 0., zmax)
 
                 def integrand(zsource, zlens, tracer):
                     sigma_critical = pyccl.background.sigma_critical(
                         self.cosmo, 1. / (1. + zlens), 1. / (1. + zsource))  # in Msun / Mpc^2
                     return tracer.get_dndz(zsource) / sigma_critical
 
-                w = quad(integrand, zlens, zmax, args=(zlens, tracer)) / dndz_norm
+                w = quad(integrand, zlens, zmax, args=(zlens, tracer)) / self.dndz_norm[ikappa]
 
             elif isinstance(tracer, pyccl.tracers.CMBLensingTracer):
                 zsource = tracer.z_source
@@ -267,8 +300,6 @@ class BornLensingBuilder(LensingBuilder):
             for ikappa in _ikappas
         }
 
-        tracers = self.get_tracers()
-
         for ishell in trange(self.nshells, desc="[construct_maps]"):
             shell = (self.shell_builder.load_maps(ishell)).astype(self.dtype)
             if self.nbar_from_maps:
@@ -277,10 +308,8 @@ class BornLensingBuilder(LensingBuilder):
             else:
                 nbar = self.shell_builder.get_pixel_density(ishell)
 
-            zlens = self.shell_builder.get_mean_z(ishell)
-
             for ikappa, kappa in kappas.items():
-                w = self.compute_weight(ishell, tracers[ikappa], dndz_norm=self.dndz_norm[ikappa], zlens=zlens)
+                w = self.compute_weight(ishell, ikappa)
                 # only one multiplication and one addition
                 if self.multiple_planes:
                     tmp = (shell - self.dtype(nbar)) * self.dtype(w)

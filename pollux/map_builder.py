@@ -151,6 +151,10 @@ class MapBuilder:
             Whether to skip if map file exsists, by default False
         check_read_existing, optional
             Whether to try reading the file before skipping, by default True
+            
+        Returns
+        -------
+            List of maps in healsparse format
         """
         raise NotImplementedError
 

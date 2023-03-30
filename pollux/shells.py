@@ -80,10 +80,10 @@ class ShellBuilder(MapBuilder):
             print(f"Warning: the max value for {dtype} might not be enough : {np.iinfo(dtype)}")
 
         # Make sure snapshots are larger than the shells
-        z_shell_bins = self.reader.get_z_shell_bins()
-        com_shell_bins = self.reader.get_com_shell_bins()
-        boxsize = self.reader.get_boxsize()
-        diff = np.diff(com_shell_bins)
+        z_shell_bins = self.reader.shell_edges_redshift()
+        chi_shell_bins = self.reader.shell_edges_comoving_distance()
+        boxsize = self.reader.boxsize()
+        diff = np.diff(chi_shell_bins)
         print(f"Box size = {boxsize:.2f} Mpc")
         print(f"Number of shells = {self.nmaps}")
         if not np.all(diff < boxsize):
@@ -108,8 +108,8 @@ class ShellBuilder(MapBuilder):
         dVdz = pyccl.comoving_angular_distance(self.cosmo, aa)**2 / pyccl.background.h_over_h0(self.cosmo, aa)
         return dVdz / np.trapz(dVdz, zz)  # rough normalization
 
-    def get_tracers(self, Nz=1000):
-        z_shell_bins = self.reader.get_z_shell_bins()
+    def _create_tracers(self, Nz=1000):
+        z_shell_bins = self.reader.shell_edges_redshift()
 
         tracers = []
         for ishell in range(self.nshells):
@@ -119,8 +119,8 @@ class ShellBuilder(MapBuilder):
 
         return tracers
 
-    def get_tracers_sacc(self, Nz=1000):
-        z_shell_bins = self.reader.get_z_shell_bins()
+    def _create_tracers_sacc(self, Nz=1000):
+        z_shell_bins = self.reader.shell_edges_redshift()
 
         tracers = []
         for ishell in range(self.nshells):
@@ -134,7 +134,7 @@ class ShellBuilder(MapBuilder):
         """
         Compute the mean redshift of a shell
         """
-        z_shell_bins = self.reader.get_z_shell_bins()
+        z_shell_bins = self.reader.shell_edges_redshift()
         amin = 1. / (1. + z_shell_bins[ishell + 1])
         amax = 1. / (1. + z_shell_bins[ishell])
         dVdz = lambda a: pyccl.comoving_angular_distance(self.cosmo, a)**2 / pyccl.background.h_over_h0(self.cosmo, a)
@@ -151,18 +151,18 @@ class ShellBuilder(MapBuilder):
             A list of (A,b) with an isometry A (rotations and flips) and translation by shift b.
         """
         rng = np.random.default_rng(self.seed)
-        boxsize = self.reader.get_boxsize()
+        boxsize = self.reader.boxsize()
 
         # find number of isometries (can be grouped for adjacent shells)
         n_isometries = self.nshells
         if self.group_isometries is not None:
-            com_shell_bins = self.reader.get_com_shell_bins()
+            chi_shell_bins = self.reader.shell_edges_comoving_distance()
             if type(self.group_isometries) is bool:
                 assert self.group_isometries
                 com_iso_depth = boxsize
             if type(self.group_isometries) is float:
                 com_iso_depth = boxsize * self.group_isometries
-            n_isometries = int(np.ceil(com_shell_bins[-1] / com_iso_depth))
+            n_isometries = int(np.ceil(chi_shell_bins[-1] / com_iso_depth))
             com_iso_bins = np.arange(n_isometries + 1) * com_iso_depth
             print(f"Grouping {n_isometries} isometries for shells within {com_iso_depth:.2f} Mpc.")
 
@@ -179,7 +179,7 @@ class ShellBuilder(MapBuilder):
                 return np.argmax(np.fmin(a[1:, None], b[None, 1:]) - np.fmax(a[:-1, None], b[None, :-1]), axis=1)
 
             # check overlap of volume of shells
-            idx = get_max_overlap(com_shell_bins**3, com_iso_bins**3)
+            idx = get_max_overlap(chi_shell_bins**3, com_iso_bins**3)
 
             self.Abs = []
             for ishell in range(self.nshells):
@@ -194,10 +194,10 @@ class ShellBuilder(MapBuilder):
         """
         Estimate the number of simulation repeats needed with a simple volume ratio
         """
-        com_shell_bins = self.reader.get_com_shell_bins()
-        box_volume = self.reader.get_boxsize()**3
+        chi_shell_bins = self.reader.shell_edges_comoving_distance()
+        box_volume = self.reader.boxsize()**3
 
-        shell_volume = 4. / 3. * np.pi * (com_shell_bins[ishell + 1]**3 - com_shell_bins[ishell]**3)
+        shell_volume = 4. / 3. * np.pi * (chi_shell_bins[ishell + 1]**3 - chi_shell_bins[ishell]**3)
         if self.octant_only:
             shell_volume /= 8.
 
@@ -235,8 +235,8 @@ class ShellBuilder(MapBuilder):
             ratio = 1.
         return ratio
 
-    def get_box_comoving_density(self, ishell):
-        return self.reader.get_box_comoving_density() * self.get_subsample_ratio(ishell)
+    def box_comoving_density(self, ishell):
+        return self.reader.box_comoving_density() * self.get_subsample_ratio(ishell)
 
     def get_pixel_density(self, ishell):
         """Computes the expected mean number of particle per pixels from the simulation density.
@@ -253,19 +253,19 @@ class ShellBuilder(MapBuilder):
             Mean number of particles per pixel.
         """
         npix = hp.nside2npix(self.nside)
-        com_shell_bins = self.reader.get_com_shell_bins()
+        chi_shell_bins = self.reader.shell_edges_comoving_distance()
 
-        chi_max = com_shell_bins[ishell + 1]
-        chi_min = com_shell_bins[ishell]
+        chi_max = chi_shell_bins[ishell + 1]
+        chi_min = chi_shell_bins[ishell]
         pixel_volume = 4. * np.pi / 3. * (chi_max**3 - chi_min**3) / npix
 
-        return pixel_volume * self.get_box_comoving_density(ishell)
+        return pixel_volume * self.box_comoving_density(ishell)
 
     def construct_shell_sub(
             self,
             isub,
             Abs=None,
-            com_shell_bins=None,
+            chi_shell_bins=None,
             skip_existing=False,
             check_read_existing=True,
             verbose=False,
@@ -280,7 +280,7 @@ class ShellBuilder(MapBuilder):
             Index of the sub-volume element and the snapshot. This should be computed automatically.
         Abs, optional
             Random isometries, if pre-computed, by default None
-        com_shell_bins, optional
+        chi_shell_bins, optional
             Comoving distance of shell edges, if pre-computed, by default None
         skip_existing, optional
             Whether to skip if map file exsists, by default False
@@ -305,10 +305,10 @@ class ShellBuilder(MapBuilder):
                 return
 
         # get shell radii
-        if com_shell_bins is None:
-            com_shell_bins = self.reader.get_com_shell_bins()
-        assert self.nshells == len(com_shell_bins) - 1
-        rmin2, rmax2 = com_shell_bins[ishell]**2, com_shell_bins[ishell + 1]**2
+        if chi_shell_bins is None:
+            chi_shell_bins = self.reader.shell_edges_comoving_distance()
+        assert self.nshells == len(chi_shell_bins) - 1
+        rmin2, rmax2 = chi_shell_bins[ishell]**2, chi_shell_bins[ishell + 1]**2
 
         # get random isometries
         if self.apply_random_isometry:
@@ -318,7 +318,7 @@ class ShellBuilder(MapBuilder):
                 Abs = Abs
 
         # get number of repeats per direction
-        boxsize = self.reader.get_boxsize()
+        boxsize = self.reader.boxsize()
         # not too sure about that 2, but it's fast to check...
         nrepeat = int(np.ceil(np.sqrt(rmax2) / boxsize)) + 2
 
@@ -374,7 +374,7 @@ class ShellBuilder(MapBuilder):
 
                         # compute shift
                         shift_original = (np.array([ix, iy, iz], dtype=self.reader.dtype) *
-                                          self.reader.get_boxsize())[None, :]
+                                          self.reader.boxsize())[None, :]
                         if self.apply_random_isometry:
                             shift = Ax(Abs[ishell][0], shift_original)
                         else:
@@ -383,8 +383,8 @@ class ShellBuilder(MapBuilder):
                         # apply isometry to box edges
                         tmp_box_edges = shift + box_edges
 
-                        # check if intersects octant, otherwise skip
-                        # np.all(tmp_box_edges < 0.):
+                        # check if box intersects octant, otherwise skip
+                        # (to do so, we check if the box is fully contained in the x<0 or y<0 or z<0 half spaces)
                         if self.octant_only and np.any(np.all(tmp_box_edges <= 0., axis=0)):
                             continue
 
@@ -415,7 +415,7 @@ class ShellBuilder(MapBuilder):
                         # 3 - compute corresponding healpy pixels of all particles (removed particles fast set to -1) with vec2pix and loc2pix (translated into python from Healpix code)
                         # 4 - get unique pixels and counts (ignoring -1's)
                         ipix = _vec2pix(
-                            nside, order, ncap, npix, *(xyz.T), *(shift[0].T), rmin2, rmax2, self.octant_onl)
+                            nside, order, ncap, npix, *(xyz.T), *(shift[0].T), rmin2, rmax2, self.octant_only)
                         u, c = _unique_pix_pos(ipix, npix)
                         # u, c = _vec2pix_unique(nside, order, ncap, npix, *(xyz.T), *(shift[0].T), rmin2, rmax2, self.octant_only)
 
@@ -442,6 +442,8 @@ class ShellBuilder(MapBuilder):
             shell.write(fname, clobber=True, format=self.save_format)
             if verbose:
                 print(f"Saved to file {fname}")
+
+        return shell
 
     def construct_shells(self, isubs=None, **kwargs):
         """
@@ -482,7 +484,7 @@ class ShellBuilder(MapBuilder):
         # first construct shells on simulation subs
         for ishell in self.tqdm(imaps, desc="[construct_maps]"):
             isubs = self.reader.get_isubs_for_shell(ishell)
-            self.construct_shell(isubs, skip_existing=skip_existing, check_read_existing=check_read_existing, **kwargs)
+            self.construct_shells(isubs, skip_existing=skip_existing, check_read_existing=check_read_existing, **kwargs)
 
         # then combine into final shells
         return self.combine_shells(imaps, skip_existing=skip_existing, check_read_existing=check_read_existing)
@@ -494,7 +496,7 @@ class ShellBuilder(MapBuilder):
         density[spix] = shell[spix] / self.get_pixel_density(ishell) - 1.
         return density
 
-    def construct_shell_sub_catalog(self, isub, Abs=None, com_shell_bins=None, verbose=False, **kwargs):
+    def construct_shell_sub_catalog(self, isub, Abs=None, chi_shell_bins=None, verbose=False, **kwargs):
         """Construct a particle catalog for a given sub-volume/snapshot
 
         Parameters
@@ -503,7 +505,7 @@ class ShellBuilder(MapBuilder):
             Index of the sub-volume element and the snapshot. This should be computed automatically.
         Abs, optional
             Random isometries, if pre-computed, by default None
-        com_shell_bins, optional
+        chi_shell_bins, optional
             Comoving distance of shell edges, if pre-computed, by default None
         verbose, optional
             Prints feedback, by default False
@@ -515,10 +517,10 @@ class ShellBuilder(MapBuilder):
         ishell = self.reader.get_ishell(isub)
 
         # get shell radii
-        if com_shell_bins is None:
-            com_shell_bins = self.reader.get_com_shell_bins()
-        assert self.nshells == len(com_shell_bins) - 1
-        rmin2, rmax2 = com_shell_bins[ishell]**2, com_shell_bins[ishell + 1]**2
+        if chi_shell_bins is None:
+            chi_shell_bins = self.reader.shell_edges_comoving_distance()
+        assert self.nshells == len(chi_shell_bins) - 1
+        rmin2, rmax2 = chi_shell_bins[ishell]**2, chi_shell_bins[ishell + 1]**2
 
         # get random isometries
         if self.apply_random_isometry:
@@ -528,7 +530,7 @@ class ShellBuilder(MapBuilder):
                 Abs = Abs
 
         # get number of repeats per direction
-        boxsize = self.reader.get_boxsize()
+        boxsize = self.reader.boxsize()
         # not too sure about that 2, but it's fast to check...
         nrepeat = int(np.ceil(np.sqrt(rmax2) / boxsize)) + 2
 
@@ -873,7 +875,7 @@ def _unique_pix_pos(ipix, npix):
 #     return _vec2pix_unique(nside, order, ncap, npix, x, y, z, shiftx, shifty, shiftz, rmin2, rmax2, octant_only)
 
 
-@numba.njit
+# @numba.njit
 def construct_shell_sub(
         xyz, box_edges_original, A, b, nrepeat, boxsize, rmin2, rmax2, apply_random_isometry, octant_only, nside, order,
         ncap, npix):
@@ -909,14 +911,12 @@ def construct_shell_sub(
                 # apply isometry to box edges
                 tmp_box_edges = shift + box_edges
 
-                # check if intersects octant, otherwise skip
+                # check if box intersects octant, otherwise skip
+                # (to do so, we check if the box is fully contained in the x<0 or y<0 or z<0 half spaces)
                 if octant_only:
-                    found_edge_in_octant = False
-                    for e in tmp_box_edges:
-                        if np.all(e > 0.):
-                            found_edge_in_octant = True
-                    if not found_edge_in_octant:
-                        continue
+                    for i in range(3):
+                        if np.all(tmp_box_edges[:, i] <= 0.):
+                            continue
 
                 ## check if box intersects with shell, otherwise skip
                 # first, check if box fully inside inner sphere

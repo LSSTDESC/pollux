@@ -351,7 +351,7 @@ def make_nmtbin_powspaced(nside, lmin, lmax, n_ell_bins, power, f_ell=None, **kw
     return make_nmtbin(nside, lmin, lmax, n_ell_bins, bin_func=partial(powspace, power=power), f_ell=f_ell, **kwargs)
 
 
-def trim_array_min_diff(a, mindiff, return_indices=False):
+def trim_array(a, mindiff, return_indices=False):
     """
     Trim a monotonously increasing array such that the difference between adjacent values is the largest possible below `mindiff`
     """
@@ -385,7 +385,7 @@ def read_params(fname):
     return params
 
 
-def get_z_shell_fz(zsnapshots, func=None, ifunc=None, zmax=None, return_fzbins=False):
+def compute_shell_edges(zsnapshots, func=None, ifunc=None, zmax=None, return_fzbins=False):
     """
     Compute the redshift of the shell edges, set at the center in some space defined by `func` or its inverse `ifunc`
     """
@@ -407,7 +407,7 @@ def get_z_shell_fz(zsnapshots, func=None, ifunc=None, zmax=None, return_fzbins=F
         return z_shell_bins
 
 
-def get_trunc_norm(myclip_a, myclip_b, loc, scale):
+def trunc_norm(myclip_a, myclip_b, loc, scale):
     """
     Create a truncated normal distribution
     """

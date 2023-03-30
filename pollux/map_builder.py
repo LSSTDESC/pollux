@@ -120,6 +120,9 @@ class MapBuilder:
 
         return os.path.join(self.save_dir, fname)
 
+    def _create_tracers(self, Nz=1000):
+        raise NotImplementedError
+
     def get_tracers(self, Nz=1000):
         """Create CCL Tracer object for theory computations
 
@@ -128,9 +131,14 @@ class MapBuilder:
         Nz, optional
             Number of points to define splines, by default 1000
         """
+        if not hasattr(self, 'tracers'):
+            self.tracers = self._create_tracers()
+        return self.tracers
+
+    def _create_tracers_sacc(self, Nz=1000):
         raise NotImplementedError
 
-    def get_tracers_sacc(self, Nz=1000):
+    def get_tracers_sacc(self, imap=None, Nz=1000):
         """Create SACC tracer object for measured angular power spectra
 
         Parameters
@@ -138,7 +146,9 @@ class MapBuilder:
         Nz, optional
             Number of points to define splines, by default 1000
         """
-        raise NotImplementedError
+        if not hasattr(self, 'tracers_sacc'):
+            self.tracers_sacc = self._create_tracers_sacc()
+        return self.tracers_sacc
 
     def construct_maps(self, imaps=None, skip_existing=False, check_read_existing=True, **kwargs):
         """Construct maps
@@ -232,7 +242,7 @@ class MapBuilder:
         else:
             return maps
 
-    def plot_maps(self, maps, nx=None, log=False, title_prefix=None, cbar=True, **kwargs):
+    def plot_maps(self, maps=None, nx=None, log=False, title_prefix=None, cbar=True, save=True, **kwargs):
         """Plots particle maps.
 
         Parameters
@@ -242,13 +252,16 @@ class MapBuilder:
         nx, optional
             Number of maps to plot per row, by default None
         log, optional
-            Plots log10(maps), by default True
+            Plots log10(maps), by default False
         title_prefix, optional
             Title prefix, by default None
         cbar, optional
             Whether to show color bars, by default False
         """
-        nmaps = len(maps)
+        if maps is None:
+            nmaps = self.nmaps
+        else:
+            nmaps = len(maps)
         if nx is None:
             nx = nmaps
         ny = int(np.ceil(nmaps / nx))
@@ -256,7 +269,10 @@ class MapBuilder:
         plt.figure(figsize=(4 * nx, 4 * ny))
 
         for imap in range(nmaps):
-            hp_map = maps[imap]
+            if maps is None:
+                hp_map = self.load_maps(imap)
+            else:
+                hp_map = maps[imap]
             if isinstance(hp_map, healsparse.HealSparseMap):
                 hp_map = hp_map.generate_healpix_map()
             if log and np.any(hp_map > 0.):
@@ -264,10 +280,15 @@ class MapBuilder:
             title = title_prefix + f" {imap}" if title_prefix is not None else None
             if self.octant_only:
                 hp.orthview(
-                    hp_map, rot=(35, 20), half_sky=True, sub=(ny, nx, imap + 1), title=title, cbar=cbar, **kwargs)
+                    hp_map, rot=(35, 20), half_sky=True, sub=(ny, nx, imap + 1), title=title, cbar=cbar, min=0. if log else None, **kwargs)
             else:
                 hp.mollview(hp_map, sub=(ny, nx, imap + 1), title=title, cbar=cbar, **kwargs)
+                
         hp.graticule(verbose=False)
+
+        if save:
+            fname = self.get_fname(force_fits=True).replace('.fits', '.png')
+            plt.savefig(fname, bbox_inches='tight', dpi=150, transparent=False)
 
     def get_mask(self, return_ipix=False):
         """

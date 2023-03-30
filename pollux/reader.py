@@ -5,7 +5,7 @@ import numpy as np
 import pyccl
 from pynverse import inversefunc
 
-from .utils import (get_trunc_norm, get_z_shell_fz, read_params, subsample_ppf, trim_array_min_diff)
+from .utils import (trunc_norm, compute_shell_edges, read_params, subsample_ppf, trim_array)
 
 os.environ["GENERICIO_NO_MPI"] = "y"
 try:
@@ -16,7 +16,7 @@ except:
 
 class Reader:
 
-    def __init__(self, cosmo, kind, unit, nparticles, zsnapshots, zmax, nsubs, binning_match, dtype=np.float64):
+    def __init__(self, cosmo, kind, unit, nparticles, zsnapshots, zmax, nsubs, shell_edges_match, dtype=np.float64):
         """Reader is a generic class to read particles from N-body simulations.
 
         Parameters
@@ -35,7 +35,7 @@ class Reader:
             Maximum redshift considered
         nsubs
             Number of sub-boxes
-        binning_match
+        shell_edges_match
             Method to define shells for snapshots redshifts, must be 'center_redshift', 'center_scale_factor', 'center_comoving_distance' or 'center_comoving_volume'
         dtype, optional
             dtype of particle data, by default np.float64
@@ -55,7 +55,7 @@ class Reader:
         self.asnapshots = 1. / (1. + zsnapshots)
         self.nshells = len(zsnapshots)
         self.nsubs = nsubs
-        self.binning_match = binning_match
+        self.shell_edges_match = shell_edges_match
 
         # independent jobs
         self._sub_args = list(itertools.product(range(self.nshells), range(nsubs)))
@@ -75,13 +75,13 @@ class Reader:
         """
         return np.argwhere([x[0] == ishell for x in self._sub_args])[:, 0]
 
-    def get_com_shell_bins(self):
+    def shell_edges_comoving_distance(self):
         """
         Compute comoving distance to shell edges
         """
-        return pyccl.comoving_radial_distance(self.cosmo, 1. / (1 + self.get_z_shell_bins()))
+        return pyccl.comoving_radial_distance(self.cosmo, 1. / (1 + self.shell_edges_redshift()))
 
-    def get_z_shell_bins(self, return_fzbins=False):
+    def shell_edges_redshift(self, return_fzbins=False):
         """Compute redshift to shell edges
 
         Parameters
@@ -96,23 +96,22 @@ class Reader:
         if hasattr(self, 'z_shell_bins'):
             return self.z_shell_bins
         else:
-            if self.binning_match == 'center_redshift':
+            if self.shell_edges_match == 'center_redshift':
                 func = lambda z: z
                 ifunc = func
-            elif self.binning_match == 'center_scale_factor':
+            elif self.shell_edges_match == 'center_scale_factor':
                 func = lambda z: 1. / (1. + z)
                 ifunc = lambda a: 1. / a - 1.
-            elif self.binning_match == 'center_comoving_distance':
+            elif self.shell_edges_match == 'center_comoving_distance':
                 func = lambda z: 1e-3 * pyccl.comoving_radial_distance(self.cosmo, 1. / (1. + z))
                 ifunc = None
-            elif self.binning_match == 'center_comoving_volume':
+            elif self.shell_edges_match == 'center_comoving_volume':
                 func = lambda z: (1e-3 * pyccl.comoving_radial_distance(self.cosmo, 1. / (1. + z)))**3
                 ifunc = None
             else:
                 raise ValueError
-            
-            res = get_z_shell_fz(
-                self.zsnapshots, func=func, ifunc=ifunc, zmax=self.zmax, return_fzbins=return_fzbins)
+
+            res = compute_shell_edges(self.zsnapshots, func=func, ifunc=ifunc, zmax=self.zmax, return_fzbins=return_fzbins)
             if return_fzbins:
                 self.z_shell_bins = res[0]
             else:
@@ -120,8 +119,8 @@ class Reader:
 
             return self.z_shell_bins
 
-    def get_shell_info(self, fname=None):
-        z_shell_bins = self.get_z_shell_bins()
+    def shell_info(self, fname=None):
+        z_shell_bins = self.shell_edges_redshift()
         names = ['ishell', 'zsnapshot', 'zmin', 'zmax', 'snapshot_id']
         dtypes = ['int', 'float', 'float', 'float', 'int']
         out = np.array(
@@ -131,7 +130,7 @@ class Reader:
             np.savetxt(fname, out, header=' '.join(names), fmt='%8i %16.8f %16.8f %16.8f %8i')
         return out
 
-    def get_boxsize(self):
+    def boxsize(self):
         raise NotImplementedError
 
     def read_sub(self, isub, verbose=False, assert_xyz_in_box=False, read_box_edges_only=False):
@@ -154,14 +153,14 @@ class Reader:
         """
         raise NotImplementedError
 
-    def get_box_comoving_density(self):
+    def box_comoving_density(self):
         """Computes the comoving particle density of the simulation.
 
         Returns
         -------
             Comoving particle density of the simulation.
         """
-        return self.nparticles / self.get_boxsize()**3
+        return self.nparticles / self.boxsize()**3
 
 
 class SLICSReader(Reader):
@@ -176,7 +175,7 @@ class SLICSReader(Reader):
             ncc=768,
             rnc=3072.0,
             zmax=None,
-            binning_match='center_comoving_distance'):
+            shell_edges_match='center_comoving_distance'):
         """Reader for SLICS simulations by Joachim Harnois-Deraps.
 
         Parameters
@@ -197,7 +196,7 @@ class SLICSReader(Reader):
             Scale, by default 3072.0
         zmax, optional
             Maximum redshift considered, by default None
-        binning_match, optional
+        shell_edges_match, optional
             Method to define shells, by default 'center_comoving_distance'
         """
         self.path = path
@@ -212,9 +211,9 @@ class SLICSReader(Reader):
         # number of sub boxes (constant here)
         ncube = self.nodes_dim**3
 
-        super().__init__(cosmo, 'slics', 'Mpc', nparticles, zsnapshots, zmax, ncube, binning_match, dtype=np.float32)
+        super().__init__(cosmo, 'slics', 'Mpc', nparticles, zsnapshots, zmax, ncube, shell_edges_match, dtype=np.float32)
 
-    def get_boxsize(self):
+    def boxsize(self):
         return self.boxsize
 
     def read_sub(self, isub, verbose=False, assert_xyz_in_box=False, read_box_edges_only=False):
@@ -263,10 +262,11 @@ class HACCReader(Reader):
             nsteps=500,
             sim_zmin=0.,
             sim_zmax=200.,
-            zmax=None,
-            aminstep=0.,
-            sampling_match_n=False,
-            binning_match='center_scale_factor',
+            snap_sub_zmax=None,
+            snap_sub_aminstep=0.,
+            snap_sub_match_dist_n=False,
+            snap_sub_every_n=1,
+            shell_edges_match='center_scale_factor',
             group_along_x=False):
         """Reader for HACC simulations
 
@@ -290,13 +290,12 @@ class HACCReader(Reader):
             Minimum step in scale factor to downsample snapshots, by default 0.
         sampling_match_n, optional
             Number of snapshots to try to keep while matching roughly optimal distribution, by default False
-        binning_match, optional
+        shell_edges_match, optional
             Method to define shells, by default 'center_comoving_distance'
         group_along_x, optional
             Whether to group sub-boxes along x to define contiguous box volumes, by default False
         """
         self.path = path
-        self.aminstep = aminstep
         self.group_along_x = group_along_x
         self.variables = ['x', 'y', 'z']
 
@@ -319,7 +318,6 @@ class HACCReader(Reader):
 
         # simulation snapshot redshifts : step are constant in scale factor, but only a fraction of steps are saved
         snapshot_dirs = os.listdir(os.path.join(path, 'output'))
-        snapshots_original = np.array([i for i in range(nsteps) if f'STEP{i}' in snapshot_dirs])
         snapshots = np.array([i for i in range(nsteps) if f'STEP{i}' in snapshot_dirs])
         print(f"Found {len(snapshots)} snapshots")
 
@@ -329,37 +327,42 @@ class HACCReader(Reader):
             return asnapshots_all[idx]
 
         # subsample snapshots : minimum step in scale factor
-        if aminstep > 0.:
-            _, idx = trim_array_min_diff(get_asnapshots(snapshots), aminstep, return_indices=True)
-            print(f"Subsampling snapshots : minimum a step {aminstep}, returns {len(idx)} snapshots")
+        if snap_sub_aminstep > 0.:
+            _, idx = trim_array(get_asnapshots(snapshots), snap_sub_aminstep, return_indices=True)
+            print(f"Subsampling snapshots : minimum a step {snap_sub_aminstep}, returns {len(idx)} snapshots")
             snapshots = snapshots[idx]
 
         # subsample snapshots : maximum redshift
-        if zmax is not None:
-            w = np.argwhere(get_asnapshots(snapshots) > 1. / (1. + zmax))
+        if snap_sub_zmax is not None:
+            w = np.argwhere(get_asnapshots(snapshots) > 1. / (1. + snap_sub_zmax))
             if len(w) > 0:
                 snapshots = snapshots[w[0, 0]:]
-                print(f"Subsampling snapshots : max redshift {zmax}, returns {len(snapshots)} snapshots")
+                print(f"Subsampling snapshots : max redshift {snap_sub_zmax}, returns {len(snapshots)} snapshots")
 
         # subsample snapshots : match inferred bimodal distribution
-        if sampling_match_n:
+        if snap_sub_match_dist_n:
             aa = get_asnapshots(snapshots)
 
             # multimodal distribution in scale factor, need ppf (computed numerically)
             s1, s2, lam = 0.12, 0.27, 0.4
             amin = np.min(aa)
-            t1 = get_trunc_norm(amin, 1., 0.5, s1)
-            t2 = get_trunc_norm(amin, 1., 1., s2)
+            t1 = trunc_norm(amin, 1., 0.5, s1)
+            t2 = trunc_norm(amin, 1., 1., s2)
             cdf = lambda a: lam * t1.cdf(a) + (1 - lam) * t2.cdf(a)
             ppf = inversefunc(cdf, domain=[amin, 1.], image=[0., 1.])
 
-            idx, _ = subsample_ppf(aa, sampling_match_n, ppf)
+            idx, _ = subsample_ppf(aa, snap_sub_match_dist_n, ppf)
             if len(idx) < len(snapshots):
                 print(f"Subsampling snapshots : match distribution, returns {len(idx)} snapshots")
             snapshots = snapshots[idx]
-
+            
+        # subsample snapshots : every n'ths snapshots
+        self.snapshots = snapshots[::-snap_sub_every_n]  # snapshots ordered by redshift
+        
+        if snap_sub_every_n > 1:
+            print(f"Subsampling snapshots : keeping every {snap_sub_every_n} snapshots, returns {len(self.snapshots)} snapshots")
+            
         # done with subsampling !
-        self.snapshots = snapshots[::-1]  # snapshots ordered by redshift
         zsnapshots = 1. / get_asnapshots(self.snapshots) - 1.
 
         # simulation properties
@@ -376,9 +379,10 @@ class HACCReader(Reader):
                               for ibox in range(64)])
 
         nsub = 16 if self.group_along_x else 64
-        super().__init__(cosmo, 'hacc', 'Mpc_over_h', nparticles, zsnapshots, zmax, nsub, binning_match, dtype=dtype)
+        super().__init__(
+            cosmo, 'hacc', 'Mpc_over_h', nparticles, zsnapshots, snap_sub_zmax, nsub, shell_edges_match, dtype=dtype)
 
-    def get_boxsize(self):
+    def boxsize(self):
         return self.boxsize_h / self.cosmo["h"]
 
     def _read_sub_helper(self, isub):
@@ -398,7 +402,7 @@ class HACCReader(Reader):
         for i in range(3):
             box_edges[:, i] = box_lims[i, cube_nodes[:, i]]  #there's propbably a fancy numpy way to do this...
 
-        return box_edges, ibox, step
+        return box_edges.astype(self.dtype), ibox, step
 
     def _get_name(self, step, ifile):
         return os.path.join(self.path, 'output', f'STEP{step}/m000.full.mpicosmo.{step}#{ifile}')
@@ -407,7 +411,7 @@ class HACCReader(Reader):
         box_edges, ibox, step = self._read_sub_helper(isub)
 
         if read_box_edges_only:
-            return np.zeros((17, 3)), box_edges
+            return np.zeros((17, 3), dtype=self.dtype), box_edges
 
         out = {k: [] for k in self.variables}
 
@@ -428,7 +432,7 @@ class HACCReader(Reader):
             for i in range(3):
                 assert np.all(np.min(box_edges[:, i]) <= xyz[:, i]) and np.all(xyz[:, i] <= np.max(box_edges[:, i]))
 
-        return xyz, box_edges.astype(self.dtype)
+        return xyz, box_edges
 
 
 class HACCHaloReader(HACCReader):
@@ -469,7 +473,7 @@ class SkySimReader(HACCReader):
             sim_zmax=200.,
             aminstep=0.,
             zmax=None,
-            binning_match='center_scale_factor'):
+            shell_edges_match='center_scale_factor'):
         self.path = path
         self.aminstep = aminstep
 
@@ -482,7 +486,7 @@ class SkySimReader(HACCReader):
         asnapshots_all = np.linspace(amin, amax, nsteps + 1)[1:]
         asnapshots_all = asnapshots_all[snapshots]
 
-        asnapshots, idx = trim_array_min_diff(asnapshots_all, self.aminstep, return_indices=True)
+        asnapshots, idx = trim_array(asnapshots_all, self.aminstep, return_indices=True)
         if len(idx) < len(snapshots):
             print(f"Subsampling snapshots with aminstep={aminstep} returns {len(idx)} snapshots")
         zsnapshots = 1. / asnapshots[::-1] - 1.
@@ -502,7 +506,7 @@ class SkySimReader(HACCReader):
         nsub = 1
 
         Reader.__init__(
-            self, cosmo, 'skysim', 'Mpc_over_h', nparticles, zsnapshots, zmax, nsub, binning_match, dtype=dtype)
+            self, cosmo, 'skysim', 'Mpc_over_h', nparticles, zsnapshots, zmax, nsub, shell_edges_match, dtype=dtype)
 
 
 class DummyReader(Reader):
@@ -517,11 +521,11 @@ class DummyReader(Reader):
 
         super().__init__(cosmo, 'dummy', 'Mpc', nparticles, zsnapshots, zmax, nsubs, dtype=np.float64)
 
-    def get_com_shell_bins(self, cosmo):
+    def shell_edges_comoving_distance(self, cosmo):
         chi_max = pyccl.comoving_radial_distance(cosmo, 1. / (1. + self.zmax))
         return np.linspace(0, chi_max, self.nshells + 1)
 
-    def get_boxsize(self, cosmo):
+    def boxsize(self, cosmo):
         return self.boxsize
 
     def read_sub(self, isub, verbose=False, assert_xyz_in_box=False, read_box_edges_only=False):
@@ -530,5 +534,5 @@ class DummyReader(Reader):
         xyz = self.xyzs[isub]
         return xyz, box_edges
 
-    def get_box_comoving_density(self, cosmo):
-        return self.nparticles / self.get_boxsize(cosmo)**3
+    def box_comoving_density(self, cosmo):
+        return self.nparticles / self.boxsize(cosmo)**3

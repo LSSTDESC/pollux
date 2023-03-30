@@ -60,8 +60,8 @@ class LensingBuilder(MapBuilder):
             sacc_type="galaxy_convergence_cl",
             **kwargs)
 
-    def get_tracers(self, Nz=1000):
-        z_shell_bins = self.reader.get_z_shell_bins()
+    def _create_tracers(self, Nz=1000):
+        z_shell_bins = self.reader.shell_edges_redshift()
 
         tracers = []
         if self.nzs == 'zsnapshots':
@@ -77,8 +77,8 @@ class LensingBuilder(MapBuilder):
 
         return tracers
 
-    def get_tracers_sacc(self, Nz=1000):
-        z_shell_bins = self.reader.get_z_shell_bins()
+    def _create_tracers_sacc(self, Nz=1000):
+        z_shell_bins = self.reader.shell_edges_redshift()
 
         tracers = []
         if self.nzs == 'zsnapshots':
@@ -211,7 +211,7 @@ class BornLensingBuilder(LensingBuilder):
 
         if multiple_planes:
             rho_m = pyccl.background.rho_x(self.cosmo, 1., 'matter', is_comoving=True)  #  in units of Msun / Mpc^3
-            vol = self.reader.get_boxsize()**3  # in Mpc^3
+            vol = self.reader.boxsize()**3  # in Mpc^3
             mpart = rho_m * vol / self.reader.nparticles  # in Msun
 
             area = hp.nside2pixarea(self.nside)
@@ -225,10 +225,7 @@ class BornLensingBuilder(LensingBuilder):
             ]
             self.zlens = [self.shell_builder.get_mean_z(ishell) for ishell in range(self.nshells)]
 
-    def get_tracer(self, ikappa):
-        if not hasattr(self, 'tracers'):
-            self.tracers = self.get_tracers()
-        return self.tracers[ikappa]
+
 
     def compute_weight(self, ishell, ikappa):
         """Compute lensing weights to form convergence maps from particle shells
@@ -240,7 +237,7 @@ class BornLensingBuilder(LensingBuilder):
         ikappa
             Convergence map index
         """
-        tracer = self.get_tracer(ikappa)
+        tracer = self.get_tracers()[ikappa]
 
         if self.multiple_planes:
             zmax = self.reader.zmax
@@ -273,7 +270,7 @@ class BornLensingBuilder(LensingBuilder):
 
             return w * self.mpart_over_area / d_A_lens**2
         else:
-            chi_min, chi_max = self.reader.get_com_shell_bins()[ishell:ishell + 2]
+            chi_min, chi_max = self.reader.shell_edges_comoving_distance()[ishell:ishell + 2]
             return quad(lambda chi: tracer.get_kernel(chi), chi_min, chi_max)
 
     def construct_maps(self, ikappas=None, skip_existing=False, check_read_existing=True):

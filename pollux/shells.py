@@ -875,7 +875,7 @@ def _unique_pix_pos(ipix, npix):
 #     return _vec2pix_unique(nside, order, ncap, npix, x, y, z, shiftx, shifty, shiftz, rmin2, rmax2, octant_only)
 
 
-# @numba.njit
+@numba.njit
 def construct_shell_sub(
         xyz, box_edges_original, A, b, nrepeat, boxsize, rmin2, rmax2, apply_random_isometry, octant_only, nside, order,
         ncap, npix):

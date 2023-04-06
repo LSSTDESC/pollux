@@ -1,5 +1,6 @@
 import itertools
 import warnings
+import os
 
 import healpy as hp
 import healsparse
@@ -548,7 +549,7 @@ class ShellBuilder(MapBuilder):
         else:
             return [np.array([])] * 4
 
-    def construct_shell_catalog(self, ishell, **kwargs):
+    def construct_shell_catalog(self, ishell, skip_existing=False, check_read_existing=True, **kwargs):
         """Construct and save a particle catalog for a given shell
 
         Parameters
@@ -557,6 +558,17 @@ class ShellBuilder(MapBuilder):
             Shell index
         """
         isubs = self.reader.get_isubs_for_shell(ishell)
+
+        fname = self.get_fname(ishell, what='haloes')
+        
+        if skip_existing and os.path.exists(fname):
+            if check_read_existing:
+                try:
+                    return fits.open(fname)
+                except:
+                    pass
+            else:
+                return
 
         hdul = [fits.PrimaryHDU()]
 
@@ -573,8 +585,9 @@ class ShellBuilder(MapBuilder):
             header[f'ZSNAP'] = self.reader.zsnapshots[ishell]
             hdul.append(fits.BinTableHDU.from_columns([idx, ra, dec, r, z], header))
 
-        fname = self.get_fname(ishell, what='haloes')
         fits.HDUList(hdul).writeto(fname, overwrite=True)
+        
+        return hdul
 
     def read_shell_catalog_props(self, ishell, variables):
         """Get particle (eg haloes) properties from a precomputed catalog

@@ -118,7 +118,13 @@ class MapBuilder:
         else:
             fname += f'.{self.save_format}'
 
-        return os.path.join(self.save_dir, fname)
+        if sub is None:
+            return os.path.join(self.save_dir, fname)
+        else:
+            subs_save_dir = os.path.join(self.save_dir, 'subs')
+            if not os.path.exists(subs_save_dir):
+                os.makedirs(subs_save_dir, exist_ok=True)
+            return os.path.join(subs_save_dir, fname)
 
     def _create_tracers(self, Nz=1000):
         raise NotImplementedError

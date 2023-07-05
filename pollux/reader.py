@@ -304,13 +304,17 @@ class HACCReader(Reader):
             fname = os.path.join(path, 'run/run000/indat.params')
             params = read_params(fname)
             # create cosmo object that can be used by builder
-            cosmo = pyccl.Cosmology(
+            cosmo_dict = dict(
                 Omega_c=float(params['OMEGA_CDM']),
                 Omega_b=float(params['DEUT']) / float(params['HUBBLE'])**2,
                 h=float(params['HUBBLE']),
                 n_s=float(params['NS']),
                 sigma8=float(params['SS8']),
                 Omega_k=0.)
+            if isinstance(read_cosmo_params, dict):
+                assert len(cosmo_dict.keys() & read_cosmo_params.keys()) == 0
+                cosmo_dict.update(read_cosmo_params)
+            cosmo = pyccl.Cosmology(**cosmo_dict)
             # read and override parameters to determine redshifts of snapshots
             nsteps = int(params['N_STEPS'])
             sim_zmax = float(params['Z_IN'])

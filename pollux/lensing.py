@@ -20,7 +20,7 @@ class MyCMBLensingTracer(pyccl.CMBLensingTracer):
 
 class LensingBuilder(MapBuilder):
 
-    def __init__(self, shell_builder, nzs, kappa_dir=None, dtype=np.float32, **kwargs):
+    def __init__(self, shell_builder, nzs, kappa_dir=None, dtype=np.float32, sigma_e=0.3, nbar=5., **kwargs):
         """LensingBuilder is a generic class to build convergence maps from particle shells.
 
         Parameters
@@ -33,6 +33,8 @@ class LensingBuilder(MapBuilder):
             Folder where to save maps, by default None
         dtype, optional
             dtype of maps, by default np.float32
+        sigma_e, optional
+            Ellipticity dispersion (for covariance calculation)
         """
         self.shell_builder = shell_builder
         if kappa_dir is None:
@@ -43,6 +45,9 @@ class LensingBuilder(MapBuilder):
         self.cosmo = shell_builder.cosmo
         self.nshells = shell_builder.nshells
         self.nzs = nzs
+        
+        self.sigma_e = sigma_e
+        self.nbar = nbar * (60 * 180 / np.pi)**2 # gal/arcmin2 to gal/str
 
         if nzs == 'zsnapshots':
             self.nkappas = self.shell_builder.nshells
@@ -174,6 +179,10 @@ class LensingBuilder(MapBuilder):
             return gammas, alms
         else:
             return gammas
+        
+    def _noise_cls(self, imap):
+        nbar = self.nbar #self.shell_builder.get_sky_density(imap)
+        return self.sigma_e**2 / nbar
 
 
 class BornLensingBuilder(LensingBuilder):

@@ -248,13 +248,15 @@ class MapBuilder:
         else:
             return maps
 
-    def plot_maps(self, maps=None, nx=None, log=False, title_prefix=None, cbar=True, save=True, **kwargs):
+    def plot_maps(self, imaps=None, maps=None, nx=None, log=False, title_prefix=None, cbar=True, save=True, **kwargs):
         """Plots particle maps.
 
         Parameters
         ----------
-        maps
-            List of maps.
+        imaps, optional
+            List of map indices, by default None
+        maps, optional
+            List of maps (if `imaps` is not provided), by default None
         nx, optional
             Number of maps to plot per row, by default None
         log, optional
@@ -263,18 +265,32 @@ class MapBuilder:
             Title prefix, by default None
         cbar, optional
             Whether to show color bars, by default False
+        save, optional
+            Whether to save the plot, by default True
         """
+        assert (imaps is None) or (maps is None)
+
         if maps is None:
-            nmaps = self.nmaps
+            if imaps is None:
+                nmaps = self.nmaps
+            elif isinstance(imaps, Iterable):
+                nmaps = len(imaps)
+            elif type(imaps) is int:
+                nmaps = 1
+            else:
+                raise ValueError
         else:
             nmaps = len(maps)
+            imaps = range(nmaps)
+
         if nx is None:
             nx = nmaps
         ny = int(np.ceil(nmaps / nx))
 
         plt.figure(figsize=(4 * nx, 4 * ny))
 
-        for imap in range(nmaps):
+        sub = 1
+        for imap in self.tqdm(imaps):
             if maps is None:
                 hp_map = self.load_maps(imap)
             else:
@@ -286,10 +302,26 @@ class MapBuilder:
             title = title_prefix + f" {imap}" if title_prefix is not None else None
             if self.octant_only:
                 hp.orthview(
-                    hp_map, rot=(35, 20), half_sky=True, sub=(ny, nx, imap + 1), title=title, cbar=cbar, min=0. if log else None, **kwargs)
+                    hp_map,
+                    rot=(35, 20),
+                    half_sky=True,
+                    sub=(ny, nx, sub),
+                    title=title,
+                    cbar=cbar,
+                    min=0. if log else None,
+                    margins=(0., 0., 0., 0.),
+                    **kwargs)
             else:
-                hp.mollview(hp_map, sub=(ny, nx, imap + 1), title=title, cbar=cbar, **kwargs)
-                
+                hp.mollview(
+                    hp_map,
+                    sub=(ny, nx, sub),
+                    title=title,
+                    cbar=cbar,
+                    min=0. if log else None,
+                    margins=(0., 0., 0., 0.),
+                    **kwargs)
+            sub += 1
+
         hp.graticule(verbose=False)
 
         if save:
@@ -524,7 +556,11 @@ class MapBuilder:
         else:
             return s
 
-    def predict_cls(self, imaps=None, auto_only=False, approximate=False):
+    def _noise_cls(self, imap):
+        raise NotImplementedError
+
+    def predict_cls(
+            self, imaps=None, auto_only=False, approximate=False, add_noise=False, error_bars=False, keep_cls=False):
         """Compute theory angular power spectra of convergence maps with CCL
 
         Parameters
@@ -540,6 +576,9 @@ class MapBuilder:
         -------
             Multipole bin centers and dictionary of spectra
         """
+        if hasattr(self, 'predicted_cls'):
+            return self.predicted_cls
+
         if imaps is None:
             imaps = range(self.nmaps)
 
@@ -554,19 +593,48 @@ class MapBuilder:
 
         b = self.get_cls_b()
 
+        ell = b.get_effective_ells()
+        nell = b.get_nell_list()
+        fsky = 1 / 8. if self.octant_only else 1.
+        order = lambda i, j: (max(i, j), min(i, j))
+
         if not approximate:
             wsp = self.get_cls_wsp()
             bpws = wsp.get_bandpower_windows()[0, :, 0, :]
 
+        def angular_cl(*args):
+            try:
+                return pyccl.angular_cl(*args)
+            except pyccl.CCLError:
+                return pyccl.angular_cl(*args, limber_integration_method='spline')
+
         cl = {}
         for i, j in tqdm(pairs, desc="[predict_cls]"):
             if approximate:
-                cl[i, j] = pyccl.angular_cl(self.cosmo, tracers_[i], tracers_[j], b.get_effective_ells())
+                cl[i, j] = angular_cl(self.cosmo, tracers_[i], tracers_[j], b.get_effective_ells())
+                if add_noise and i == j:
+                    cl[i, j] += self._noise_cls(i)
             else:
-                cl_raw = pyccl.angular_cl(self.cosmo, tracers_[i], tracers_[j], range(3 * self.nside))
+                cl_raw = angular_cl(self.cosmo, tracers_[i], tracers_[j], range(3 * self.nside))
                 cl[i, j] = np.dot(bpws, hp.pixwin(self.nside)**2 * cl_raw)
+                if add_noise and i == j:
+                    cl[i, j] += np.dot(bpws, hp.pixwin(self.nside)**2 * self._noise_cls(i))
 
-        return b.get_effective_ells(), cl
+        if error_bars:
+            dcl = {}
+            for i, j in pairs:
+                if i == j:
+                    dcl2_num = 2 * (cl[i, i] + self._noise_cls(i))**2
+                else:
+                    dcl2_num = (cl[i, i] + self._noise_cls(i)) * (cl[j, j] + self._noise_cls(j)) + cl[order(i, j)]**2
+                dcl[i, j] = np.sqrt(dcl2_num / ((2 * ell + 1.) * fsky * nell))
+            if keep_cls:
+                self.predicted_cls = ell, cl, dcl
+            return ell, cl, dcl
+        else:
+            if keep_cls:
+                self.predicted_cls = ell, cl
+            return ell, cl
 
     def triangle_plot_cls(
             self,
@@ -575,8 +643,15 @@ class MapBuilder:
             theory_only=False,
             data_only=False,
             ratio_data_theory=False,
+            diff_data_theory_over_error=False,
             save=True,
-            sharey=None):
+            sharey=None,
+            figaxes=None,
+            colortheory='orange',
+            colordata='dodgerblue',
+            approximate=False,
+            ell_factor=0,
+            error_bars=False):
         """Plot predicted and/or measured angular power spectra of maps
 
         Parameters
@@ -599,16 +674,28 @@ class MapBuilder:
         n = self.nmaps
         m = 1 if auto_only else n
         sharey = sharey or False  #False if auto_only else 'row'
-        fig, axes = plt.subplots(m, n, figsize=(4 * n, 3 * m), sharex=True, sharey=sharey, squeeze=False)
+        if figaxes is None:
+            fig, axes = plt.subplots(m, n, figsize=(4 * n, 3 * m), sharex=True, sharey=sharey, squeeze=False)
+        else:
+            fig, axes = figaxes
 
         if ratio_data_theory:
             assert not (logy or theory_only or data_only)
 
-        ell, cl_th = self.predict_cls(auto_only=auto_only)
+        ell, cl, dcl = self.predict_cls(auto_only=auto_only, approximate=approximate, error_bars=True)
         s = self.load_cls()
 
         tracers = list(s.tracers.keys())
         tc = s.get_tracer_combinations(self.sacc_type)
+
+        if ell_factor == 0:
+            ell_factor = 1.
+        elif ell_factor == 1:
+            ell_factor = ell
+        elif ell_factor == 2:
+            ell_factor = ell * (ell + 1) / (2 * np.pi)
+        else:
+            raise ValueError
 
         for i in range(m):
             for j in range(n):
@@ -618,27 +705,50 @@ class MapBuilder:
                 else:
                     ax = axes[i, j]
                 ax_used = False
+                cl_obs = s.get_ell_cl(self.sacc_type, tracers[i],
+                                      tracers[j])[1] if (tracers[i], tracers[j]) in tc else None
+                cl_th = cl[i, j] if (i, j) in cl.keys() else None
                 if ratio_data_theory:
-                    if (i, j) in cl_th.keys() and (tracers[i], tracers[j]) in tc:
-                        ax.plot(ell, s.get_ell_cl(self.sacc_type, tracers[i], tracers[j])[1] / cl_th[i, j], c='r')
+                    if cl_obs is not None and cl_th is not None:
+                        ax.plot(ell, cl_obs / cl_th, c=colordata)
+                        if error_bars:
+                            ax.fill_between(
+                                ell,
+                                1. - dcl[i, j] / cl_th,
+                                1. + dcl[i, j] / cl_th,
+                                color=colortheory,
+                                alpha=0.2,
+                                zorder=-99)
                         ax.axhline(y=1., c='.8', ls='--')
+                        ax.set_ylabel(r'$C_\ell^{\rm obs} / C_\ell^{\rm th}$')
+                        ax_used = True
+                elif diff_data_theory_over_error:
+                    if cl_obs is not None and cl_th is not None:
+                        ax.plot(ell, (cl_obs - cl_th) / dcl[i, j], c=colordata)
+                        if error_bars:
+                            ax.axhspan(-1., +1., color=colortheory, alpha=0.2, zorder=-99)
+                        ax.axhline(y=0., c='.8', ls='--')
+                        ax.set_ylabel(r'$\Delta C_\ell / \sigma(C_\ell)$')
                         ax_used = True
                 else:
-                    if (i, j) in cl_th.keys() and not data_only:
-                        ax.plot(ell, cl_th[i, j], c='orange')
+                    if cl_th is not None and not data_only:
+                        ax.plot(ell, ell_factor * cl_th, c=colortheory)
+                        if error_bars:
+                            ax.fill_between(
+                                ell,
+                                ell_factor * (cl_th - dcl[i, j]),
+                                ell_factor * (cl_th + dcl[i, j]),
+                                color=colortheory,
+                                alpha=0.2,
+                                zorder=-99)
+
                         ax_used = True
-                    if (tracers[i], tracers[j]) in tc and not theory_only:
-                        ax.plot(
-                            ell,
-                            s.get_ell_cl(self.sacc_type, tracers[i], tracers[j])[1],
-                            c='dodgerblue',
-                            ls=' ',
-                            marker='o',
-                            markersize=5)
+                    if cl_obs is not None and not theory_only:
+                        ax.plot(ell, ell_factor * cl_obs, c=colordata, ls=' ', marker='o', markersize=5)
+                        ax.set_ylabel(r'$C_\ell$')
                         ax_used = True
                 if ax_used:
                     ax.set_xlabel('Multipole $\ell$')
-                    ax.set_ylabel('$C_\ell$')
                     ax.set_xscale('log')
                     if logy:
                         ax.set_yscale('log')
@@ -651,4 +761,4 @@ class MapBuilder:
             fname = self.get_fname(what='cls', force_fits=True).replace('.fits', '.png')
             fig.savefig(fname, bbox_inches='tight')
 
-        plt.show()
+        # plt.show()

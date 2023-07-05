@@ -27,7 +27,7 @@ class ShellBuilder(MapBuilder):
             seed=12345,
             dtype=np.uint64,
             subsample_box=None,
-            z_subsample_auto=2.,
+            subsample_box_params={'auto_z':2, 'clmax_r':100.},
             group_isometries=None,
             **kwargs):
         """ShellBuilder is a class to handle the computation of particle shells from snapshots of an N-body simulation.
@@ -38,8 +38,32 @@ class ShellBuilder(MapBuilder):
             N-body simulation reader.
         nside
             Resolution parameter nside of the shells.
-        save_dir, optional
-            Path of folder to save shells and other products, by default None
+        save_dir
+            Path of folder to save shells and other products.
+        apply_random_isometry, optional
+            Apply random isometry (rotations and flips A, and translation by shift b), such that particle positions are transformed as xyz'=A(xyz+b), by default False
+        seed, optional
+            Random number generator seed for isometries (ensures results are reproducible), by default 12345
+        dtype, optional
+            Dtype of the particle shells, by default np.int64
+        subsample_box, optional
+            _description_, by default None
+        subsample_box_params, optional
+            _description_, by default {'auto_z':2, 'clmax_r':100.}
+        group_isometries, optional
+            _description_, by default None
+        """        
+        
+        """ShellBuilder is a class to handle the computation of particle shells from snapshots of an N-body simulation.
+
+        Parameters
+        ----------
+        reader
+            N-body simulation reader.
+        nside
+            Resolution parameter nside of the shells.
+        save_dir
+            Path of folder to save shells and other products.
         apply_random_isometry, optional
             Apply random isometry (rotations and flips A, and translation by shift b), such that particle positions are transformed as xyz'=A(xyz+b), by default False
         seed, optional
@@ -59,7 +83,7 @@ class ShellBuilder(MapBuilder):
         self.apply_random_isometry = apply_random_isometry
         self.seed = seed
         self.subsample_box = subsample_box
-        self.z_subsample_auto = z_subsample_auto
+        self.subsample_box_params = subsample_box_params
         self.group_isometries = group_isometries
 
         self.nshells = self.reader.nshells
@@ -99,7 +123,7 @@ class ShellBuilder(MapBuilder):
             self.Abs = self.get_random_isometries()
 
         # Particle subsampling
-        assert subsample_box == 'auto' or type(subsample_box) is float or subsample_box is None
+        assert subsample_box in ['auto', 'clmax'] or type(subsample_box) is float or subsample_box is None
 
     def _get_dndz(self, zz):
         """
@@ -219,16 +243,31 @@ class ShellBuilder(MapBuilder):
         """
         if self.subsample_box == 'auto':
             if not hasattr(self, 'subsample_ratios'):
-                # estimated number of galaxies per pixel
+                # estimated number of particles per pixel
                 ngal_pix = np.array([self.estimate_repeats(ishell) for ishell in range(self.nshells)
                                     ]) * self.reader.nparticles / self.npix
                 if self.octant_only:
                     ngal_pix *= 8.
                 snr_pix = 1. / np.sqrt(ngal_pix)  # S/N per pixel
-                # S/N at redshift z_subsample_auto
-                snr_pix_cut = np.interp(self.z_subsample_auto, self.reader.zsnapshots, snr_pix)
-                # fraction of particles to maintain S/N of z>z_subsample_auto
+                # S/N at redshift subsample_box_auto_z
+                snr_pix_cut = np.interp(self.subsample_box_params['auto_z'], self.reader.zsnapshots, snr_pix)
+                # fraction of particles to maintain S/N of z>subsample_box_auto_z
                 self.subsample_ratios = np.minimum(1., (snr_pix / snr_pix_cut)**2)
+            ratio = self.subsample_ratios[ishell]
+        elif self.subsample_box == 'clmax':
+            if not hasattr(self, 'subsample_ratios'):
+                # estimated number of particles per pixel
+                ngal_pix = np.array([self.estimate_repeats(ishell) for ishell in range(self.nshells)
+                                    ]) * self.reader.nparticles / self.npix
+                if self.octant_only:
+                    ngal_pix *= 8.
+                # compute theory Cl's
+                cl = self.predict_cls(auto_only=True, approximate=True)[1]
+                # fix particle density such that shot-noise is 100 times lower than Cl at lmax
+                nbar_th = self.subsample_box_params['clmax_r'] / np.array([cl[i,i][-1] for i in range(self.nmaps)])
+                # convert to desired number of particles per pixel
+                ngal_th = nbar_th * hp.nside2pixarea(self.nside, degrees=False)
+                self.subsample_ratios = np.minimum(1., ngal_th/ngal_pix)
             ratio = self.subsample_ratios[ishell]
         elif type(self.subsample_box) is float:
             ratio = self.subsample_box
@@ -261,6 +300,10 @@ class ShellBuilder(MapBuilder):
         pixel_volume = 4. * np.pi / 3. * (chi_max**3 - chi_min**3) / npix
 
         return pixel_volume * self.box_comoving_density(ishell)
+    
+    def get_sky_density(self, ishell, degrees=False):
+        area = hp.nside2pixarea(self.nside, degrees=degrees)
+        return self.get_pixel_density(ishell) / area
 
     def construct_shell_sub(
             self,
@@ -330,8 +373,7 @@ class ShellBuilder(MapBuilder):
 
         # particle sub-sampling
         if self.subsample_box is not None:
-            if self.subsample_box == 'auto':
-                ratio = self.get_subsample_ratio(ishell)
+            ratio = self.get_subsample_ratio(ishell)    
             nparticles_kept = int(len(xyz) * ratio)
             if verbose:
                 print(f"Keeping {nparticles_kept} particles, ie a fraction {ratio}.")
@@ -625,6 +667,9 @@ class ShellBuilder(MapBuilder):
             out[k] = np.concatenate(out[k])
 
         return out
+    
+    def _noise_cls(self, ishell):
+        return 1./self.get_sky_density(ishell)        
 
 
 # @numba.njit(parallel=False)

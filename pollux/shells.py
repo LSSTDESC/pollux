@@ -27,7 +27,10 @@ class ShellBuilder(MapBuilder):
             seed=12345,
             dtype=np.uint64,
             subsample_box=None,
-            subsample_box_params={'auto_z':2, 'clmax_r':100.},
+            subsample_box_params={
+                'auto_z': 2,
+                'clmax_r': 100.
+            },
             group_isometries=None,
             **kwargs):
         """ShellBuilder is a class to handle the computation of particle shells from snapshots of an N-body simulation.
@@ -52,30 +55,6 @@ class ShellBuilder(MapBuilder):
             _description_, by default {'auto_z':2, 'clmax_r':100.}
         group_isometries, optional
             _description_, by default None
-        """        
-        
-        """ShellBuilder is a class to handle the computation of particle shells from snapshots of an N-body simulation.
-
-        Parameters
-        ----------
-        reader
-            N-body simulation reader.
-        nside
-            Resolution parameter nside of the shells.
-        save_dir
-            Path of folder to save shells and other products.
-        apply_random_isometry, optional
-            Apply random isometry (rotations and flips A, and translation by shift b), such that particle positions are transformed as xyz'=A(xyz+b), by default False
-        seed, optional
-            Random number generator seed for isometries (ensures results are reproducible), by default 12345
-        octant_only, optional
-            Use only an octant of the sphere instead of the full sphere, by default True
-        nside_c, optional
-            Resolution of the coverage map of shells as defined by healpsarse, by default 32
-        dtype, optional
-            Dtype of the particle shells, by default np.int64
-        save_format, optional
-            File format of shells (fits or h5), by default 'fits'
         """
 
         self.reader = reader
@@ -133,18 +112,19 @@ class ShellBuilder(MapBuilder):
         dVdz = pyccl.comoving_angular_distance(self.cosmo, aa)**2 / pyccl.background.h_over_h0(self.cosmo, aa)
         return dVdz / np.trapz(dVdz, zz)  # rough normalization
 
-    def _create_tracers(self, Nz=1000):
+    def _create_tracers(self, Nz=100):
         z_shell_bins = self.reader.shell_edges_redshift()
 
         tracers = []
         for ishell in range(self.nshells):
             zz = np.linspace(z_shell_bins[ishell], z_shell_bins[ishell + 1], Nz)
             dndz = self._get_dndz(zz)
-            tracers.append(pyccl.NumberCountsTracer(self.cosmo, False, dndz=(zz, dndz), bias=(zz, np.ones_like(zz))))
+            tracers.append(
+                pyccl.NumberCountsTracer(self.cosmo, has_rsd=False, dndz=(zz, dndz), bias=(zz, np.ones_like(zz))))
 
         return tracers
 
-    def _create_tracers_sacc(self, Nz=1000):
+    def _create_tracers_sacc(self, Nz=100):
         z_shell_bins = self.reader.shell_edges_redshift()
 
         tracers = []
@@ -264,10 +244,10 @@ class ShellBuilder(MapBuilder):
                 # compute theory Cl's
                 cl = self.predict_cls(auto_only=True, approximate=True)[1]
                 # fix particle density such that shot-noise is 100 times lower than Cl at lmax
-                nbar_th = self.subsample_box_params['clmax_r'] / np.array([cl[i,i][-1] for i in range(self.nmaps)])
+                nbar_th = self.subsample_box_params['clmax_r'] / np.array([cl[i, i][-1] for i in range(self.nmaps)])
                 # convert to desired number of particles per pixel
                 ngal_th = nbar_th * hp.nside2pixarea(self.nside, degrees=False)
-                self.subsample_ratios = np.minimum(1., ngal_th/ngal_pix)
+                self.subsample_ratios = np.minimum(1., ngal_th / ngal_pix)
             ratio = self.subsample_ratios[ishell]
         elif type(self.subsample_box) is float:
             ratio = self.subsample_box
@@ -300,7 +280,7 @@ class ShellBuilder(MapBuilder):
         pixel_volume = 4. * np.pi / 3. * (chi_max**3 - chi_min**3) / npix
 
         return pixel_volume * self.box_comoving_density(ishell)
-    
+
     def get_sky_density(self, ishell, degrees=False):
         area = hp.nside2pixarea(self.nside, degrees=degrees)
         return self.get_pixel_density(ishell) / area
@@ -373,7 +353,7 @@ class ShellBuilder(MapBuilder):
 
         # particle sub-sampling
         if self.subsample_box is not None:
-            ratio = self.get_subsample_ratio(ishell)    
+            ratio = self.get_subsample_ratio(ishell)
             nparticles_kept = int(len(xyz) * ratio)
             if verbose:
                 print(f"Keeping {nparticles_kept} particles, ie a fraction {ratio}.")
@@ -602,7 +582,7 @@ class ShellBuilder(MapBuilder):
         isubs = self.reader.get_isubs_for_shell(ishell)
 
         fname = self.get_fname(ishell, what='haloes')
-        
+
         if skip_existing and os.path.exists(fname):
             if check_read_existing:
                 try:
@@ -628,7 +608,7 @@ class ShellBuilder(MapBuilder):
             hdul.append(fits.BinTableHDU.from_columns([idx, ra, dec, r, z], header))
 
         fits.HDUList(hdul).writeto(fname, overwrite=True)
-        
+
         return hdul
 
     def read_shell_catalog_props(self, ishell, variables):
@@ -667,9 +647,9 @@ class ShellBuilder(MapBuilder):
             out[k] = np.concatenate(out[k])
 
         return out
-    
+
     def _noise_cls(self, ishell):
-        return 1./self.get_sky_density(ishell)        
+        return 1. / self.get_sky_density(ishell)
 
 
 # @numba.njit(parallel=False)

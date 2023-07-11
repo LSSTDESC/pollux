@@ -126,10 +126,10 @@ class MapBuilder:
                 os.makedirs(subs_save_dir, exist_ok=True)
             return os.path.join(subs_save_dir, fname)
 
-    def _create_tracers(self, Nz=1000):
+    def _create_tracers(self):
         raise NotImplementedError
 
-    def get_tracers(self, Nz=1000):
+    def get_tracers(self):
         """Create CCL Tracer object for theory computations
 
         Parameters
@@ -141,10 +141,10 @@ class MapBuilder:
             self.tracers = self._create_tracers()
         return self.tracers
 
-    def _create_tracers_sacc(self, Nz=1000):
+    def _create_tracers_sacc(self):
         raise NotImplementedError
 
-    def get_tracers_sacc(self, imap=None, Nz=1000):
+    def get_tracers_sacc(self):
         """Create SACC tracer object for measured angular power spectra
 
         Parameters
@@ -248,7 +248,7 @@ class MapBuilder:
         else:
             return maps
 
-    def plot_maps(self, imaps=None, maps=None, nx=None, log=False, title_prefix=None, cbar=True, save=True, **kwargs):
+    def plot_maps(self, maps_or_imaps=None, nx=None, log=False, title_prefix=None, cbar=True, save=True, **kwargs):
         """Plots particle maps.
 
         Parameters
@@ -268,20 +268,26 @@ class MapBuilder:
         save, optional
             Whether to save the plot, by default True
         """
-        assert (imaps is None) or (maps is None)
+        # assert (imaps is None) or (maps is None)
 
-        if maps is None:
-            if imaps is None:
-                nmaps = self.nmaps
-            elif isinstance(imaps, Iterable):
-                nmaps = len(imaps)
-            elif type(imaps) is int:
-                nmaps = 1
-            else:
-                raise ValueError
-        else:
-            nmaps = len(maps)
+        if maps_or_imaps is None:
+            nmaps = self.nmaps
             imaps = range(nmaps)
+            maps = None
+        elif type(maps_or_imaps) is int:
+            nmaps = 1
+            imaps = [imaps]
+            maps = None
+        elif isinstance(maps_or_imaps, Iterable):
+            nmaps = len(maps_or_imaps)
+            if type(maps_or_imaps[0]) is int:
+                imaps = maps_or_imaps
+                maps = None
+            else:
+                imaps = range(nmaps)
+                maps = maps_or_imaps
+        else:
+            raise ValueError
 
         if nx is None:
             nx = nmaps
@@ -322,7 +328,7 @@ class MapBuilder:
                     **kwargs)
             sub += 1
 
-        hp.graticule(verbose=False)
+        hp.graticule()
 
         if save:
             fname = self.get_fname(force_fits=True).replace('.fits', '.png')
@@ -603,11 +609,19 @@ class MapBuilder:
             bpws = wsp.get_bandpower_windows()[0, :, 0, :]
 
         def angular_cl(*args):
+            # return pyccl.angular_cl(*args)
+            # c, t1, t2, ells = args
+            # for ell in ells:
+            #     print(ell, t1.chi_min, t1.chi_max, t2.chi_min, t2.chi_max)
+            #     pyccl.angular_cl(c, t1, t2, ell)
+            #     pass
             try:
                 return pyccl.angular_cl(*args)
             except pyccl.CCLError:
                 return pyccl.angular_cl(*args, limber_integration_method='spline')
-
+            
+        self.cosmo.compute_growth()
+        
         cl = {}
         for i, j in tqdm(pairs, desc="[predict_cls]"):
             if approximate:

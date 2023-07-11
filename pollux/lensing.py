@@ -11,10 +11,19 @@ from .map_builder import MapBuilder
 from .utils import quad
 
 
-class MyCMBLensingTracer(pyccl.CMBLensingTracer):
+class MyCMBLensingTracer(pyccl.Tracer):
 
     def __init__(self, cosmo, z_source, n_samples=100):
-        super().__init__(cosmo, z_source, n_samples=n_samples)
+        super().__init__()
+
+        # we need the distance functions at the C layer
+        cosmo.compute_distances()
+        kernel = pyccl.get_kappa_kernel(cosmo, z_source=z_source, n_samples=n_samples)
+        if (cosmo['sigma_0'] == 0):
+            self.add_tracer(cosmo, kernel=kernel, der_bessel=-1, der_angles=1)
+        else:
+            self._MG_add_tracer(cosmo, kernel, z_source, der_bessel=-1, der_angles=1)
+
         self.z_source = z_source
 
 
@@ -45,9 +54,9 @@ class LensingBuilder(MapBuilder):
         self.cosmo = shell_builder.cosmo
         self.nshells = shell_builder.nshells
         self.nzs = nzs
-        
+
         self.sigma_e = sigma_e
-        self.nbar = nbar * (60 * 180 / np.pi)**2 # gal/arcmin2 to gal/str
+        self.nbar = nbar * (60 * 180 / np.pi)**2  # gal/arcmin2 to gal/str
 
         if nzs == 'zsnapshots':
             self.nkappas = self.shell_builder.nshells
@@ -76,9 +85,9 @@ class LensingBuilder(MapBuilder):
             for nz in self.nzs:
                 if callable(nz):
                     zz = np.linspace(0, z_shell_bins[-1], Nz)
-                    tracers.append(pyccl.WeakLensingTracer(self.cosmo, (zz, nz(zz))))
+                    tracers.append(pyccl.WeakLensingTracer(self.cosmo, dndz=(zz, nz(zz))))
                 else:
-                    tracers.append(pyccl.WeakLensingTracer(self.cosmo, (nz[0], nz[1])))
+                    tracers.append(pyccl.WeakLensingTracer(self.cosmo, dndz=(nz[0], nz[1])))
 
         return tracers
 
@@ -179,9 +188,9 @@ class LensingBuilder(MapBuilder):
             return gammas, alms
         else:
             return gammas
-        
+
     def _noise_cls(self, imap):
-        nbar = self.nbar #self.shell_builder.get_sky_density(imap)
+        nbar = self.nbar
         return self.sigma_e**2 / nbar
 
 
@@ -233,8 +242,6 @@ class BornLensingBuilder(LensingBuilder):
                 for t in self.get_tracers()
             ]
             self.zlens = [self.shell_builder.get_mean_z(ishell) for ishell in range(self.nshells)]
-
-
 
     def compute_weight(self, ishell, ikappa):
         """Compute lensing weights to form convergence maps from particle shells

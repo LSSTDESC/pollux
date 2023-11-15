@@ -84,6 +84,11 @@ class MapBuilder:
             if not os.path.exists(self.save_dir):
                 # os.mkdir(self.save_dir)
                 os.makedirs(self.save_dir, exist_ok=True)
+                
+        print(f"*** Map builder ({self.base_fname}) ***")
+        print(f"  - Number of maps = {self.nmaps}")
+        print(f"  - Maps saved to", self.save_dir)
+
 
     def tqdm(self, it, **kwargs):
         """
@@ -595,7 +600,7 @@ class MapBuilder:
             pairs = [(i1, i2) for i, i2 in enumerate(imaps) for i1 in imaps[i:]]
 
         tracers = self.get_tracers()
-        tracers_ = {i: t for i, t in zip(imaps, tracers)}
+        tracers_ = {imap: tracers[imap] for imap in imaps}
 
         b = self.get_cls_b()
 
@@ -625,7 +630,7 @@ class MapBuilder:
         cl = {}
         for i, j in tqdm(pairs, desc="[predict_cls]"):
             if approximate:
-                cl[i, j] = angular_cl(self.cosmo, tracers_[i], tracers_[j], b.get_effective_ells())
+                cl[i, j] = angular_cl(self.cosmo, tracers_[i], tracers_[j], ell)
                 if add_noise and i == j:
                     cl[i, j] += self._noise_cls(i)
             else:
@@ -704,10 +709,13 @@ class MapBuilder:
 
         if ell_factor == 0:
             ell_factor = 1.
+            ylabel = r'$C_\ell$'
         elif ell_factor == 1:
             ell_factor = ell
+            ylabel = r'$\ell\,C_\ell$'
         elif ell_factor == 2:
             ell_factor = ell * (ell + 1) / (2 * np.pi)
+            ylabel = r'$\ell(\ell+1)C_\ell/2\pi$'
         else:
             raise ValueError
 
@@ -716,8 +724,10 @@ class MapBuilder:
                 if auto_only:
                     ax = axes[0, j]
                     i = j
+                    title = f'{self.base_fname} {i}'
                 else:
                     ax = axes[i, j]
+                    title = f'{self.base_fname} {i} {j}'
                 ax_used = False
                 cl_obs = s.get_ell_cl(self.sacc_type, tracers[i],
                                       tracers[j])[1] if (tracers[i], tracers[j]) in tc else None
@@ -755,15 +765,15 @@ class MapBuilder:
                                 color=colortheory,
                                 alpha=0.2,
                                 zorder=-99)
-
                         ax_used = True
                     if cl_obs is not None and not theory_only:
                         ax.plot(ell, ell_factor * cl_obs, c=colordata, ls=' ', marker='o', markersize=5)
-                        ax.set_ylabel(r'$C_\ell$')
                         ax_used = True
                 if ax_used:
                     ax.set_xlabel('Multipole $\ell$')
+                    ax.set_ylabel(ylabel)
                     ax.set_xscale('log')
+                    ax.set_title(title)
                     if logy:
                         ax.set_yscale('log')
                 else:

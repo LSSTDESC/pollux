@@ -14,6 +14,7 @@ from tqdm.auto import tqdm, trange
 
 from .map_builder import MapBuilder
 from .utils import quad
+from .reader import DummyReader
 
 
 class ShellBuilder(MapBuilder):
@@ -83,23 +84,39 @@ class ShellBuilder(MapBuilder):
         if dtype == np.int32:
             print(f"Warning: the max value for {dtype} might not be enough : {np.iinfo(dtype)}")
 
-        # Make sure snapshots are larger than the shells
-        z_shell_bins = self.reader.shell_edges_redshift()
-        chi_shell_bins = self.reader.shell_edges_comoving_distance()
-        boxsize = self.reader.boxsize()
-        diff = np.diff(chi_shell_bins)
-        print(f"Box size = {boxsize:.2f} Mpc")
-        print(f"Number of shells = {self.nmaps}")
-        if not np.all(diff < boxsize):
-            message = "Some shells are deeper than the simulation box!\n"
-            for ishell in range(self.nmaps):
-                if diff[ishell] > boxsize:
-                    message += f"Shell {ishell} ({z_shell_bins[ishell]:.2f}<z<{z_shell_bins[ishell+1]:.2f}) has width {diff[ishell]:.2f} Mpc\n"
-            warnings.warn(message)
+        # Try getting shell information from reader, if not dummy.
+        try:
+            # Make sure snapshots are larger than the shells
+            z_shell_bins = self.reader.shell_edges_redshift()
+            chi_shell_bins = self.reader.shell_edges_comoving_distance()
+            boxsize = self.reader.boxsize()
+            diff = np.diff(chi_shell_bins)
+            print(f"  - Box size = {boxsize:.2f} Mpc")
+            if not np.all(diff < boxsize):
+                message = "Some shells are deeper than the simulation box!\n"
+                for ishell in range(self.nshells):
+                    if diff[ishell] > boxsize:
+                        message += f"Shell {ishell} ({z_shell_bins[ishell]:.2f}<z<{z_shell_bins[ishell+1]:.2f}) has width {diff[ishell]:.2f} Mpc\n"
+                warnings.warn(message)
 
-        # Draw random isometries
-        if apply_random_isometry:
-            self.Abs = self.get_random_isometries()
+            # Save shell info for later reference and compare to existing as a safe check
+            if self.save_dir is not None:
+                fname = os.path.join(self.save_dir, self.base_fname + '_shell_info.npy')
+                shell_info = self.reader.shell_info()
+                if os.path.exists(fname):
+                    shell_info_existing = np.load(fname)
+                    np.testing.assert_array_equal(shell_info, shell_info_existing)
+                else:
+                    self.reader.shell_info(fname)
+
+            # Draw random isometries
+            if apply_random_isometry:
+                self.Abs = self.get_random_isometries()
+
+        except NotImplementedError:
+            warnings.warn(
+                "Reader does not implement `shell_edges_redshift` or `shell_edges_comoving_distance` or `boxsize.")
+            assert isinstance(reader, DummyReader)
 
         # Particle subsampling
         assert subsample_box in ['auto', 'clmax'] or type(subsample_box) is float or subsample_box is None
@@ -112,7 +129,7 @@ class ShellBuilder(MapBuilder):
         dVdz = pyccl.comoving_angular_distance(self.cosmo, aa)**2 / pyccl.background.h_over_h0(self.cosmo, aa)
         return dVdz / np.trapz(dVdz, zz)  # rough normalization
 
-    def _create_tracers(self, Nz=100):
+    def _create_tracers(self, Nz=1000):
         z_shell_bins = self.reader.shell_edges_redshift()
 
         tracers = []
@@ -124,7 +141,7 @@ class ShellBuilder(MapBuilder):
 
         return tracers
 
-    def _create_tracers_sacc(self, Nz=100):
+    def _create_tracers_sacc(self, Nz=1000):
         z_shell_bins = self.reader.shell_edges_redshift()
 
         tracers = []
@@ -157,41 +174,38 @@ class ShellBuilder(MapBuilder):
         """
         rng = np.random.default_rng(self.seed)
         boxsize = self.reader.boxsize()
+        chi_shell_bins = self.reader.shell_edges_comoving_distance()
 
-        # find number of isometries (can be grouped for adjacent shells)
-        n_isometries = self.nshells
+        # maximum width a given isometry can be applied to
         if self.group_isometries is not None:
-            chi_shell_bins = self.reader.shell_edges_comoving_distance()
+            # if grouped, fix as function of box size
             if type(self.group_isometries) is bool:
                 assert self.group_isometries
-                com_iso_depth = boxsize
+                dchi_iso_max = boxsize
             if type(self.group_isometries) is float:
-                com_iso_depth = boxsize * self.group_isometries
-            n_isometries = int(np.ceil(chi_shell_bins[-1] / com_iso_depth))
-            com_iso_bins = np.arange(n_isometries + 1) * com_iso_depth
-            print(f"Grouping {n_isometries} isometries for shells within {com_iso_depth:.2f} Mpc.")
-
-        # draw random isometries
-        _Abs = []
-        for _ in range(n_isometries):
-            A, b = random_isometry(rng, boxsize)
-            _Abs.append([A.astype(self.reader.dtype), b.astype(self.reader.dtype)])
-
-        # assign isometries to shells
-        if self.group_isometries is not None:
-
-            def get_max_overlap(a, b):
-                return np.argmax(np.fmin(a[1:, None], b[None, 1:]) - np.fmax(a[:-1, None], b[None, :-1]), axis=1)
-
-            # check overlap of volume of shells
-            idx = get_max_overlap(chi_shell_bins**3, com_iso_bins**3)
-
-            self.Abs = []
-            for ishell in range(self.nshells):
-                self.Abs.append(_Abs[idx[ishell]])
-
+                dchi_iso_max = boxsize * self.group_isometries
         else:
-            self.Abs = _Abs
+            # if not grouped, set to 0 to force drawing one isometry per shell
+            dchi_iso_max = 0.
+
+        self.Abs = []
+        n_isometries = 0
+        dchi_iso = np.inf
+
+        for ishell in range(self.nshells):
+            dchi_shell = chi_shell_bins[ishell + 1] - chi_shell_bins[ishell]
+            if dchi_iso + dchi_shell > dchi_iso_max:
+                # if grouped shell width is larger than maximum width for isometry, draw a new one
+                A, b = random_isometry(rng, boxsize)
+                n_isometries += 1
+                dchi_iso = 0.
+            dchi_iso += dchi_shell
+            self.Abs.append([A.astype(self.reader.dtype), b.astype(self.reader.dtype)])
+
+        if self.group_isometries is not None:
+            print(f"  - Using {n_isometries} isometries grouped within {dchi_iso_max:.2f} Mpc.")
+        else:
+            print(f"  - Using {n_isometries} isometries.")
 
         return self.Abs
 
@@ -244,7 +258,7 @@ class ShellBuilder(MapBuilder):
                 # compute theory Cl's
                 cl = self.predict_cls(auto_only=True, approximate=True)[1]
                 # fix particle density such that shot-noise is 100 times lower than Cl at lmax
-                nbar_th = self.subsample_box_params['clmax_r'] / np.array([cl[i, i][-1] for i in range(self.nmaps)])
+                nbar_th = self.subsample_box_params['clmax_r'] / np.array([cl[i, i][-1] for i in range(self.nshells)])
                 # convert to desired number of particles per pixel
                 ngal_th = nbar_th * hp.nside2pixarea(self.nside, degrees=False)
                 self.subsample_ratios = np.minimum(1., ngal_th / ngal_pix)

@@ -84,13 +84,12 @@ class MapBuilder:
             if not os.path.exists(self.save_dir):
                 # os.mkdir(self.save_dir)
                 os.makedirs(self.save_dir, exist_ok=True)
-                
+
         print(f"*** Map builder ({self.base_fname}) ***")
         print(f"  - Number of maps = {self.nmaps}")
         print(f"  - Maps saved to", self.save_dir)
 
-
-    def tqdm(self, it, **kwargs):
+    def tqdm(self, it=None, **kwargs):
         """
         Helper function for progress bars
         """
@@ -161,17 +160,13 @@ class MapBuilder:
             self.tracers_sacc = self._create_tracers_sacc()
         return self.tracers_sacc
 
-    def construct_maps(self, imaps=None, skip_existing=False, check_read_existing=True, **kwargs):
+    def construct_maps(self, imaps=None, **kwargs):
         """Construct maps
 
         Parameters
         ----------
         imaps, optional
             Map indices, by default None
-        skip_existing, optional
-            Whether to skip if map file exsists, by default False
-        check_read_existing, optional
-            Whether to try reading the file before skipping, by default True
             
         Returns
         -------
@@ -231,7 +226,7 @@ class MapBuilder:
         else:
             return out
 
-    def load_maps(self, imaps=None):
+    def load_maps(self, imaps=None, **kwargs):
         """Loads maps.
 
         Parameters
@@ -245,7 +240,7 @@ class MapBuilder:
         """
         maps = []
         for imap in self.tqdm(imaps, desc="[load_maps]"):
-            fname = self.get_fname(imap)
+            fname = self.get_fname(imap, **kwargs)
             maps.append(healsparse.HealSparseMap.read(fname, nside_coverage=self.nside_c))
 
         if len(maps) == 1:
@@ -321,6 +316,7 @@ class MapBuilder:
                     cbar=cbar,
                     min=0. if log else None,
                     margins=(0., 0., 0., 0.),
+                    nest=True,
                     **kwargs)
             else:
                 hp.mollview(
@@ -330,6 +326,7 @@ class MapBuilder:
                     cbar=cbar,
                     min=0. if log else None,
                     margins=(0., 0., 0., 0.),
+                    nest=True,
                     **kwargs)
             sub += 1
 
@@ -345,15 +342,24 @@ class MapBuilder:
         """
         if not hasattr(self, 'mask'):
             if self.octant_only:
-                self.mask = make_mask_radec_cuts(self.nside, 0, 90, 0, 90)
+                self.mask = make_mask_radec_cuts(self.nside, 0, 90, 0, 90, nest=True)
                 self.ipix = np.where(self.mask)[0]
             else:
-                self.mask = np.ones(hp.nside2npix(self.nside))
+                self.mask = np.ones(self.npix)
                 self.ipix = np.arange(len(self.mask))
         if return_ipix:
             return self.mask, self.ipix
         else:
             return self.mask
+
+    def get_octant_to_fullsky_ipix(self):
+        assert self.octant_only
+        if not hasattr(self, 'ipix_oct_fullsky'):
+            theta, phi = hp.pix2ang(self.nside, np.arange(self.npix), nest=True)
+            self.ipix_oct_fullsky = hp.ang2pix(
+                self.nside, np.where(theta <= np.pi / 2., theta, np.pi - theta), phi % np.pi / 2., nest=True)
+
+        return self.ipix_oct_fullsky
 
     def get_cls_b(self):
         """
@@ -389,11 +395,11 @@ class MapBuilder:
 
     def get_field_map(self, imap):
         """"
-        Create NaMaster field object of a map
+        Create map ready for a NaMaster field object or healpy map2alm calculations.
         """
         raise NotImplementedError
 
-    def compute_alms(self, imaps=None, save=True, skip_existing=False, check_read_existing=True):
+    def compute_alms(self, imaps=None, save=True, replicate_octant=False, **kwargs):
         """Compute spherical harmonic coefficients
 
         Parameters
@@ -402,10 +408,6 @@ class MapBuilder:
             Map indices, by default None
         save, optional
             Whether to save the alm's, by default True
-        skip_existing, optional
-            Whether to skip existing files, by default False
-        check_read_existing, optional
-            Whether to try reading files before skipping, by default True
 
         Returns
         -------
@@ -417,16 +419,21 @@ class MapBuilder:
         for imap in self.tqdm(imaps, desc="[compute_alms]"):
             if save:
                 fname = self.get_fname(imap, what='alms', force_fits=True)
-                if skip_existing and os.path.exists(fname):
-                    if check_read_existing:
-                        try:
-                            hp.read_alm(fname)
-                            continue
-                        except:
-                            pass
-                    else:
+                if os.path.exists(fname):
+                    try:
+                        alms[imap] = hp.read_alm(fname)
                         continue
-            alms[imap] = hp.map2alm(self.get_field_map(imap) * mask, pol=False)
+                    except:
+                        pass
+
+            # Replicate if needed and apply mask
+            if replicate_octant:
+                ipix = self.get_octant_to_fullsky_ipix()
+                _map = (self.get_field_map(imap) * mask)[ipix]
+            else:
+                _map = self.get_field_map(imap) * mask
+            alms[imap] = hp.map2alm(hp.reorder(_map, n2r=True), **kwargs)
+
             if save:
                 hp.write_alm(fname, alms[imap], overwrite=True)
 
@@ -451,7 +458,7 @@ class MapBuilder:
         maps = []
         for imap in self.tqdm(imaps, desc="[compute_maps_from_alms]"):
             alm = hp.read_alm(self.get_fname(imap, what='alms', force_fits=True))
-            values = hp.alm2map(alm, nside=self.nside, pol=False)
+            values = hp.reorder(hp.alm2map(alm, nside=self.nside, pol=False), r2n=True)
             tmp = healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
             tmp.update_values_pix(ipix, values[ipix].astype(self.dtype))
             if save:
@@ -475,7 +482,7 @@ class MapBuilder:
         fname = self.get_fname(what='cls', force_fits=True)
         s.save_fits(fname, overwrite=True)
 
-    def compute_cls(self, imaps=None, auto_only=False, save=True, use_precomputed_alms=False, pair_job=None):
+    def compute_cls(self, imaps=None, auto_only=False, save=True, use_precomputed_alms=True, pair_job=None):
         """Compute the (auto- and cross-) angular power spectra of convergence maps
 
         Parameters
@@ -624,9 +631,9 @@ class MapBuilder:
                 return pyccl.angular_cl(*args)
             except pyccl.CCLError:
                 return pyccl.angular_cl(*args, limber_integration_method='spline')
-            
+
         self.cosmo.compute_growth()
-        
+
         cl = {}
         for i, j in tqdm(pairs, desc="[predict_cls]"):
             if approximate:

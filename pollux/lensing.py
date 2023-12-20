@@ -111,14 +111,7 @@ class LensingBuilder(MapBuilder):
     def get_field_map(self, imap):
         return self.load_maps(imap).generate_healpix_map()
 
-    def compute_shear_maps(
-            self,
-            ikappas=None,
-            return_alms=False,
-            lmax=None,
-            skip_existing=False,
-            check_read_existing=True,
-            use_precomputed_alms=False):
+    def compute_shear_maps(self, ikappas=None, return_alms=False, lmax=None):
         """Compute shear maps from convergence maps
 
         Parameters
@@ -129,12 +122,6 @@ class LensingBuilder(MapBuilder):
             Whether to return alm's, by default False
         lmax, optional
             Maximum multipole, by default None
-        skip_existing, optional
-            Whether to skip if map file exsists, by default False
-        check_read_existing, optional
-            Whether to try reading the file before skipping, by default True
-        use_precomputed_alms, optional
-            Whether to use precomputed alm files instead of computing them from convergence maps (faster!), by default False
 
         Returns
         -------
@@ -147,35 +134,30 @@ class LensingBuilder(MapBuilder):
         fl = np.zeros(len(ell))
         fl[1:] = -np.sqrt((ell[1:] + 2.) * (ell[1:] - 1.) / (ell[1:] * (ell[1:] + 1.)))
 
-        pixels = np.where(self.shell_builder.get_mask())[0]
+        _, ipix_nest = self.get_mask(return_ipix=True)
+        ipix_ring = hp.nest2ring(self.nside, ipix_nest)
 
         gammas = []
         alms = []
         for ikappa in self.tqdm(ikappas, desc="[compute_shear_maps]"):
-            if skip_existing:
-                if self.check_maps(read=check_read_existing, fname=self.get_fname(
-                        ikappa, what='gamma1')) and self.check_maps(read=check_read_existing, fname=self.get_fname(
-                            ikappa, what='gamma2')):
-                    continue
+            if self.check_maps(read=True, fname=self.get_fname(ikappa, what='gamma1')) and self.check_maps(
+                    read=True, fname=self.get_fname(ikappa, what='gamma2')):
+                continue
 
             # Get harmonic coefficients of convergence map
-            if use_precomputed_alms:
-                klm = hp.read_alm(self.get_fname(ikappa, what='alms', force_fits=True))
-            else:
-                kappa = self.get_field_map(ikappa)
-                klm = hp.map2alm(kappa, pol=False, lmax=lmax)
+            klm = self.compute_alms(ikappa, save=True, replicate_octant=self.octant_only, pol=False, lmax=lmax)[ikappa]
 
             # Convert to shear
             glm_E = hp.almxfl(klm, fl)
 
-            # Generate shear map
+            # Generate shear map (ring-ordered)
             g1, g2 = hp.sphtfunc.alm2map_spin([glm_E, np.zeros_like(glm_E)], nside=self.nside, spin=2, lmax=lmax)
 
             gamma1 = healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
             gamma2 = healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
 
-            gamma1.update_values_pix(pixels, g1[pixels].astype(self.dtype))
-            gamma2.update_values_pix(pixels, g2[pixels].astype(self.dtype))
+            gamma1.update_values_pix(ipix_nest, g1[ipix_ring].astype(self.dtype), nest=True)
+            gamma2.update_values_pix(ipix_nest, g2[ipix_ring].astype(self.dtype), nest=True)
 
             gamma1.write(self.get_fname(ikappa, what='gamma1'), clobber=True)
             gamma2.write(self.get_fname(ikappa, what='gamma2'), clobber=True)
@@ -236,7 +218,7 @@ class BornLensingBuilder(LensingBuilder):
 
             self.mpart_over_area = mpart / area
 
-            zmax = self.reader.zmax
+            zmax = self.reader.shell_edges_redshift()[-1]
             self.dndz_norm = [
                 quad(lambda z: t.get_dndz(z), 0., zmax) if isinstance(t, pyccl.tracers.WeakLensingTracer) else np.nan
                 for t in self.get_tracers()
@@ -256,7 +238,7 @@ class BornLensingBuilder(LensingBuilder):
         tracer = self.get_tracers()[ikappa]
 
         if self.multiple_planes:
-            zmax = self.reader.zmax
+            zmax = self.reader.shell_edges_redshift()[-1]
             zlens = self.zlens[ishell]
 
             if zlens is None:
@@ -289,7 +271,7 @@ class BornLensingBuilder(LensingBuilder):
             chi_min, chi_max = self.reader.shell_edges_comoving_distance()[ishell:ishell + 2]
             return quad(lambda chi: tracer.get_kernel(chi), chi_min, chi_max)
 
-    def construct_maps(self, ikappas=None, skip_existing=False, check_read_existing=True):
+    def construct_maps(self, ikappas=None):
         if ikappas is None:
             ikappas = range(self.nkappas)
         elif type(ikappas) is int:
@@ -297,14 +279,13 @@ class BornLensingBuilder(LensingBuilder):
         else:
             pass
 
-        if skip_existing:
-            _ikappas = []
-            for ikappa in ikappas:
-                fname = self.get_fname(ikappa, what='alms', force_fits=True)
-                if not self.check_maps(ikappa, read=check_read_existing):
-                    _ikappas.append(ikappa)
-            if len(_ikappas) == 0:
-                return
+        _ikappas = []
+        for ikappa in ikappas:
+            fname = self.get_fname(ikappa, what='alms', force_fits=True)
+            if not self.check_maps(ikappa, read=True):
+                _ikappas.append(ikappa)
+        if len(_ikappas) == 0:
+            return
         else:
             _ikappas = ikappas
 

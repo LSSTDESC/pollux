@@ -15,6 +15,7 @@ from tqdm.auto import tqdm, trange
 from .map_builder import MapBuilder
 from .utils import quad
 from .reader import DummyReader
+from .lensing import BornLensingBuilder
 
 
 class ShellBuilder(MapBuilder):
@@ -29,7 +30,7 @@ class ShellBuilder(MapBuilder):
             dtype=np.uint64,
             subsample_box=None,
             subsample_box_params={
-                'auto_z': 2,
+                'densitymax_z': 2,
                 'clmax_r': 100.
             },
             group_isometries=None,
@@ -119,7 +120,10 @@ class ShellBuilder(MapBuilder):
             assert isinstance(reader, DummyReader)
 
         # Particle subsampling
-        assert subsample_box in ['auto', 'clmax'] or type(subsample_box) is float or subsample_box is None
+        assert subsample_box in ['densitymax', 'clmax'] or type(subsample_box) is float or subsample_box is None
+
+    def get_snapshot_lensing_builder(self):
+        return BornLensingBuilder(self, nzs='zsnapshots', kappa_dir='kappa_zsnapshots', wsp_dir=self.wsp_dir)
 
     def _get_dndz(self, zz):
         """
@@ -235,7 +239,7 @@ class ShellBuilder(MapBuilder):
         """
         Compute the sub-sampling ratio
         """
-        if self.subsample_box == 'auto':
+        if self.subsample_box == 'densitymax':
             if not hasattr(self, 'subsample_ratios'):
                 # estimated number of particles per pixel
                 ngal_pix = np.array([self.estimate_repeats(ishell) for ishell in range(self.nshells)
@@ -244,10 +248,10 @@ class ShellBuilder(MapBuilder):
                     ngal_pix *= 8.
                 snr_pix = 1. / np.sqrt(ngal_pix)  # S/N per pixel
                 # S/N at redshift subsample_box_auto_z
-                snr_pix_cut = np.interp(self.subsample_box_params['auto_z'], self.reader.zsnapshots, snr_pix)
+                snr_pix_cut = np.interp(self.subsample_box_params['densitymax_z'], self.reader.zsnapshots, snr_pix)
                 # fraction of particles to maintain S/N of z>subsample_box_auto_z
                 self.subsample_ratios = np.minimum(1., (snr_pix / snr_pix_cut)**2)
-            ratio = self.subsample_ratios[ishell]
+            return self.subsample_ratios[ishell]
         elif self.subsample_box == 'clmax':
             if not hasattr(self, 'subsample_ratios'):
                 # estimated number of particles per pixel
@@ -262,12 +266,13 @@ class ShellBuilder(MapBuilder):
                 # convert to desired number of particles per pixel
                 ngal_th = nbar_th * hp.nside2pixarea(self.nside, degrees=False)
                 self.subsample_ratios = np.minimum(1., ngal_th / ngal_pix)
-            ratio = self.subsample_ratios[ishell]
+            return self.subsample_ratios[ishell]
         elif type(self.subsample_box) is float:
-            ratio = self.subsample_box
+            return self.subsample_box
         elif self.subsample_box is None:
-            ratio = 1.
-        return ratio
+            return 1.
+        else:
+            raise ValueError
 
     def box_comoving_density(self, ishell):
         return self.reader.box_comoving_density() * self.get_subsample_ratio(ishell)
@@ -286,12 +291,11 @@ class ShellBuilder(MapBuilder):
         -------
             Mean number of particles per pixel.
         """
-        npix = hp.nside2npix(self.nside)
         chi_shell_bins = self.reader.shell_edges_comoving_distance()
 
         chi_max = chi_shell_bins[ishell + 1]
         chi_min = chi_shell_bins[ishell]
-        pixel_volume = 4. * np.pi / 3. * (chi_max**3 - chi_min**3) / npix
+        pixel_volume = 4. * np.pi / 3. * (chi_max**3 - chi_min**3) / self.npix
 
         return pixel_volume * self.box_comoving_density(ishell)
 
@@ -304,8 +308,6 @@ class ShellBuilder(MapBuilder):
             isub,
             Abs=None,
             chi_shell_bins=None,
-            skip_existing=False,
-            check_read_existing=True,
             verbose=False,
             repeat_ixyz=None,
             get_repeats_only=False,
@@ -320,10 +322,6 @@ class ShellBuilder(MapBuilder):
             Random isometries, if pre-computed, by default None
         chi_shell_bins, optional
             Comoving distance of shell edges, if pre-computed, by default None
-        skip_existing, optional
-            Whether to skip if map file exsists, by default False
-        check_read_existing, optional
-            Whether to try reading the file before skipping, by default True
         verbose, optional
             Prints feedback, by default False
         repeat_ixyz, optional
@@ -338,9 +336,8 @@ class ShellBuilder(MapBuilder):
         fname = self.get_fname(ishell, sub=isub)
 
         # check if shell has already been created
-        if skip_existing:
-            if self.check_maps(read=check_read_existing, fname=fname):
-                return
+        if self.check_maps(read=True, fname=fname):
+            return
 
         # get shell radii
         if chi_shell_bins is None:
@@ -379,17 +376,17 @@ class ShellBuilder(MapBuilder):
         shell = healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
 
         nside = self.nside
-        order = hp.nside2order(nside)
+        order = hp.nside2order(self.nside)
         ncap = (nside * nside - nside) << 1
-        npix = hp.nside2npix(nside)
+        npix = self.npix
 
         if fast:
 
-            u, c = construct_shell_sub(
+            uipix, c = construct_shell_sub(
                 xyz, box_edges_original, Abs[ishell][0], Abs[ishell][1], nrepeat, boxsize, rmin2, rmax2,
                 self.apply_random_isometry, self.octant_only, nside, order, ncap, npix)
-            if len(u) > 0:
-                shell.update_values_pix(u, c.astype(self.dtype))
+            if len(uipix) > 0:
+                shell.update_values_pix(uipix, c.astype(self.dtype), nest=False)
 
         else:
             # precompute isometry on particles (since repeats are then only a shift away)
@@ -453,16 +450,15 @@ class ShellBuilder(MapBuilder):
                         # 4 - get unique pixels and counts (ignoring -1's)
                         ipix = _vec2pix(
                             nside, order, ncap, npix, *(xyz.T), *(shift[0].T), rmin2, rmax2, self.octant_only)
-                        u, c = _unique_pix_pos(ipix, npix)
-                        # u, c = _vec2pix_unique(nside, order, ncap, npix, *(xyz.T), *(shift[0].T), rmin2, rmax2, self.octant_only)
+                        uipix, c = _unique_pix_pos(ipix, npix)
 
-                        if len(u) > 0:
+                        if len(uipix) > 0:
                             if verbose:
-                                print(f"Found {len(u)} particles.")
+                                print(f"Found {len(ipix)} particles.")
 
                             # add particles to shell
                             tmp_shell = healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
-                            tmp_shell.update_values_pix(u, c.astype(self.dtype))
+                            tmp_shell.update_values_pix(uipix, c.astype(self.dtype), nest=False)
 
                             shell = healsparse.operations.sum_union([shell, tmp_shell])
                         else:
@@ -493,7 +489,7 @@ class ShellBuilder(MapBuilder):
         for isub in tqdm(isubs, desc='[construct_shells]'):
             self.construct_shell_sub(isub, **kwargs)
 
-    def combine_shells(self, ishells=None, skip_existing=False, check_read_existing=True):
+    def combine_shells(self, ishells=None):
         """
         Sums the particle shells computed independently for each sub-volume/snapshot with construct_shell_sub
         """
@@ -501,9 +497,8 @@ class ShellBuilder(MapBuilder):
 
         for ishell in self.tqdm(ishells, desc="[combine_shells]"):
             fname = self.get_fname(ishell)
-            if skip_existing:
-                if self.check_maps(read=check_read_existing, fname=fname):
-                    continue
+            if self.check_maps(read=True, fname=fname):
+                continue
             shell = healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
             isubs = self.reader.get_isubs_for_shell(ishell)
             for isub in tqdm(isubs, desc=f"[combine_shells: shell {ishell}]", leave=False):
@@ -517,14 +512,14 @@ class ShellBuilder(MapBuilder):
 
         return shells
 
-    def construct_maps(self, imaps=None, skip_existing=False, check_read_existing=True, **kwargs):
+    def construct_maps(self, imaps=None, **kwargs):
         # first construct shells on simulation subs
         for ishell in self.tqdm(imaps, desc="[construct_maps]"):
             isubs = self.reader.get_isubs_for_shell(ishell)
-            self.construct_shells(isubs, skip_existing=skip_existing, check_read_existing=check_read_existing, **kwargs)
+            self.construct_shells(isubs, **kwargs)
 
         # then combine into final shells
-        return self.combine_shells(imaps, skip_existing=skip_existing, check_read_existing=check_read_existing)
+        return self.combine_shells(imaps)
 
     def get_field_map(self, ishell):
         shell = self.load_maps(ishell)
@@ -585,7 +580,7 @@ class ShellBuilder(MapBuilder):
         else:
             return [np.array([])] * 4
 
-    def construct_shell_catalog(self, ishell, skip_existing=False, check_read_existing=True, **kwargs):
+    def construct_shell_catalog(self, ishell, **kwargs):
         """Construct and save a particle catalog for a given shell
 
         Parameters
@@ -597,14 +592,11 @@ class ShellBuilder(MapBuilder):
 
         fname = self.get_fname(ishell, what='haloes')
 
-        if skip_existing and os.path.exists(fname):
-            if check_read_existing:
-                try:
-                    return fits.open(fname)
-                except:
-                    pass
-            else:
-                return
+        if os.path.exists(fname):
+            try:
+                return fits.open(fname)
+            except:
+                pass
 
         hdul = [fits.PrimaryHDU()]
 
@@ -913,18 +905,6 @@ def _unique_pix_pos(ipix, npix):
             c[pos] += 1
     u = np.argwhere(c)[:, 0]
     return u, c[u]
-
-
-# @numba.njit
-# def _vec2pix_unique(nside, order, ncap, npix, x, y, z, shiftx, shifty, shiftz, rmin2, rmax2, octant_only):
-#     ipix = _vec2pix(nside, order, ncap, npix, x, y, z, shiftx, shifty, shiftz, rmin2, rmax2, octant_only)
-#     return unique_pix_pos(ipix, npix)
-
-# def vec2pix_unique(nside, x, y, z, shiftx, shifty, shiftz, rmin2, rmax2, octant_only):
-#     order = hp.nside2order(nside)
-#     ncap = (nside * nside - nside) << 1
-#     npix = hp.nside2npix(nside)
-#     return _vec2pix_unique(nside, order, ncap, npix, x, y, z, shiftx, shifty, shiftz, rmin2, rmax2, octant_only)
 
 
 @numba.njit

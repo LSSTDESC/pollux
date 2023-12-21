@@ -580,7 +580,7 @@ class ShellBuilder(MapBuilder):
         else:
             return [np.array([])] * 4
 
-    def construct_shell_catalog(self, ishell, **kwargs):
+    def construct_halo_catalog(self, ishell, **kwargs):
         """Construct and save a particle catalog for a given shell
 
         Parameters
@@ -600,7 +600,7 @@ class ShellBuilder(MapBuilder):
 
         hdul = [fits.PrimaryHDU()]
 
-        for isub in self.tqdm(isubs, desc=f"[construct_shell_catalog: shell {ishell}]"):
+        for isub in self.tqdm(isubs, desc=f"[construct_halo_catalog: shell {ishell}]"):
             res = self.construct_shell_sub_catalog(isub, **kwargs)
             idx = fits.Column(name='ihaloes', format='I', array=res[0])
             ra = fits.Column(name='ra', format='E', array=res[1])

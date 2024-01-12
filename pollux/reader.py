@@ -6,8 +6,7 @@ import numpy as np
 import pyccl
 from pynverse import inversefunc
 
-from .utils import (compute_shell_edges, read_params, subsample_ppf,
-                    trim_array, trunc_norm)
+from .utils import (compute_shell_edges, read_params, subsample_ppf, trim_array, trunc_norm)
 
 os.environ["GENERICIO_NO_MPI"] = "y"
 try:
@@ -113,7 +112,9 @@ class Reader:
             else:
                 raise ValueError
 
-            res = compute_shell_edges(self.zsnapshots, func=func, ifunc=ifunc, zmax=self.zmax, return_fzbins=return_fzbins)
+            res = compute_shell_edges(
+                self.zsnapshots, func=func, ifunc=ifunc, zmax=self.zmax, return_fzbins=return_fzbins)
+            
             if return_fzbins:
                 self.z_shell_bins = res[0]
             else:
@@ -134,7 +135,7 @@ class Reader:
             else:
                 np.save(fname, out)
         return out
-    
+
     def boxsize(self):
         raise NotImplementedError
 
@@ -216,7 +217,8 @@ class SLICSReader(Reader):
         # number of sub boxes (constant here)
         ncube = self.nodes_dim**3
 
-        super().__init__(cosmo, 'slics', 'Mpc', nparticles, zsnapshots, zmax, ncube, shell_edges_match, dtype=np.float32)
+        super().__init__(
+            cosmo, 'slics', 'Mpc', nparticles, zsnapshots, zmax, ncube, shell_edges_match, dtype=np.float32)
 
     def boxsize(self):
         return self.boxsize
@@ -262,12 +264,7 @@ class HACCReader(Reader):
     def __init__(
             self,
             path,
-            cosmo=None,
-            read_cosmo_params='run/run000/indat.params',
-            nsteps=500,
-            sim_zmin=0.,
-            sim_zmax=200.,
-            read_snap_dir=True,
+            run_params='run/run000/indat.params',
             snap_sub_zmax=None,
             snap_sub_aminstep=0.,
             snap_sub_match_dist_n=False,
@@ -305,41 +302,46 @@ class HACCReader(Reader):
         self.group_along_x = group_along_x
         self.variables = ['x', 'y', 'z']
 
-        if read_cosmo_params:
-            assert cosmo is None
-            fname = os.path.join(path, read_cosmo_params)
-            params = read_params(fname)
-            # create cosmo object that can be used by builder
-            cosmo_dict = dict(
-                Omega_c=float(params['OMEGA_CDM']),
-                Omega_b=float(params['DEUT']) / float(params['HUBBLE'])**2,
-                h=float(params['HUBBLE']),
-                n_s=float(params['NS']),
-                sigma8=float(params['SS8']),
-                Neff=float(params['N_EFF_MASSLESS']),
-                w0=float(params['W_DE']),
-                wa=float(params['WA_DE']),
-                T_CMB=float(params['T_CMB']),
-                Omega_k=0.)
-            if isinstance(read_cosmo_params, dict):
-                if len(cosmo_dict.keys() & read_cosmo_params.keys()):
-                    warnings.warn('Two values of some cosmological parameters were passed.')
-                cosmo_dict.update(read_cosmo_params)
-            cosmo = pyccl.Cosmology(**cosmo_dict)
-            # read and override parameters to determine redshifts of snapshots
-            nsteps = int(params['N_STEPS'])
-            sim_zmax = float(params['Z_IN'])
-            sim_zmin = float(params['Z_FIN'])
-        else:
-            assert cosmo is not None
+        print("*** HACC reader ***")
+
+        # read run parameters
+        fname = os.path.join(path, run_params)
+        print(f"  - Reading parameter file at", fname)
+        params = read_params(fname)
+
+        # create cosmo object that can be used by builder
+        cosmo_dict = dict(
+            Omega_c=float(params['OMEGA_CDM']),
+            Omega_b=float(params['DEUT']) / float(params['HUBBLE'])**2,
+            h=float(params['HUBBLE']),
+            n_s=float(params['NS']),
+            sigma8=float(params['SS8']),
+            Neff=float(params['N_EFF_MASSLESS']),
+            w0=float(params['W_DE']),
+            wa=float(params['WA_DE']),
+            T_CMB=float(params['T_CMB']),
+            Omega_k=0.)
+        cosmo = pyccl.Cosmology(**cosmo_dict)
+        print(f"  - Cosmology", cosmo)
+
+        # read parameters to determine redshifts of snapshots
+        nsteps = int(params['N_STEPS'])
+        sim_zmax = float(params['Z_IN'])
+        sim_zmin = float(params['Z_FIN'])
 
         # simulation snapshot redshifts : step are constant in scale factor, but only a fraction of steps are saved
-        if read_snap_dir:
-            snapshot_dirs = os.listdir(os.path.join(path, 'output'))
-            snapshots = np.array([i for i in range(nsteps) if f'STEP{i}' in snapshot_dirs])
-        else:
-            snapshots = np.arange(nsteps)
-        print("*** HACC reader ***")
+        snapshots = np.array(list(map(int, params['ALIVE_DUMP'].split())))
+        snapshot_dir = os.path.join(path, 'output')
+        if os.path.exists(snapshot_dir):
+            try:
+                snapshot_dirs = os.listdir(snapshot_dir)
+                snapshots_output = np.array([i for i in range(nsteps) if f'STEP{i}' in snapshot_dirs])
+                np.testing.assert_array_equal(snapshots, snapshots_output)
+            except AssertionError:
+                snapshots = snapshots_output
+                warnings.warn(
+                    "We are using the snapshots found in the `output` folder, which do not match those in the parameter file."
+                )
         print(f"  - Found {len(snapshots)} snapshots :", snapshots)
 
         # helper function : we only work on the list of snapshots to avoid mistakes in book-keeping
@@ -376,22 +378,30 @@ class HACCReader(Reader):
             if len(idx) < len(snapshots):
                 print(f"  - Subsampling : match distribution, returns {len(idx)} snapshots")
             snapshots = snapshots[idx]
-            
+
         # subsample snapshots : every n'ths snapshots
         self.snapshots = snapshots[::-snap_sub_every_n]  # snapshots ordered by redshift
-        
+
         if snap_sub_every_n > 1:
-            print(f"  - Subsampling : keeping every {snap_sub_every_n} snapshots, returns {len(self.snapshots)} snapshots")
-            
+            print(
+                f"  - Subsampling : keeping every {snap_sub_every_n} snapshots, returns {len(self.snapshots)} snapshots"
+            )
+
         # done with subsampling !
         zsnapshots = 1. / get_asnapshots(self.snapshots) - 1.
 
         # simulation properties
-        step = self.snapshots[0]
-        name = os.path.join(self.path, 'output', f'STEP{step}/m000.full.mpicosmo.{step}#0')
-        self.boxsize_h = pygio.read_phys_scale(name)[0]
-        nparticles = pygio.read_num_elems(name[:-2])
-        dtype = pygio.read_variable_dtypes(name)['x']
+
+        if False:
+            step = self.snapshots[0]
+            name = os.path.join(self.path, 'output', f'STEP{step}/m000.full.mpicosmo.{step}')
+            self.boxsize_h = pygio.read_phys_scale(name)[0]
+            nparticles = pygio.read_num_elems(name)
+            dtype = pygio.read_variable_dtypes(name)['x']
+        else:
+            self.boxsize_h = float(params['RL'])
+            nparticles = int(params['NP'])**3
+            dtype = np.float32
 
         # simulation box limits
         self.lims = np.array([[[np.floor(ibox / (16)) * 0.5,
@@ -557,9 +567,18 @@ class MockReader(Reader):
 
     def box_comoving_density(self, cosmo):
         return self.nparticles / self.boxsize(cosmo)**3
-    
-    
+
+
 class DummyReader(Reader):
 
     def __init__(self, cosmo, kind, unit, nsnapshots):
-        super().__init__(cosmo, kind, unit, nparticles=0., zsnapshots=np.zeros(nsnapshots), zmax=None, nsubs=0, shell_edges_match='center_scale_factor', dtype=np.float64)
+        super().__init__(
+            cosmo,
+            kind,
+            unit,
+            nparticles=0.,
+            zsnapshots=np.zeros(nsnapshots),
+            zmax=None,
+            nsubs=0,
+            shell_edges_match='center_scale_factor',
+            dtype=np.float64)

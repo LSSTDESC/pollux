@@ -76,6 +76,7 @@ def make_healpix_map(
         fill_UNSEEN=False,
         return_w_maps=False,
         return_extra=False,
+        nest=True,
         mode='mean'):
     """
     Creates healpix maps of quantity observed at ra, dec (in degrees) by taking
@@ -155,7 +156,7 @@ def make_healpix_map(
         assert len(ra) == len(dec), "[make_healpix_map] ra/dec arrays don't have the same length"
         if quantity is not None:
             assert len(ra) == quantity.shape[1]
-        ipix = hp.ang2pix(nside, (90.0 - dec) / 180.0 * np.pi, ra / 180.0 * np.pi)
+        ipix = hp.ang2pix(nside, (90.0 - dec) / 180.0 * np.pi, ra / 180.0 * np.pi, nest=nest)
     else:
         if quantity is not None:
             assert len(ipix) == quantity.shape[1], "[make_healpix_map] ipix has wrong size"
@@ -219,7 +220,7 @@ def make_healpix_map(
     return res
 
 
-def make_mask_radec_cuts(nside, ramin, ramax, decmin, decmax, dtype=float):
+def make_mask_radec_cuts(nside, ramin, ramax, decmin, decmax, dtype=float, nest=True):
     """Generate a square mask limited by RA/DEC
 
     Parameters
@@ -241,11 +242,11 @@ def make_mask_radec_cuts(nside, ramin, ramax, decmin, decmax, dtype=float):
     assert (-90. <= decmin <= 90.) & (-90. <= decmax <= 90.) & (decmin < decmax)
 
     mask = np.zeros(hp.nside2npix(nside))
-    th, ph = hp.pix2ang(nside, np.arange(hp.nside2npix(nside)))
+    th, ph = hp.pix2ang(nside, np.arange(hp.nside2npix(nside)), nest=nest)
     ths, phs = radec2thetaphi([ramin, ramax], [decmin, decmax])
     thmin, thmax = min(ths), max(ths)
     phmin, phmax = min(phs), max(phs)
-    mask[np.where((th < thmax) & (th > thmin) & (ph > phmin) & (ph < phmax))[0]] = dtype(1)
+    mask[np.where((th <= thmax) & (th > thmin) & (ph >= phmin) & (ph < phmax))[0]] = dtype(1)
     return mask
 
 
@@ -433,3 +434,15 @@ def subsample_ppf(z, n, ppf, keep_first_last=True):
     if usize > n:
         print(f"[subsample_ppf] had to try finer grid {usize}>{n}")
     return unique_idx, z[unique_idx]
+
+
+def sample_pdf(x, pdf, n):
+    """
+    Sample a distribution given it's pdf.
+    """
+    dx = np.diff(x)
+    trapz = 0.5 * (pdf[1:] + pdf[:-1]) * dx
+    cdf = np.cumsum(trapz) / np.sum(trapz)
+    cdf = np.insert(cdf, 0, 0.)
+    u = np.random.uniform(size=n)
+    return np.interp(u, cdf, x)

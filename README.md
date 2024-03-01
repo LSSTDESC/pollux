@@ -1,6 +1,6 @@
 # pollux
 
-Package to create weak lensing and large-scale structure simulations from N-body simulations for the Higher-Order Statistics Topical Team.
+DESC package to create weak lensing and large-scale structure simulations from N-body simulations for the Higher-Order Statistics Topical Team.
 
 ## Features
 - Interfaces with HACC and SLICS N-body simulations.

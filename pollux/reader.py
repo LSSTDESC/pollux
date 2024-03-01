@@ -468,13 +468,14 @@ class HACCReader(Reader):
 
 class HACCHaloReader(HACCReader):
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, halo_path='analysis/Halos/b0168/Props', *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.variables = ['fof_halo_center_x', 'fof_halo_center_y', 'fof_halo_center_z']
+        self.halo_path = halo_path
         assert not self.group_along_x
 
     def _get_name(self, step, ifile):
-        return os.path.join(self.path, 'analysis/Halos/b0168/Props', f'STEP{step}/m000-{step}.haloproperties#{ifile}')
+        return os.path.join(self.path, self.halo_path, f'STEP{step}/m000-{step}.haloproperties#{ifile}')
 
     def read_props(self, isub, props_variables, ihaloes=slice(-1), verbose=False):
 

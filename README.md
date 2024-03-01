@@ -18,3 +18,5 @@ Package to create weak lensing and large-scale structure simulations from N-body
 - `catalog.py` implements `CatalogGenerator` objects to generate tomographic galaxy catalogs from the lightcone shells and lensing maps.
 - `utils.py` contains a nuber of helper functions for maps, Cl's computations and array manipulations.
 - `cosmo.py` contains fixed cosmologies.
+
+![Example pollux map images](pollux_maps.png)

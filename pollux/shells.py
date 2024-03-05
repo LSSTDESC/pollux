@@ -524,7 +524,7 @@ class ShellBuilder(MapBuilder):
     def get_field_map(self, ishell):
         shell = self.load_maps(ishell)
         spix = shell.valid_pixels
-        density = -np.ones(self.npix)
+        density = np.zeros(self.npix)
         density[spix] = shell[spix] / self.get_pixel_density(ishell) - 1.
         return density
 

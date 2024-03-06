@@ -108,18 +108,13 @@ class LensingBuilder(MapBuilder):
 
         return tracers
 
-    def get_field_map(self, imap):
-        return self.load_maps(imap).generate_healpix_map()
-
-    def compute_shear_maps(self, ikappas=None, return_alms=False, lmax=None):
+    def compute_shear_maps(self, ikappas=None, lmax=None):
         """Compute shear maps from convergence maps
 
         Parameters
         ----------
         ikappas, optional
             Map indices, by default None
-        return_alms, optional
-            Whether to return alm's, by default False
         lmax, optional
             Maximum multipole, by default None
 
@@ -163,13 +158,8 @@ class LensingBuilder(MapBuilder):
             gamma2.write(self.get_fname(ikappa, what='gamma2'), clobber=True)
 
             gammas.append([gamma1, gamma2])
-            if return_alms:
-                alms.append(klm)
 
-        if return_alms:
-            return gammas, alms
-        else:
-            return gammas
+        return gammas
 
     def _noise_cls(self, imap):
         nbar = self.nbar

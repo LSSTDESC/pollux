@@ -161,13 +161,13 @@ class ShellBuilder(MapBuilder):
         Compute the mean redshift of a shell
         """
         z_shell_bins = self.reader.shell_edges_redshift()
-        amin = 1. / (1. + z_shell_bins[ishell + 1])
-        amax = 1. / (1. + z_shell_bins[ishell])
-        dVdz = lambda a: pyccl.comoving_angular_distance(self.cosmo, a)**2 / pyccl.background.h_over_h0(self.cosmo, a)
+        zmin = z_shell_bins[ishell]
+        zmax = z_shell_bins[ishell + 1]
 
-        amean = quad(lambda a: a * dVdz(a), amin, amax) / quad(dVdz, amin, amax)
+        dVdz = lambda z: pyccl.comoving_angular_distance(self.cosmo, 1. / (1. + z))**2 / pyccl.background.h_over_h0(
+            self.cosmo, 1. / (1. + z))
 
-        return 1. / amean - 1.
+        return quad(lambda z: z * dVdz(z), zmin, zmax) / quad(dVdz, zmin, zmax)
 
     def get_random_isometries(self):
         """Generate random isometries for each shell
@@ -521,7 +521,10 @@ class ShellBuilder(MapBuilder):
         # then combine into final shells
         return self.combine_shells(imaps)
 
-    def get_field_map(self, ishell):
+    def _field_map(self, ishell):
+        """
+        Overrides the _field_map method to generate density maps from count maps.
+        """
         shell = self.load_maps(ishell)
         spix = shell.valid_pixels
         density = np.zeros(self.npix)
@@ -681,7 +684,7 @@ class ShellBuilder(MapBuilder):
 
             Q, U = hp.alm2map_spin((alm_E, np.zeros_like(alm_E)), self.nside, spin=2, lmax=lmax)
             print("QU done")
-            
+
             Q = hp.reorder(Q, r2n=True)[ipix]
             U = hp.reorder(U, r2n=True)[ipix]
 

@@ -28,7 +28,8 @@ class MapBuilder:
             wsp_dir=None,
             sacc_type=None,
             b=None,
-            nlb=20):
+            nlb=20,
+            remove_monopole=True):
         """MapBuilder is a generic class to build maps that groups functions for I/O, Cl's computations, etc.
 
         Parameters
@@ -57,6 +58,8 @@ class MapBuilder:
             NaMaster binning object, by default None
         nlb, optional
             Number of multipole bins, by default 20
+        remove_monopole, optional
+            Whether the monopole should be removed when computing alm's and Cl's
         """
         self.nside = nside
         self.npix = hp.nside2npix(nside)
@@ -71,13 +74,12 @@ class MapBuilder:
         if wsp_dir is None:
             wsp_dir = save_dir
         self.wsp_dir = wsp_dir
+        self.remove_monopole = remove_monopole
 
         if b is not None:
             self.b = b
-        self._nlb = nlb
-
-        # if b is None:
-        #     self.b = make_nmtbin_logspaced(self.nside, 8, 2 * self.nside, nlb, f_ell='pixwin')
+        else:
+            self._nlb = nlb
 
         # make sure folder exists
         if self.save_dir is not None:
@@ -336,17 +338,20 @@ class MapBuilder:
             fname = self.get_fname(force_fits=True).replace('.fits', '.png')
             plt.savefig(fname, bbox_inches='tight', dpi=150, transparent=False)
 
+    def _create_mask(self):
+        if self.octant_only:
+            self.mask = make_mask_radec_cuts(self.nside, 0, 90, 0, 90, nest=True)
+            self.ipix = np.where(self.mask)[0]
+        else:
+            self.mask = np.ones(self.npix)
+            self.ipix = np.arange(self.npix)
+        
     def get_mask(self, return_ipix=False):
         """
         Helper function to compute the mask
         """
         if not hasattr(self, 'mask'):
-            if self.octant_only:
-                self.mask = make_mask_radec_cuts(self.nside, 0, 90, 0, 90, nest=True)
-                self.ipix = np.where(self.mask)[0]
-            else:
-                self.mask = np.ones(self.npix)
-                self.ipix = np.arange(len(self.mask))
+            self._create_mask()
         if return_ipix:
             return self.mask, self.ipix
         else:
@@ -393,11 +398,31 @@ class MapBuilder:
                 self.wsp.write_to(fname)
             return self.wsp
 
-    def get_field_map(self, imap):
+    def _field_map(self, imap):
+        return self.load_maps(imap).generate_healpix_map()
+    
+    def get_field_map(self, imap, reorder_n2r=True, replicate_octant=False):
         """"
         Create map ready for a NaMaster field object or healpy map2alm calculations.
         """
-        raise NotImplementedError
+        
+        mask, ipix = self.get_mask(return_ipix=True)
+
+        _map = self._field_map(imap) * mask
+                
+        if self.remove_monopole:
+            _map[ipix] -= np.mean(_map[ipix])
+            
+        # Replicate if needed and apply mask
+        if replicate_octant:
+            ipix_o2f = self.get_octant_to_fullsky_ipix()
+            _map = _map[ipix_o2f]
+        
+        if reorder_n2r:
+            _map = hp.reorder(_map, n2r=True)
+            
+        return _map
+            
 
     def compute_alms(self, imaps=None, save=True, replicate_octant=False, **kwargs):
         """Compute spherical harmonic coefficients
@@ -426,14 +451,9 @@ class MapBuilder:
                     except:
                         pass
 
-            _map = self.get_field_map(imap) * mask
-
-            # Replicate if needed and apply mask
-            if replicate_octant:
-                ipix = self.get_octant_to_fullsky_ipix()
-                _map = _map[ipix]
-                
-            alms[imap] = hp.map2alm(hp.reorder(_map, n2r=True), **kwargs)
+            _map = self.get_field_map(imap, reorder_n2r=True, replicate_octant=replicate_octant)
+                            
+            alms[imap] = hp.map2alm(_map, **kwargs)
 
             if save:
                 hp.write_alm(fname, alms[imap], overwrite=True)
@@ -537,9 +557,9 @@ class MapBuilder:
             fields = {i: None for i in imaps}
             for i, j in tqdm(pairs, desc="[compute_cls]"):
                 if fields[i] is None:
-                    fields[i] = nmt.NmtField(mask, [hp.reorder(self.get_field_map(i), n2r=True)])
+                    fields[i] = nmt.NmtField(mask, [self.get_field_map(i, reorder_n2r=True)])
                 if fields[j] is None:
-                    fields[j] = nmt.NmtField(mask, [hp.reorder(self.get_field_map(j), n2r=True)])
+                    fields[j] = nmt.NmtField(mask, [self.get_field_map(j, reorder_n2r=True)])
                 cl[i, j] = nmt.compute_full_master(fields[i], fields[j], b, workspace=wsp)[0]
 
         ell = b.get_effective_ells()

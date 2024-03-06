@@ -602,7 +602,7 @@ class ShellBuilder(MapBuilder):
 
         for isub in self.tqdm(isubs, desc=f"[construct_halo_catalog: shell {ishell}]"):
             res = self.construct_shell_sub_catalog(isub, **kwargs)
-            idx = fits.Column(name='ihaloes', format='I', array=res[0])
+            idx = fits.Column(name='ihaloes', format='J', array=res[0])
             ra = fits.Column(name='ra', format='E', array=res[1])
             dec = fits.Column(name='dec', format='E', array=res[2])
             r = fits.Column(name='chi', format='E', array=res[3])

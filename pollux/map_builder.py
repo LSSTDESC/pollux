@@ -426,12 +426,13 @@ class MapBuilder:
                     except:
                         pass
 
+            _map = self.get_field_map(imap) * mask
+
             # Replicate if needed and apply mask
             if replicate_octant:
                 ipix = self.get_octant_to_fullsky_ipix()
-                _map = (self.get_field_map(imap) * mask)[ipix]
-            else:
-                _map = self.get_field_map(imap) * mask
+                _map = _map[ipix]
+                
             alms[imap] = hp.map2alm(hp.reorder(_map, n2r=True), **kwargs)
 
             if save:

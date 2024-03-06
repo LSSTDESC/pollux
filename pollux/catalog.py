@@ -158,6 +158,10 @@ class CatalogSourceUniform(CatalogGenerator):
             fits.HDUList(hdul).writeto(fname, overwrite=True)
 
         return catalog
+    
+    def load_catalog(self, ikappa):
+        fname = self.lensing.get_fname(ikappa, what=self.name, force_fits=True)
+        return fits.open(fname)
 
 
 def generate_radec_in_pix(nside, ipix, log2nside_high=29):

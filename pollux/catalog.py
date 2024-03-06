@@ -93,10 +93,16 @@ class CatalogSourceUniform(CatalogGenerator):
             for ishell in self.lensing.shell_builder.tqdm(None, desc=f"[generate] interpolating maps {k}"):
                 # Load maps
                 if ishell == 0:
-                    map_high = self.snap_lensing.load_maps(0, what=None if k == 'kappa' else k)
+                    if k in ['t11', 't22', 't12']:
+                        map_high = self.lensing.shell_builder.load_maps(0, what=k)
+                    else:
+                        map_high = self.snap_lensing.load_maps(0, what=None if k == 'kappa' else k)
                 else:
                     map_low = map_high
-                    map_high = self.snap_lensing.load_maps(ishell, what=None if k == 'kappa' else k)
+                    if k in ['t11', 't22', 't12']:
+                        map_high = self.lensing.shell_builder.load_maps(ishell, what=k)
+                    else:
+                        map_high = self.snap_lensing.load_maps(ishell, what=None if k == 'kappa' else k)
 
                 chi_low, chi_high = chi_bins_edges[[ishell, ishell + 1]]
 
@@ -152,6 +158,10 @@ class CatalogSourceUniform(CatalogGenerator):
             fits.HDUList(hdul).writeto(fname, overwrite=True)
 
         return catalog
+    
+    def load_catalog(self, ikappa):
+        fname = self.lensing.get_fname(ikappa, what=self.name, force_fits=True)
+        return fits.open(fname)
 
 
 def generate_radec_in_pix(nside, ipix, log2nside_high=29):

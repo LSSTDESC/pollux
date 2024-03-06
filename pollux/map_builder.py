@@ -276,7 +276,7 @@ class MapBuilder:
             maps = None
         elif type(maps_or_imaps) is int:
             nmaps = 1
-            imaps = [imaps]
+            imaps = [maps_or_imaps]
             maps = None
         elif isinstance(maps_or_imaps, Iterable):
             nmaps = len(maps_or_imaps)
@@ -426,12 +426,13 @@ class MapBuilder:
                     except:
                         pass
 
+            _map = self.get_field_map(imap) * mask
+
             # Replicate if needed and apply mask
             if replicate_octant:
                 ipix = self.get_octant_to_fullsky_ipix()
-                _map = (self.get_field_map(imap) * mask)[ipix]
-            else:
-                _map = self.get_field_map(imap) * mask
+                _map = _map[ipix]
+                
             alms[imap] = hp.map2alm(hp.reorder(_map, n2r=True), **kwargs)
 
             if save:
@@ -536,9 +537,9 @@ class MapBuilder:
             fields = {i: None for i in imaps}
             for i, j in tqdm(pairs, desc="[compute_cls]"):
                 if fields[i] is None:
-                    fields[i] = nmt.NmtField(mask, [self.get_field_map(i)])
+                    fields[i] = nmt.NmtField(mask, [hp.reorder(self.get_field_map(i), n2r=True)])
                 if fields[j] is None:
-                    fields[j] = nmt.NmtField(mask, [self.get_field_map(j)])
+                    fields[j] = nmt.NmtField(mask, [hp.reorder(self.get_field_map(j), n2r=True)])
                 cl[i, j] = nmt.compute_full_master(fields[i], fields[j], b, workspace=wsp)[0]
 
         ell = b.get_effective_ells()

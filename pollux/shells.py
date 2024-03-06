@@ -524,7 +524,7 @@ class ShellBuilder(MapBuilder):
     def get_field_map(self, ishell):
         shell = self.load_maps(ishell)
         spix = shell.valid_pixels
-        density = -np.ones(self.npix)
+        density = np.zeros(self.npix)
         density[spix] = shell[spix] / self.get_pixel_density(ishell) - 1.
         return density
 
@@ -602,7 +602,7 @@ class ShellBuilder(MapBuilder):
 
         for isub in self.tqdm(isubs, desc=f"[construct_halo_catalog: shell {ishell}]"):
             res = self.construct_shell_sub_catalog(isub, **kwargs)
-            idx = fits.Column(name='ihaloes', format='I', array=res[0])
+            idx = fits.Column(name='ihaloes', format='J', array=res[0])
             ra = fits.Column(name='ra', format='E', array=res[1])
             dec = fits.Column(name='dec', format='E', array=res[2])
             r = fits.Column(name='chi', format='E', array=res[3])
@@ -656,6 +656,54 @@ class ShellBuilder(MapBuilder):
 
     def _noise_cls(self, ishell):
         return 1. / self.get_sky_density(ishell)
+
+    def compute_tidal_tensor_maps(self, ishells=None, smooth_Mpc=None, lmax=None):
+        if lmax is None:
+            lmax = 3 * self.nside - 1
+
+        _, ipix = self.get_mask(return_ipix=True)
+
+        for ishell in self.tqdm(ishells, desc="[compute_tidal_tensor]"):
+            alm_E = self.compute_alms(ishell, pol=False)[ishell]
+            print("alm done")
+
+            if smooth_Mpc is not None:
+                assert smooth_Mpc > 0.
+                sigma = smooth_Mpc / self.reader.shell_edges_comoving_distance()[ishell]
+
+                hp.sphtfunc.smoothalm(
+                    alm_E,
+                    sigma=sigma,
+                    pol=False,
+                    inplace=True,
+                )
+                print("smoothing done")
+
+            Q, U = hp.alm2map_spin((alm_E, np.zeros_like(alm_E)), self.nside, spin=2, lmax=lmax)
+            print("QU done")
+            
+            Q = hp.reorder(Q, r2n=True)[ipix]
+            U = hp.reorder(U, r2n=True)[ipix]
+
+            density = self.get_field_map(ishell)[ipix]
+
+            # In 2D cartesian, s11(k)+s22(k)=delta(k)
+            # In the spherical polarization framework, we have:
+            # Q is 'g1' = (t11 - t22)
+            # delta is t11 + t22
+            # U is 'g2' = t12
+            # t11 is (Q +delta)/2
+            # t22 is (delta-Q)/2
+            # Need to subtract off the trace, affecting s_11 and s_22... (-delta/3)
+            # t11 = (delta+Q)/2 - density/3
+            # t22 = (delta-Q)/2 - density/3
+            # t12 = U
+
+            print("saving")
+            for what, val in zip(['t11', 't22', 't12'], [density / 6. + Q / 2., density / 6. - Q / 2., U]):
+                hsp = healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
+                hsp.update_values_pix(ipix, val.astype(self.dtype))
+                hsp.write(self.get_fname(ishell, what=what), clobber=True, format=self.save_format)
 
 
 # @numba.njit(parallel=False)

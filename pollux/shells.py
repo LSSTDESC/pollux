@@ -303,15 +303,7 @@ class ShellBuilder(MapBuilder):
         area = hp.nside2pixarea(self.nside, degrees=degrees)
         return self.get_pixel_density(ishell) / area
 
-    def construct_shell_sub(
-            self,
-            isub,
-            Abs=None,
-            chi_shell_bins=None,
-            verbose=False,
-            repeat_ixyz=None,
-            get_repeats_only=False,
-            fast=True):
+    def construct_maps_sub(self, isub, Abs=None, verbose=False, repeat_ixyz=None, get_repeats_only=False, fast=True):
         """Construct a single shell from a simulation sub-volume/snapshot, applying isometries and repeating it as necessary.
 
         Parameters
@@ -320,8 +312,6 @@ class ShellBuilder(MapBuilder):
             Index of the sub-volume element and the snapshot. This should be computed automatically.
         Abs, optional
             Random isometries, if pre-computed, by default None
-        chi_shell_bins, optional
-            Comoving distance of shell edges, if pre-computed, by default None
         verbose, optional
             Prints feedback, by default False
         repeat_ixyz, optional
@@ -340,17 +330,13 @@ class ShellBuilder(MapBuilder):
             return
 
         # get shell radii
-        if chi_shell_bins is None:
-            chi_shell_bins = self.reader.shell_edges_comoving_distance()
-        assert self.nshells == len(chi_shell_bins) - 1
+        chi_shell_bins = self.reader.shell_edges_comoving_distance()
         rmin2, rmax2 = chi_shell_bins[ishell]**2, chi_shell_bins[ishell + 1]**2
 
         # get random isometries
         if self.apply_random_isometry:
             if Abs is None:
                 Abs = self.Abs
-            else:
-                Abs = Abs
 
         # get number of repeats per direction
         boxsize = self.reader.boxsize()
@@ -381,8 +367,7 @@ class ShellBuilder(MapBuilder):
         npix = self.npix
 
         if fast:
-
-            uipix, c = construct_shell_sub(
+            uipix, c = _construct_maps_sub_helper(
                 xyz, box_edges_original, Abs[ishell][0], Abs[ishell][1], nrepeat, boxsize, rmin2, rmax2,
                 self.apply_random_isometry, self.octant_only, nside, order, ncap, npix)
             if len(uipix) > 0:
@@ -478,32 +463,20 @@ class ShellBuilder(MapBuilder):
 
         return shell
 
-    def construct_shells(self, isubs=None, **kwargs):
+    def combine_maps_subs(self, ishells=None):
         """
-        Construct all shells
-        """
-        if isubs is None:
-            # Run all files
-            isubs = range(self.reader.njobs)
-
-        for isub in tqdm(isubs, desc='[construct_shells]'):
-            self.construct_shell_sub(isub, **kwargs)
-
-    def combine_shells(self, ishells=None):
-        """
-        Sums the particle shells computed independently for each sub-volume/snapshot with construct_shell_sub
+        Sums the particle shells computed independently for each sub-volume/snapshot with construct_maps_sub
         """
         shells = []
 
-        for ishell in self.tqdm(ishells, desc="[combine_shells]"):
+        for ishell in self.tqdm(ishells, desc="[combine_maps_subs]"):
             fname = self.get_fname(ishell)
             if self.check_maps(read=True, fname=fname):
                 continue
             shell = healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
             isubs = self.reader.get_isubs_for_shell(ishell)
-            for isub in tqdm(isubs, desc=f"[combine_shells: shell {ishell}]", leave=False):
-                tmp_fname = self.get_fname(ishell, sub=isub)
-                tmp_shell = healsparse.HealSparseMap.read(tmp_fname)
+            for isub in tqdm(isubs, desc=f"[combine_maps_subs: shell {ishell}]", leave=False):
+                tmp_shell = self.load_maps(ishell, sub=isub)
                 shell = healsparse.operations.sum_union([shell, tmp_shell])
 
             shell.write(fname, clobber=True, format=self.save_format)
@@ -516,10 +489,11 @@ class ShellBuilder(MapBuilder):
         # first construct shells on simulation subs
         for ishell in self.tqdm(imaps, desc="[construct_maps]"):
             isubs = self.reader.get_isubs_for_shell(ishell)
-            self.construct_shells(isubs, **kwargs)
+            for isub in tqdm(isubs, desc=f"[construct_maps: shell {ishell}]", leave=False):
+                self.construct_maps_sub(isub, **kwargs)
 
         # then combine into final shells
-        return self.combine_shells(imaps)
+        return self.combine_maps_subs(imaps)
 
     def _field_map(self, ishell):
         """
@@ -531,7 +505,7 @@ class ShellBuilder(MapBuilder):
         density[spix] = shell[spix] / self.get_pixel_density(ishell) - 1.
         return density
 
-    def construct_shell_sub_catalog(self, isub, Abs=None, chi_shell_bins=None, verbose=False, **kwargs):
+    def construct_catalog_sub(self, isub, Abs=None, verbose=False, **kwargs):
         """Construct a particle catalog for a given sub-volume/snapshot
 
         Parameters
@@ -540,8 +514,6 @@ class ShellBuilder(MapBuilder):
             Index of the sub-volume element and the snapshot. This should be computed automatically.
         Abs, optional
             Random isometries, if pre-computed, by default None
-        chi_shell_bins, optional
-            Comoving distance of shell edges, if pre-computed, by default None
         verbose, optional
             Prints feedback, by default False
 
@@ -552,17 +524,13 @@ class ShellBuilder(MapBuilder):
         ishell = self.reader.get_ishell(isub)
 
         # get shell radii
-        if chi_shell_bins is None:
-            chi_shell_bins = self.reader.shell_edges_comoving_distance()
-        assert self.nshells == len(chi_shell_bins) - 1
+        chi_shell_bins = self.reader.shell_edges_comoving_distance()
         rmin2, rmax2 = chi_shell_bins[ishell]**2, chi_shell_bins[ishell + 1]**2
 
         # get random isometries
         if self.apply_random_isometry:
             if Abs is None:
                 Abs = self.Abs
-            else:
-                Abs = Abs
 
         # get number of repeats per direction
         boxsize = self.reader.boxsize()
@@ -574,7 +542,7 @@ class ShellBuilder(MapBuilder):
         if verbose:
             print(f"Loaded box {isub} (shell {ishell}) with {len(xyz)} particles.")
 
-        idx, ra, dec, r = construct_shell_sub_catalog(
+        idx, ra, dec, r = _construct_catalog_sub_helper(
             xyz, box_edges_original, Abs[ishell][0], Abs[ishell][1], nrepeat, boxsize, rmin2, rmax2,
             self.apply_random_isometry, self.octant_only)
 
@@ -583,7 +551,7 @@ class ShellBuilder(MapBuilder):
         else:
             return [np.array([])] * 4
 
-    def construct_halo_catalog(self, ishell, **kwargs):
+    def construct_catalog(self, ishell, extra_columns=[], **kwargs):
         """Construct and save a particle catalog for a given shell
 
         Parameters
@@ -604,23 +572,35 @@ class ShellBuilder(MapBuilder):
         hdul = [fits.PrimaryHDU()]
 
         for isub in self.tqdm(isubs, desc=f"[construct_halo_catalog: shell {ishell}]"):
-            res = self.construct_shell_sub_catalog(isub, **kwargs)
+            # Construct catalog for simulation sub-volume/snapshot
+            res = self.construct_catalog_sub(isub, **kwargs)
+            
+            # Build columns for output files
             idx = fits.Column(name='ihaloes', format='J', array=res[0])
             ra = fits.Column(name='ra', format='E', array=res[1])
             dec = fits.Column(name='dec', format='E', array=res[2])
             r = fits.Column(name='chi', format='E', array=res[3])
             a = pyccl.scale_factor_of_chi(self.cosmo, res[3])
             z = fits.Column(name='z', format='E', array=1. / a - 1.)
+            cols = [idx, ra, dec, r, z]
+            
+            # Add extra columns
+            if len(extra_columns)>0:
+                tmp = self.reader.read_props(isub, extra_columns, ihaloes=res[0])
+                for name, array in tmp.items():
+                    cols.append(fits.Column(name=name, format='E', array=array))
+                    
             header = fits.Header()
             header[f'ISUB'] = isub
             header[f'ZSNAP'] = self.reader.zsnapshots[ishell]
-            hdul.append(fits.BinTableHDU.from_columns([idx, ra, dec, r, z], header))
+            
+            hdul.append(fits.BinTableHDU.from_columns(cols, header))
 
         fits.HDUList(hdul).writeto(fname, overwrite=True)
 
         return hdul
 
-    def read_shell_catalog_props(self, ishell, variables):
+    def read_catalogs_props(self, ishell, variables):
         """Get particle (eg haloes) properties from a precomputed catalog
 
         Parameters
@@ -642,7 +622,7 @@ class ShellBuilder(MapBuilder):
         catalog_variables = [v for v in variables if v in ['ra', 'dec', 'chi', 'z']]
         props_variables = [v for v in variables if v not in ['ra', 'dec', 'chi', 'z']]
 
-        for hdu in self.tqdm(hdul[1:], desc="[get_shell_catalog_props]"):
+        for hdu in self.tqdm(hdul[1:], desc="[read_catalogs_props]"):
             if len(props_variables) > 0:
                 isub = hdu.header['ISUB']
                 tmp = self.reader.read_props(isub, props_variables, ihaloes=hdu.data['ihaloes'])
@@ -743,7 +723,7 @@ def xyz2r2(xyz):
 @numba.njit(parallel=True)
 def Axpb(A, b, xyz):
     """
-    Affine transformation A(xyx+b)
+    Affine transformation A(xyz+b)
     """
     return np.dot(xyz + b, A)
 
@@ -959,7 +939,7 @@ def _unique_pix_pos(ipix, npix):
 
 
 @numba.njit
-def construct_shell_sub(
+def _construct_maps_sub_helper(
         xyz, box_edges_original, A, b, nrepeat, boxsize, rmin2, rmax2, apply_random_isometry, octant_only, nside, order,
         ncap, npix):
     """
@@ -975,8 +955,6 @@ def construct_shell_sub(
         box_edges = box_edges_original
 
     count = np.zeros(npix, dtype=np.uint)
-
-    # repeats = []
 
     dtype = xyz.dtype
 
@@ -1027,10 +1005,10 @@ def construct_shell_sub(
 
 
 @numba.njit
-def construct_shell_sub_catalog(
+def _construct_catalog_sub_helper(
         xyz, box_edges_original, A, b, nrepeat, boxsize, rmin2, rmax2, apply_random_isometry, octant_only):
     """
-    Parallelized helper function for ShellBuilder.construct_shell_sub_catalog
+    Parallelized helper function for ShellBuilder.construct_catalog_sub
     """
     n = len(xyz)
 
@@ -1062,14 +1040,12 @@ def construct_shell_sub_catalog(
                 # apply isometry to box edges
                 tmp_box_edges = shift + box_edges
 
-                # check if intersects octant, otherwise skip
+                # check if box intersects octant, otherwise skip
+                # (to do so, we check if the box is fully contained in the x<0 or y<0 or z<0 half spaces)
                 if octant_only:
-                    found_edge_in_octant = False
-                    for e in tmp_box_edges:
-                        if np.all(e > 0.):
-                            found_edge_in_octant = True
-                    if not found_edge_in_octant:
-                        continue
+                    for i in range(3):
+                        if np.all(tmp_box_edges[:, i] <= 0.):
+                            continue
 
                 ## check if box intersects with shell, otherwise skip
                 # first, check if box fully inside inner sphere

@@ -114,7 +114,7 @@ class Reader:
 
             res = compute_shell_edges(
                 self.zsnapshots, func=func, ifunc=ifunc, zmax=self.zmax, return_fzbins=return_fzbins)
-            
+
             if return_fzbins:
                 self.z_shell_bins = res[0]
             else:
@@ -156,6 +156,22 @@ class Reader:
         Returns
         -------
             Particle positions and sub-volume cube nodes, to quickly determine if volume/shell intersect.
+        """
+        raise NotImplementedError
+
+    def read_props(self, isub, props_variables, ihaloes=slice(-1), verbose=False):
+        """Reads extra properties for a sub volume of a simulation snapshot.
+
+        Parameters
+        ----------
+        isub
+            Index of the sub-volume/snapshot element. This should be computed automatically.
+        props_variables
+            Name of the variables to read
+        ihaloes, optional
+            Index of the row to keep, by default slice(-1)
+        verbose, optional
+            Print feedback, by default False
         """
         raise NotImplementedError
 

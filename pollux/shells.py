@@ -8,6 +8,7 @@ import numba
 import numpy as np
 import pyccl
 import sacc
+import yaml
 from astropy.io import fits
 from scipy.spatial.transform import Rotation
 from tqdm.auto import tqdm, trange
@@ -61,13 +62,16 @@ class ShellBuilder(MapBuilder):
 
         self.reader = reader
         self.cosmo = reader.cosmo
+        self.nshells = self.reader.nshells
+
         self.apply_random_isometry = apply_random_isometry
         self.seed = seed
-        self.subsample_box = subsample_box
-        self.subsample_box_params = subsample_box_params
         self.group_isometries = group_isometries
 
-        self.nshells = self.reader.nshells
+        # Particle subsampling
+        assert subsample_box in ['densitymax', 'clmax'] or type(subsample_box) is float or subsample_box is None
+        self.subsample_box = subsample_box
+        self.subsample_box_params = subsample_box_params
 
         base_fname = f'shell_{self.reader.kind}'
         if apply_random_isometry:
@@ -85,6 +89,10 @@ class ShellBuilder(MapBuilder):
         if dtype == np.int32:
             print(f"Warning: the max value for {dtype} might not be enough : {np.iinfo(dtype)}")
 
+        # Draw random isometries
+        if apply_random_isometry:
+            self.Abs = self.get_random_isometries()
+
         # Try getting shell information from reader, if not dummy.
         try:
             # Make sure snapshots are larger than the shells
@@ -99,28 +107,58 @@ class ShellBuilder(MapBuilder):
                     if diff[ishell] > boxsize:
                         message += f"Shell {ishell} ({z_shell_bins[ishell]:.2f}<z<{z_shell_bins[ishell+1]:.2f}) has width {diff[ishell]:.2f} Mpc\n"
                 warnings.warn(message)
-
-            # Save shell info for later reference and compare to existing as a safe check
-            if self.save_dir is not None:
-                fname = os.path.join(self.save_dir, self.base_fname + '_shell_info.npy')
-                shell_info = self.reader.shell_info()
-                if os.path.exists(fname):
-                    shell_info_existing = np.load(fname)
-                    np.testing.assert_array_equal(shell_info, shell_info_existing)
-                else:
-                    self.reader.shell_info(fname)
-
-            # Draw random isometries
-            if apply_random_isometry:
-                self.Abs = self.get_random_isometries()
-
         except NotImplementedError:
             warnings.warn(
                 "Reader does not implement `shell_edges_redshift` or `shell_edges_comoving_distance` or `boxsize.")
             assert isinstance(reader, DummyReader)
 
-        # Particle subsampling
-        assert subsample_box in ['densitymax', 'clmax'] or type(subsample_box) is float or subsample_box is None
+        # Dump useful metadata
+        if self.save_dir is not None:
+            self.save_info()
+
+    def save_info(self, ext='npy'):
+        # Shell info for later reference and compare to existing as a safe check
+        assert ext in ['npy', 'txt']
+        fname = os.path.join(self.save_dir, self.base_fname + '_shell_info.' + ext)
+
+        z_shell_bins = self.reader.shell_edges_redshift()
+        pixel_density = [self.get_pixel_density(ishell) for ishell in range(self.nshells)]
+        sky_density = [self.get_sky_density(ishell) for ishell in range(self.nshells)]
+        names = ['ishell', 'zsnapshot', 'zmin', 'zmax', 'snapshot_id', 'pixel_density', 'sky_density']
+        dtypes = ['int', 'float', 'float', 'float', 'int', 'float', 'float']
+        shell_info = np.array(
+            list(
+                zip(
+                    np.arange(self.nshells), self.reader.zsnapshots, z_shell_bins[:-1], z_shell_bins[1:],
+                    self.reader.snapshots, pixel_density, sky_density)),
+            dtype=list(zip(names, dtypes)))
+
+        if ext == 'npy':
+            if os.path.exists(fname):
+                shell_info_existing = np.load(fname)
+                np.testing.assert_array_equal(shell_info, shell_info_existing)
+            else:
+                np.save(fname, shell_info)
+        else:
+            np.savetxt(fname, shell_info, header=' '.join(names), fmt='%8i %16.8f %16.8f %16.8f %8i')
+
+        # Save cosmology
+        self.reader.cosmo.write_yaml(os.path.join(self.save_dir, "cosmo_ccl.yaml"))
+
+        # Save simulation and maps info
+        data = {
+            "nparticles": self.reader.nparticles,
+            "boxsize": self.reader.boxsize(),
+            "mass_particles": self.reader.mass_particles,
+            "box_comoving_density": self.reader.box_comoving_density(),
+            "kind": self.reader.kind,
+            "nshells": self.reader.nshells,
+            "nside": self.nside,
+            "nside_c": self.nside_c,
+            "npix": self.npix,
+        }
+        fname = os.path.join(self.save_dir, 'sim_info.yaml')
+        yaml.dump(data, open(fname, "w"))
 
     def get_snapshot_lensing_builder(self):
         return BornLensingBuilder(self, nzs='zsnapshots', kappa_dir='kappa_zsnapshots', wsp_dir=self.wsp_dir)
@@ -574,7 +612,7 @@ class ShellBuilder(MapBuilder):
         for isub in self.tqdm(isubs, desc=f"[construct_halo_catalog: shell {ishell}]"):
             # Construct catalog for simulation sub-volume/snapshot
             res = self.construct_catalog_sub(isub, **kwargs)
-            
+
             # Build columns for output files
             idx = fits.Column(name='ihaloes', format='J', array=res[0])
             ra = fits.Column(name='ra', format='E', array=res[1])
@@ -583,17 +621,17 @@ class ShellBuilder(MapBuilder):
             a = pyccl.scale_factor_of_chi(self.cosmo, res[3])
             z = fits.Column(name='z', format='E', array=1. / a - 1.)
             cols = [idx, ra, dec, r, z]
-            
+
             # Add extra columns
-            if len(extra_columns)>0:
+            if len(extra_columns) > 0:
                 tmp = self.reader.read_props(isub, extra_columns, ihaloes=res[0])
                 for name, array in tmp.items():
                     cols.append(fits.Column(name=name, format='E', array=array))
-                    
+
             header = fits.Header()
             header[f'ISUB'] = isub
             header[f'ZSNAP'] = self.reader.zsnapshots[ishell]
-            
+
             hdul.append(fits.BinTableHDU.from_columns(cols, header))
 
         fits.HDUList(hdul).writeto(fname, overwrite=True)
@@ -647,7 +685,8 @@ class ShellBuilder(MapBuilder):
         _, ipix = self.get_mask(return_ipix=True)
 
         for ishell in self.tqdm(ishells, desc="[compute_tidal_tensor]"):
-            alm_E = self.compute_alms(ishell, save=True, replicate_octant=self.octant_only, pol=False, lmax=lmax)[ishell]
+            alm_E = self.compute_alms(
+                ishell, save=True, replicate_octant=self.octant_only, pol=False, lmax=lmax)[ishell]
             print("alm done")
 
             if smooth_Mpc is not None:

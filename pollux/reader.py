@@ -48,6 +48,9 @@ class Reader:
         self.unit = unit
 
         self.nparticles = nparticles
+        rho_m = pyccl.background.rho_x(self.cosmo, 1., 'matter', is_comoving=True)  #  in units of Msun / Mpc^3
+        vol = self.boxsize()**3  # in Mpc^3
+        self.mass_particles = rho_m * vol / self.nparticles  # in Msun
 
         self.zsnapshots = zsnapshots
         self.zmax = zmax

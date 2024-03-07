@@ -200,9 +200,7 @@ class BornLensingBuilder(LensingBuilder):
         self.nbar_from_maps = nbar_from_maps
 
         if multiple_planes:
-            rho_m = pyccl.background.rho_x(self.cosmo, 1., 'matter', is_comoving=True)  #  in units of Msun / Mpc^3
-            vol = self.reader.boxsize()**3  # in Mpc^3
-            mpart = rho_m * vol / self.reader.nparticles  # in Msun
+            mpart = self.reader.mass_particles
 
             area = hp.nside2pixarea(self.nside)
 

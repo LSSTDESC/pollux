@@ -438,8 +438,6 @@ class MapBuilder:
         -------
             Dictionary of alm's
         """
-        mask = self.get_mask()
-
         alms = {}
         for imap in self.tqdm(imaps, desc="[compute_alms]"):
             if save:

@@ -647,7 +647,7 @@ class ShellBuilder(MapBuilder):
         _, ipix = self.get_mask(return_ipix=True)
 
         for ishell in self.tqdm(ishells, desc="[compute_tidal_tensor]"):
-            alm_E = self.compute_alms(ishell, pol=False)[ishell]
+            alm_E = self.compute_alms(ishell, save=True, replicate_octant=self.octant_only, pol=False, lmax=lmax)[ishell]
             print("alm done")
 
             if smooth_Mpc is not None:

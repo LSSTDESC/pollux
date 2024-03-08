@@ -11,9 +11,24 @@ class CatalogGenerator:
         pass
 
 
-class CatalogSourceUniform(CatalogGenerator):
+class CatalogSourceGenerator(CatalogGenerator):
 
-    def __init__(self, lensing, nbar, interp_list=['kappa', 'gamma1', 'gamma2'], interp_pixels=True, name='catuniform'):
+    def __init__(self, lensing, nbar, name, interp_list=['kappa', 'gamma1', 'gamma2'], interp_pixels=True):
+        """`CatalogSourceGenerator` is a generic class to generate mock catalogs of source galaxies (ie those used in lensing).
+
+        Parameters
+        ----------
+        lensing
+            `LensingBuilder` object for which we generate catalogs
+        nbar
+            Density of galaxies in tomographic bins (in arcmin^-2)
+        name
+            Name of book-keeping
+        interp_list, optional
+            Variables to be interpolated from the lightcone, by default ['kappa', 'gamma1', 'gamma2']
+        interp_pixels, optional
+            Whether to interpolate between adjacent pixels, by default True
+        """
         self.lensing = lensing
         self.snap_lensing = self.lensing.shell_builder.get_snapshot_lensing_builder()
         self.nside = self.lensing.nside
@@ -34,8 +49,13 @@ class CatalogSourceUniform(CatalogGenerator):
         self.Ngal = (nbar * area_arcmin).astype(int)
         self.area_pix = hp.nside2pixarea(self.nside, degrees=False) * (180. * 60. / np.pi)**2
         self.nbar_per_pix = nbar * self.area_pix
+        
+        self.header_dict = {f'NBAR_{i}':n for i,n in enumerate(self.nbar)}
 
     def generate(self, ikappas=None):
+        """ 
+        Generate mock catalogs and interpolate maps.
+        """
         catalog = [{} for _ in range(self.lensing.nmaps)]
 
         # Generate ra, dec, z, etc.
@@ -46,6 +66,92 @@ class CatalogSourceUniform(CatalogGenerator):
 
         # Save it!
         self._save_catalogs(catalog, ikappas=ikappas)
+
+    def _interpolate_maps(self, catalog, ikappas=None):
+        reader = self.lensing.reader
+        chi_bins_edges = reader.shell_edges_comoving_distance()
+
+        # Interpolate shear values, looping over shells for speed
+        for k in self.interp_list:
+            for ishell in self.lensing.shell_builder.tqdm(None, desc=f"[generate] interpolating maps {k}"):
+                # Load maps
+                if ishell == 0:
+                    if k in ['t11', 't22', 't12']:
+                        map_high = self.lensing.shell_builder.load_maps(0, what=k)
+                    else:
+                        map_high = self.snap_lensing.load_maps(0, what=None if k == 'kappa' else k)
+                else:
+                    map_low = map_high
+                    if k in ['t11', 't22', 't12']:
+                        map_high = self.lensing.shell_builder.load_maps(ishell, what=k)
+                    else:
+                        map_high = self.snap_lensing.load_maps(ishell, what=None if k == 'kappa' else k)
+
+                chi_low, chi_high = chi_bins_edges[[ishell, ishell + 1]]
+
+                # Loop over tomographic bins
+                for ikappa in self.lensing.tqdm(ikappas, disable=True):
+                    # select galaxies in current shell
+                    w = (catalog[ikappa]['idx_shell'] == ishell)
+
+                    if np.any(w):
+                        # prepare for interpolation
+                        dchi = (catalog[ikappa]['chi'][w] - chi_low)  # distance
+
+                        # interpolation between shells and (optionnally) accross pixels
+                        if self.interp_pixels:
+                            if ishell == 0:
+                                catalog[ikappa][k][w] = dchi * map_high.interpolate_pos(
+                                    catalog[ikappa]['ra'][w], catalog[ikappa]['dec'][w], allow_partial=True) / (chi_high - chi_low)
+                            else:
+                                map_low_interp = map_low.interpolate_pos(catalog[ikappa]['ra'][w], catalog[ikappa]['dec'][w], allow_partial=True)
+                                map_high_interp = map_high.interpolate_pos(catalog[ikappa]['ra'][w], catalog[ikappa]['dec'][w], allow_partial=True)
+                                catalog[ikappa][k][w] = map_low_interp + dchi * (map_high_interp - map_low_interp) / (chi_high - chi_low)
+                        else:
+                            idx = hp.ang2pix(self.nside, *radec2thetaphi(catalog[ikappa]['ra'][w], catalog[ikappa]['dec'][w]), nest=True)  # pixels
+                            if ishell == 0:
+                                catalog[ikappa][k][w] = dchi * map_high[idx] / (chi_high - chi_low)
+                            else:
+                                catalog[ikappa][k][w] = map_low[idx] + dchi * (map_high[idx] - map_low[idx]) / (chi_high - chi_low)
+
+    def _save_catalogs(self, catalog, ikappas=None):
+        for ikappa in self.lensing.tqdm(ikappas, desc="[generate] saving", leave=False):
+
+            hdul = []
+
+            ra = fits.Column(name='ra', format='E', array=catalog[ikappa]['ra'])
+            dec = fits.Column(name='dec', format='E', array=catalog[ikappa]['dec'])
+            z = fits.Column(name='z', format='E', array=catalog[ikappa]['z'])
+            chi = fits.Column(name='chi', format='E', array=catalog[ikappa]['chi'])
+
+            interp_colums = [fits.Column(name=k, format='E', array=catalog[ikappa][k]) for k in self.interp_list]
+
+            header = fits.Header()
+            for k,v in self.header_dict.items():
+                header[k] = v
+
+            hdul = [fits.PrimaryHDU(), fits.BinTableHDU.from_columns([ra, dec, z, chi] + interp_colums, header)]
+
+            fname = self.lensing.get_fname(ikappa, what=self.name, force_fits=True)
+            fits.HDUList(hdul).writeto(fname, overwrite=True)
+
+        return catalog
+
+    def load_catalog(self, ikappa):
+        """
+        Load catalog fits file
+        """
+        fname = self.lensing.get_fname(ikappa, what=self.name, force_fits=True)
+        return fits.open(fname)
+
+
+class CatalogSourceUniform(CatalogSourceGenerator):
+
+    def __init__(self, lensing, nbar, name='catuniform', interp_list=['kappa', 'gamma1', 'gamma2'], interp_pixels=True):
+        """
+        Catalog generator sampling uniformly across the mask.
+        """
+        super().__init__(lensing, nbar, name, interp_list=interp_list, interp_pixels=interp_pixels)
 
     def _generate_galaxies(self, catalog, ikappas=None):
         # Generate ra, dec and redshift
@@ -84,113 +190,19 @@ class CatalogSourceUniform(CatalogGenerator):
         catalog[ikappa]['ra'] = ra
         catalog[ikappa]['dec'] = dec
 
-    def _interpolate_maps(self, catalog, ikappas=None):
-        reader = self.lensing.reader
-        chi_bins_edges = reader.shell_edges_comoving_distance()
-
-        # Interpolate shear values, looping over shells for speed
-        for k in self.interp_list:
-            for ishell in self.lensing.shell_builder.tqdm(None, desc=f"[generate] interpolating maps {k}"):
-                # Load maps
-                if ishell == 0:
-                    if k in ['t11', 't22', 't12']:
-                        map_high = self.lensing.shell_builder.load_maps(0, what=k)
-                    else:
-                        map_high = self.snap_lensing.load_maps(0, what=None if k == 'kappa' else k)
-                else:
-                    map_low = map_high
-                    if k in ['t11', 't22', 't12']:
-                        map_high = self.lensing.shell_builder.load_maps(ishell, what=k)
-                    else:
-                        map_high = self.snap_lensing.load_maps(ishell, what=None if k == 'kappa' else k)
-
-                chi_low, chi_high = chi_bins_edges[[ishell, ishell + 1]]
-
-                # Loop over tomographic bins
-                for ikappa in self.lensing.tqdm(ikappas, disable=True):
-                    # select galaxies in current shell
-                    w = (catalog[ikappa]['idx_shell'] == ishell)
-
-                    if np.any(w):
-                        # prepare for interpolation
-                        dchi = (catalog[ikappa]['chi'][w] - chi_low)  # distance
-
-                        # interpolation between shells and (optionnally) accross pixels
-                        if self.interp_pixels:
-                            if ishell == 0:
-                                catalog[ikappa][k][w] = dchi * map_high.interpolate_pos(
-                                    catalog[ikappa]['ra'][w], catalog[ikappa]['dec'][w],
-                                    allow_partial=True) / (chi_high - chi_low)
-                            else:
-                                map_low_interp = map_low.interpolate_pos(
-                                    catalog[ikappa]['ra'][w], catalog[ikappa]['dec'][w], allow_partial=True)
-                                map_high_interp = map_high.interpolate_pos(
-                                    catalog[ikappa]['ra'][w], catalog[ikappa]['dec'][w], allow_partial=True)
-                                catalog[ikappa][k][w] = map_low_interp + dchi * (map_high_interp -
-                                                                                 map_low_interp) / (chi_high - chi_low)
-                        else:
-                            idx = hp.ang2pix(
-                                self.nside,
-                                *radec2thetaphi(catalog[ikappa]['ra'][w], catalog[ikappa]['dec'][w]),
-                                nest=True)  # pixels
-                            if ishell == 0:
-                                catalog[ikappa][k][w] = dchi * map_high[idx] / (chi_high - chi_low)
-                            else:
-                                catalog[ikappa][k][w] = map_low[idx] + dchi * (map_high[idx] -
-                                                                               map_low[idx]) / (chi_high - chi_low)
-
-    def _save_catalogs(self, catalog, ikappas=None):
-        for ikappa in self.lensing.tqdm(ikappas, desc="[generate] saving", leave=False):
-
-            hdul = []
-
-            ra = fits.Column(name='ra', format='E', array=catalog[ikappa]['ra'])
-            dec = fits.Column(name='dec', format='E', array=catalog[ikappa]['dec'])
-            z = fits.Column(name='z', format='E', array=catalog[ikappa]['z'])
-            chi = fits.Column(name='chi', format='E', array=catalog[ikappa]['chi'])
-
-            interp_colums = [fits.Column(name=k, format='E', array=catalog[ikappa][k]) for k in self.interp_list]
-
-            header = fits.Header()
-            hdul = [fits.PrimaryHDU(), fits.BinTableHDU.from_columns([ra, dec, z, chi] + interp_colums, header)]
-
-            fname = self.lensing.get_fname(ikappa, what=self.name, force_fits=True)
-            fits.HDUList(hdul).writeto(fname, overwrite=True)
-
-        return catalog
-    
-    def load_catalog(self, ikappa):
-        fname = self.lensing.get_fname(ikappa, what=self.name, force_fits=True)
-        return fits.open(fname)
-
-
-def generate_radec_in_pix(nside, ipix, log2nside_high=29):
-    # Approximated by sampling at very high nside (2**29)
-    # From https://astro.pages.rwth-aachen.de/astrotools/_modules/healpytools.html#rand_vec_from_map
-    order = hp.nside2order(nside)
-    nside_high = 2**log2nside_high
-    n_up = log2nside_high - order
-
-    ipix_high = ipix * (4**n_up)
-    ipix_high += np.random.randint(0, 4**n_up, size=np.size(ipix))
-
-    return hp.pix2ang(nside_high, ipix_high, nest=True, lonlat=True)  # ra, dec
-
 
 class CatalogSourceClusteredMultinomial(CatalogSourceUniform):
 
-    def __init__(
-            self,
-            lensing_builder,
-            nbar,
-            biases,
-            interp_list=['kappa', 'gamma1', 'gamma2'],
-            interp_pixels=True,
-            name='catmultinom'):
-        super().__init__(lensing_builder, nbar, interp_list, interp_pixels, name)
+    def __init__(self, lensing, nbar, biases, name='catmultinom', interp_list=['kappa', 'gamma1', 'gamma2'], interp_pixels=True):
+        """
+        Catalog generator sampling the lightcone density field from a multionomial distribution (total number of galaxies fixed).
+        """
+        super().__init__(lensing, nbar, name, interp_list=interp_list, interp_pixels=interp_pixels)
 
         assert len(biases) == self.lensing.nmaps
         self.biases = biases
+        for i,b in enumerate(self.biases):
+            self.header_dict[f'BIAS_{i}'] = b
 
     def _generate_galaxies(self, catalog, ikappas=None):
         # Generate redshifts first, needed to know what shells galaxies are in
@@ -231,20 +243,18 @@ class CatalogSourceClusteredMultinomial(CatalogSourceUniform):
                 catalog[ikappa]['dec'][w] = dec
 
 
-class CatalogSourceClusteredPoisson(CatalogSourceUniform):
+class CatalogSourceClusteredPoisson(CatalogSourceGenerator):
 
-    def __init__(
-            self,
-            lensing_builder,
-            nbar,
-            biases,
-            interp_list=['kappa', 'gamma1', 'gamma2'],
-            interp_pixels=True,
-            name='catpoisson'):
-        super().__init__(lensing_builder, nbar, interp_list, interp_pixels, name)
+    def __init__(self, lensing, nbar, biases, name='catpoisson', interp_list=['kappa', 'gamma1', 'gamma2'], interp_pixels=True):
+        """
+        Catalog generator sampling the lightcone density field from a Poisson distribution (total number of galaxies fluctates).
+        """
+        super().__init__(lensing, nbar, name, interp_list=interp_list, interp_pixels=interp_pixels)
 
         assert len(biases) == self.lensing.nmaps
         self.biases = biases
+        for i,b in enumerate(self.biases):
+            self.header_dict[f'BIAS_{i}'] = b
 
     def _generate_galaxies(self, catalog, ikappas=None):
         reader = self.lensing.reader
@@ -253,10 +263,7 @@ class CatalogSourceClusteredPoisson(CatalogSourceUniform):
         # First, we compute the mean density per shell for each tracer's n(z)
         nbar_per_pix_per_bin = []
         for ikappa, t in enumerate(self.lensing.get_tracers()):
-            nz_int = np.array([
-                quad(lambda z: t.get_dndz(z), z_bins_edges[ishell], z_bins_edges[ishell + 1])
-                for ishell in range(self.snap_lensing.nmaps)
-            ])
+            nz_int = np.array([quad(lambda z: t.get_dndz(z), z_bins_edges[ishell], z_bins_edges[ishell + 1]) for ishell in range(self.snap_lensing.nmaps)])
             nbar_per_pix_per_bin.append(nz_int / np.sum(nz_int) * self.nbar_per_pix[ikappa])
             catalog[ikappa]['ra'] = []
             catalog[ikappa]['dec'] = []
@@ -311,3 +318,16 @@ class CatalogSourceClusteredPoisson(CatalogSourceUniform):
             ngal = len(catalog[ikappa]['ra'][ishell])
             catalog[ikappa]['z'].append(sample_pdf(zz, nz, ngal))
             catalog[ikappa]['idx_shell'].append(np.full(ngal, ishell))
+
+
+def generate_radec_in_pix(nside, ipix, log2nside_high=29):
+    # Approximated by sampling at very high nside (2**29)
+    # From https://astro.pages.rwth-aachen.de/astrotools/_modules/healpytools.html#rand_vec_from_map
+    order = hp.nside2order(nside)
+    nside_high = 2**log2nside_high
+    n_up = log2nside_high - order
+
+    ipix_high = ipix * (4**n_up)
+    ipix_high += np.random.randint(0, 4**n_up, size=np.size(ipix))
+
+    return hp.pix2ang(nside_high, ipix_high, nest=True, lonlat=True)  # ra, dec

@@ -10,6 +10,19 @@ from astropy.io import fits
 class PolluxIO:
 
     def __init__(self, sim_path, seed, tomo="SRDv1_nz", catalog="poisson"):
+        """`PolluxIO` creates an interface to Pollux/HACC simulations data products.
+
+        Parameters
+        ----------
+        sim_path
+            Path to simulation files.
+        seed
+            Seed used for pseudo-independent realizations.
+        tomo, optional
+            Name of the tomographic redshift distributions used for lensing products, by default "SRDv1_nz" (other option are "kappa_Euclid_dndz_fu08_bin1-5" and "kappa_zsnapshots" for individual shells).
+        catalog, optional
+            Source catalog sampling method, by default "poisson" (other options are "uniform" and "multinomial").
+        """
         self.sim_path = sim_path
         self.seed = seed
         if tomo is not None:
@@ -51,12 +64,9 @@ class PolluxIO:
     def load_haloes(self, i):
         fname = os.path.join(
             self.sim_path,
-            f"shell_{self.kind}_seed{self.seed}_nside{self.nside}_haloes_imap{i}.fits",
+            f"shell_{self.kind}_seed{self.seed}_nside{self.nside}_haloes_props_imap{i}.fits",
         )
-        hdul = fits.open(fname)
-        names = hdul[1].data.names
-
-        return {name: np.concatenate([hdu.data[name] for hdu in hdul[1:]]) for name in names}
+        return fits.open(fname)
 
     def load_kappa(self, i):
         fname = os.path.join(

@@ -30,7 +30,7 @@ class MapBuilder:
             b=None,
             nlb=20,
             remove_monopole=True):
-        """MapBuilder is a generic class to build maps that groups functions for I/O, Cl's computations, etc.
+        """`MapBuilder` is a generic class to build maps that groups functions for I/O, Cl's computations, etc.
 
         Parameters
         ----------
@@ -321,15 +321,7 @@ class MapBuilder:
                     nest=True,
                     **kwargs)
             else:
-                hp.mollview(
-                    hp_map,
-                    sub=(ny, nx, sub),
-                    title=title,
-                    cbar=cbar,
-                    min=0. if log else None,
-                    margins=(0., 0., 0., 0.),
-                    nest=True,
-                    **kwargs)
+                hp.mollview(hp_map, sub=(ny, nx, sub), title=title, cbar=cbar, min=0. if log else None, margins=(0., 0., 0., 0.), nest=True, **kwargs)
             sub += 1
 
         hp.graticule()
@@ -345,7 +337,7 @@ class MapBuilder:
         else:
             self.mask = np.ones(self.npix)
             self.ipix = np.arange(self.npix)
-        
+
     def get_mask(self, return_ipix=False):
         """
         Helper function to compute the mask
@@ -361,8 +353,7 @@ class MapBuilder:
         assert self.octant_only
         if not hasattr(self, 'ipix_oct_fullsky'):
             theta, phi = hp.pix2ang(self.nside, np.arange(self.npix), nest=True)
-            self.ipix_oct_fullsky = hp.ang2pix(
-                self.nside, np.where(theta <= np.pi / 2., theta, np.pi - theta), phi % np.pi / 2., nest=True)
+            self.ipix_oct_fullsky = hp.ang2pix(self.nside, np.where(theta <= np.pi / 2., theta, np.pi - theta), phi % np.pi / 2., nest=True)
 
         return self.ipix_oct_fullsky
 
@@ -400,29 +391,28 @@ class MapBuilder:
 
     def _field_map(self, imap):
         return self.load_maps(imap).generate_healpix_map()
-    
+
     def get_field_map(self, imap, reorder_n2r=True, replicate_octant=False):
         """"
         Create map ready for a NaMaster field object or healpy map2alm calculations.
         """
-        
+
         mask, ipix = self.get_mask(return_ipix=True)
 
         _map = self._field_map(imap) * mask
-                
+
         if self.remove_monopole:
             _map[ipix] -= np.mean(_map[ipix])
-            
+
         # Replicate if needed and apply mask
         if replicate_octant:
             ipix_o2f = self.get_octant_to_fullsky_ipix()
             _map = _map[ipix_o2f]
-        
+
         if reorder_n2r:
             _map = hp.reorder(_map, n2r=True)
-            
+
         return _map
-            
 
     def compute_alms(self, imaps=None, save=True, replicate_octant=False, **kwargs):
         """Compute spherical harmonic coefficients
@@ -450,7 +440,7 @@ class MapBuilder:
                         pass
 
             _map = self.get_field_map(imap, reorder_n2r=True, replicate_octant=replicate_octant)
-                            
+
             alms[imap] = hp.map2alm(_map, **kwargs)
 
             if save:
@@ -596,8 +586,7 @@ class MapBuilder:
     def _noise_cls(self, imap):
         raise NotImplementedError
 
-    def predict_cls(
-            self, imaps=None, auto_only=False, approximate=False, add_noise=False, error_bars=False, keep_cls=False):
+    def predict_cls(self, imaps=None, auto_only=False, approximate=False, add_noise=False, error_bars=False, keep_cls=False):
         """Compute theory angular power spectra of convergence maps with CCL
 
         Parameters
@@ -755,20 +744,13 @@ class MapBuilder:
                     ax = axes[i, j]
                     title = f'{self.base_fname} {i} {j}'
                 ax_used = False
-                cl_obs = s.get_ell_cl(self.sacc_type, tracers[i],
-                                      tracers[j])[1] if (tracers[i], tracers[j]) in tc else None
+                cl_obs = s.get_ell_cl(self.sacc_type, tracers[i], tracers[j])[1] if (tracers[i], tracers[j]) in tc else None
                 cl_th = cl[i, j] if (i, j) in cl.keys() else None
                 if ratio_data_theory:
                     if cl_obs is not None and cl_th is not None:
                         ax.plot(ell, cl_obs / cl_th, c=colordata)
                         if error_bars:
-                            ax.fill_between(
-                                ell,
-                                1. - dcl[i, j] / cl_th,
-                                1. + dcl[i, j] / cl_th,
-                                color=colortheory,
-                                alpha=0.2,
-                                zorder=-99)
+                            ax.fill_between(ell, 1. - dcl[i, j] / cl_th, 1. + dcl[i, j] / cl_th, color=colortheory, alpha=0.2, zorder=-99)
                         ax.axhline(y=1., c='.8', ls='--')
                         ax.set_ylabel(r'$C_\ell^{\rm obs} / C_\ell^{\rm th}$')
                         ax_used = True
@@ -784,13 +766,7 @@ class MapBuilder:
                     if cl_th is not None and not data_only:
                         ax.plot(ell, ell_factor * cl_th, c=colortheory)
                         if error_bars:
-                            ax.fill_between(
-                                ell,
-                                ell_factor * (cl_th - dcl[i, j]),
-                                ell_factor * (cl_th + dcl[i, j]),
-                                color=colortheory,
-                                alpha=0.2,
-                                zorder=-99)
+                            ax.fill_between(ell, ell_factor * (cl_th - dcl[i, j]), ell_factor * (cl_th + dcl[i, j]), color=colortheory, alpha=0.2, zorder=-99)
                         ax_used = True
                     if cl_obs is not None and not theory_only:
                         ax.plot(ell, ell_factor * cl_obs, c=colordata, ls=' ', marker='o', markersize=5)

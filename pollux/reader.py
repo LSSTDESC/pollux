@@ -18,7 +18,7 @@ except:
 class Reader:
 
     def __init__(self, cosmo, kind, unit, nparticles, zsnapshots, zmax, nsubs, shell_edges_match, dtype=np.float64):
-        """Reader is a generic class to read particles from N-body simulations.
+        """`Reader` is a generic class to read particles from N-body simulations.
 
         Parameters
         ----------
@@ -115,8 +115,7 @@ class Reader:
             else:
                 raise ValueError
 
-            res = compute_shell_edges(
-                self.zsnapshots, func=func, ifunc=ifunc, zmax=self.zmax, return_fzbins=return_fzbins)
+            res = compute_shell_edges(self.zsnapshots, func=func, ifunc=ifunc, zmax=self.zmax, return_fzbins=return_fzbins)
 
             if return_fzbins:
                 self.z_shell_bins = res[0]
@@ -129,9 +128,7 @@ class Reader:
         z_shell_bins = self.shell_edges_redshift()
         names = ['ishell', 'zsnapshot', 'zmin', 'zmax', 'snapshot_id']
         dtypes = ['int', 'float', 'float', 'float', 'int']
-        out = np.array(
-            list(zip(np.arange(self.nshells), self.zsnapshots, z_shell_bins[:-1], z_shell_bins[1:], self.snapshots)),
-            dtype=list(zip(names, dtypes)))
+        out = np.array(list(zip(np.arange(self.nshells), self.zsnapshots, z_shell_bins[:-1], z_shell_bins[1:], self.snapshots)), dtype=list(zip(names, dtypes)))
         if fname is not None:
             if '.txt' in fname:
                 np.savetxt(fname, out, header=' '.join(names), fmt='%8i %16.8f %16.8f %16.8f %8i')
@@ -236,8 +233,7 @@ class SLICSReader(Reader):
         # number of sub boxes (constant here)
         ncube = self.nodes_dim**3
 
-        super().__init__(
-            cosmo, 'slics', 'Mpc', nparticles, zsnapshots, zmax, ncube, shell_edges_match, dtype=np.float32)
+        super().__init__(cosmo, 'slics', 'Mpc', nparticles, zsnapshots, zmax, ncube, shell_edges_match, dtype=np.float32)
 
     def boxsize(self):
         return self.boxsize
@@ -358,9 +354,7 @@ class HACCReader(Reader):
                 np.testing.assert_array_equal(snapshots, snapshots_output)
             except AssertionError:
                 snapshots = snapshots_output
-                warnings.warn(
-                    "We are using the snapshots found in the `output` folder, which do not match those in the parameter file."
-                )
+                warnings.warn("We are using the snapshots found in the `output` folder, which do not match those in the parameter file.")
         print(f"  - Found {len(snapshots)} snapshots :", snapshots)
 
         # helper function : we only work on the list of snapshots to avoid mistakes in book-keeping
@@ -402,9 +396,7 @@ class HACCReader(Reader):
         self.snapshots = snapshots[::-snap_sub_every_n]  # snapshots ordered by redshift
 
         if snap_sub_every_n > 1:
-            print(
-                f"  - Subsampling : keeping every {snap_sub_every_n} snapshots, returns {len(self.snapshots)} snapshots"
-            )
+            print(f"  - Subsampling : keeping every {snap_sub_every_n} snapshots, returns {len(self.snapshots)} snapshots")
 
         # done with subsampling !
         zsnapshots = 1. / get_asnapshots(self.snapshots) - 1.
@@ -423,14 +415,11 @@ class HACCReader(Reader):
             dtype = np.float32
 
         # simulation box limits
-        self.lims = np.array([[[np.floor(ibox / (16)) * 0.5,
-                                np.floor(ibox / (16)) * 0.5 + 2.5],
-                               [np.floor(ibox / 4) % 4, (np.floor(ibox / 4) % 4) + 1], [ibox % 4, (ibox % 4) + 1]]
-                              for ibox in range(64)])
+        self.lims = np.array([[[np.floor(ibox / (16)) * 0.5, np.floor(ibox / (16)) * 0.5 + 2.5], [np.floor(ibox / 4) % 4, (np.floor(ibox / 4) % 4) + 1],
+                               [ibox % 4, (ibox % 4) + 1]] for ibox in range(64)])
 
         nsub = 16 if self.group_along_x else 64
-        super().__init__(
-            cosmo, 'hacc', 'Mpc_over_h', nparticles, zsnapshots, snap_sub_zmax, nsub, shell_edges_match, dtype=dtype)
+        super().__init__(cosmo, 'hacc', 'Mpc_over_h', nparticles, zsnapshots, snap_sub_zmax, nsub, shell_edges_match, dtype=dtype)
 
     def boxsize(self):
         return self.boxsize_h / self.cosmo["h"]
@@ -515,16 +504,7 @@ class HACCHaloReader(HACCReader):
 
 class SkySimReader(HACCReader):
 
-    def __init__(
-            self,
-            path,
-            cosmo,
-            nsteps=500,
-            sim_zmin=0.,
-            sim_zmax=200.,
-            aminstep=0.,
-            zmax=None,
-            shell_edges_match='center_scale_factor'):
+    def __init__(self, path, cosmo, nsteps=500, sim_zmin=0., sim_zmax=200., aminstep=0., zmax=None, shell_edges_match='center_scale_factor'):
         self.path = path
         self.aminstep = aminstep
 
@@ -556,8 +536,7 @@ class SkySimReader(HACCReader):
         dtype = np.float32
         nsub = 1
 
-        Reader.__init__(
-            self, cosmo, 'skysim', 'Mpc_over_h', nparticles, zsnapshots, zmax, nsub, shell_edges_match, dtype=dtype)
+        Reader.__init__(self, cosmo, 'skysim', 'Mpc_over_h', nparticles, zsnapshots, zmax, nsub, shell_edges_match, dtype=dtype)
 
 
 class MockReader(Reader):
@@ -593,12 +572,4 @@ class DummyReader(Reader):
 
     def __init__(self, cosmo, kind, unit, nsnapshots):
         super().__init__(
-            cosmo,
-            kind,
-            unit,
-            nparticles=0.,
-            zsnapshots=np.zeros(nsnapshots),
-            zmax=None,
-            nsubs=0,
-            shell_edges_match='center_scale_factor',
-            dtype=np.float64)
+            cosmo, kind, unit, nparticles=0., zsnapshots=np.zeros(nsnapshots), zmax=None, nsubs=0, shell_edges_match='center_scale_factor', dtype=np.float64)

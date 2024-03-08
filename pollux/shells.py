@@ -36,7 +36,7 @@ class ShellBuilder(MapBuilder):
             },
             group_isometries=None,
             **kwargs):
-        """ShellBuilder is a class to handle the computation of particle shells from snapshots of an N-body simulation.
+        """`ShellBuilder` is a class to handle the computation of particle shells from snapshots of an N-body simulation.
 
         Parameters
         ----------
@@ -77,14 +77,7 @@ class ShellBuilder(MapBuilder):
         if apply_random_isometry:
             base_fname += f'_seed{self.seed}'
 
-        super().__init__(
-            nside=nside,
-            dtype=dtype,
-            save_dir=save_dir,
-            base_fname=base_fname,
-            nmaps=self.nshells,
-            sacc_type="galaxy_density_cl",
-            **kwargs)
+        super().__init__(nside=nside, dtype=dtype, save_dir=save_dir, base_fname=base_fname, nmaps=self.nshells, sacc_type="galaxy_density_cl", **kwargs)
 
         if dtype == np.int32:
             print(f"Warning: the max value for {dtype} might not be enough : {np.iinfo(dtype)}")
@@ -108,8 +101,7 @@ class ShellBuilder(MapBuilder):
                         message += f"Shell {ishell} ({z_shell_bins[ishell]:.2f}<z<{z_shell_bins[ishell+1]:.2f}) has width {diff[ishell]:.2f} Mpc\n"
                 warnings.warn(message)
         except NotImplementedError:
-            warnings.warn(
-                "Reader does not implement `shell_edges_redshift` or `shell_edges_comoving_distance` or `boxsize.")
+            warnings.warn("Reader does not implement `shell_edges_redshift` or `shell_edges_comoving_distance` or `boxsize.")
             assert isinstance(reader, DummyReader)
 
         # Dump useful metadata
@@ -127,10 +119,7 @@ class ShellBuilder(MapBuilder):
         names = ['ishell', 'zsnapshot', 'zmin', 'zmax', 'snapshot_id', 'pixel_density', 'sky_density']
         dtypes = ['int', 'float', 'float', 'float', 'int', 'float', 'float']
         shell_info = np.array(
-            list(
-                zip(
-                    np.arange(self.nshells), self.reader.zsnapshots, z_shell_bins[:-1], z_shell_bins[1:],
-                    self.reader.snapshots, pixel_density, sky_density)),
+            list(zip(np.arange(self.nshells), self.reader.zsnapshots, z_shell_bins[:-1], z_shell_bins[1:], self.reader.snapshots, pixel_density, sky_density)),
             dtype=list(zip(names, dtypes)))
 
         if ext == 'npy':
@@ -178,8 +167,7 @@ class ShellBuilder(MapBuilder):
         for ishell in range(self.nshells):
             zz = np.linspace(z_shell_bins[ishell], z_shell_bins[ishell + 1], Nz)
             dndz = self._get_dndz(zz)
-            tracers.append(
-                pyccl.NumberCountsTracer(self.cosmo, has_rsd=False, dndz=(zz, dndz), bias=(zz, np.ones_like(zz))))
+            tracers.append(pyccl.NumberCountsTracer(self.cosmo, has_rsd=False, dndz=(zz, dndz), bias=(zz, np.ones_like(zz))))
 
         return tracers
 
@@ -202,8 +190,7 @@ class ShellBuilder(MapBuilder):
         zmin = z_shell_bins[ishell]
         zmax = z_shell_bins[ishell + 1]
 
-        dVdz = lambda z: pyccl.comoving_angular_distance(self.cosmo, 1. / (1. + z))**2 / pyccl.background.h_over_h0(
-            self.cosmo, 1. / (1. + z))
+        dVdz = lambda z: pyccl.comoving_angular_distance(self.cosmo, 1. / (1. + z))**2 / pyccl.background.h_over_h0(self.cosmo, 1. / (1. + z))
 
         return quad(lambda z: z * dVdz(z), zmin, zmax) / quad(dVdz, zmin, zmax)
 
@@ -280,8 +267,7 @@ class ShellBuilder(MapBuilder):
         if self.subsample_box == 'densitymax':
             if not hasattr(self, 'subsample_ratios'):
                 # estimated number of particles per pixel
-                ngal_pix = np.array([self.estimate_repeats(ishell) for ishell in range(self.nshells)
-                                    ]) * self.reader.nparticles / self.npix
+                ngal_pix = np.array([self.estimate_repeats(ishell) for ishell in range(self.nshells)]) * self.reader.nparticles / self.npix
                 if self.octant_only:
                     ngal_pix *= 8.
                 snr_pix = 1. / np.sqrt(ngal_pix)  # S/N per pixel
@@ -293,8 +279,7 @@ class ShellBuilder(MapBuilder):
         elif self.subsample_box == 'clmax':
             if not hasattr(self, 'subsample_ratios'):
                 # estimated number of particles per pixel
-                ngal_pix = np.array([self.estimate_repeats(ishell) for ishell in range(self.nshells)
-                                    ]) * self.reader.nparticles / self.npix
+                ngal_pix = np.array([self.estimate_repeats(ishell) for ishell in range(self.nshells)]) * self.reader.nparticles / self.npix
                 if self.octant_only:
                     ngal_pix *= 8.
                 # compute theory Cl's
@@ -406,8 +391,8 @@ class ShellBuilder(MapBuilder):
 
         if fast:
             uipix, c = _construct_maps_sub_helper(
-                xyz, box_edges_original, Abs[ishell][0], Abs[ishell][1], nrepeat, boxsize, rmin2, rmax2,
-                self.apply_random_isometry, self.octant_only, nside, order, ncap, npix)
+                xyz, box_edges_original, Abs[ishell][0], Abs[ishell][1], nrepeat, boxsize, rmin2, rmax2, self.apply_random_isometry, self.octant_only, nside,
+                order, ncap, npix)
             if len(uipix) > 0:
                 shell.update_values_pix(uipix, c.astype(self.dtype), nest=False)
 
@@ -430,8 +415,7 @@ class ShellBuilder(MapBuilder):
                                 continue
 
                         # compute shift
-                        shift_original = (np.array([ix, iy, iz], dtype=self.reader.dtype) *
-                                          self.reader.boxsize())[None, :]
+                        shift_original = (np.array([ix, iy, iz], dtype=self.reader.dtype) * self.reader.boxsize())[None, :]
                         if self.apply_random_isometry:
                             shift = Ax(Abs[ishell][0], shift_original)
                         else:
@@ -471,8 +455,7 @@ class ShellBuilder(MapBuilder):
                         # 2 - remove particles out of octant if octant_only
                         # 3 - compute corresponding healpy pixels of all particles (removed particles fast set to -1) with vec2pix and loc2pix (translated into python from Healpix code)
                         # 4 - get unique pixels and counts (ignoring -1's)
-                        ipix = _vec2pix(
-                            nside, order, ncap, npix, *(xyz.T), *(shift[0].T), rmin2, rmax2, self.octant_only)
+                        ipix = _vec2pix(nside, order, ncap, npix, *(xyz.T), *(shift[0].T), rmin2, rmax2, self.octant_only)
                         uipix, c = _unique_pix_pos(ipix, npix)
 
                         if len(uipix) > 0:
@@ -581,8 +564,7 @@ class ShellBuilder(MapBuilder):
             print(f"Loaded box {isub} (shell {ishell}) with {len(xyz)} particles.")
 
         idx, ra, dec, r = _construct_catalog_sub_helper(
-            xyz, box_edges_original, Abs[ishell][0], Abs[ishell][1], nrepeat, boxsize, rmin2, rmax2,
-            self.apply_random_isometry, self.octant_only)
+            xyz, box_edges_original, Abs[ishell][0], Abs[ishell][1], nrepeat, boxsize, rmin2, rmax2, self.apply_random_isometry, self.octant_only)
 
         if len(idx) > 0:
             return np.concatenate(idx), np.concatenate(ra), np.concatenate(dec), np.concatenate(r)
@@ -674,6 +656,7 @@ class ShellBuilder(MapBuilder):
             out[k] = np.concatenate(out[k])
 
         return out
+        
 
     def _noise_cls(self, ishell):
         return 1. / self.get_sky_density(ishell)
@@ -685,8 +668,7 @@ class ShellBuilder(MapBuilder):
         _, ipix = self.get_mask(return_ipix=True)
 
         for ishell in self.tqdm(ishells, desc="[compute_tidal_tensor]"):
-            alm_E = self.compute_alms(
-                ishell, save=True, replicate_octant=self.octant_only, pol=False, lmax=lmax)[ishell]
+            alm_E = self.compute_alms(ishell, save=True, replicate_octant=self.octant_only, pol=False, lmax=lmax)[ishell]
             print("alm done")
 
             if smooth_Mpc is not None:
@@ -904,8 +886,7 @@ def _vec2pix(nside, order, ncap, npix, x, y, z, shiftx, shifty, shiftz, rmin2, r
     n = len(x)
     ipix = np.zeros(n, dtype=np.int_)
     for i in numba.prange(n):
-        ipix[i] = _vec2pix_sub(
-            nside, order, ncap, npix, x[i], y[i], z[i], shiftx, shifty, shiftz, rmin2, rmax2, octant_only)
+        ipix[i] = _vec2pix_sub(nside, order, ncap, npix, x[i], y[i], z[i], shiftx, shifty, shiftz, rmin2, rmax2, octant_only)
     return ipix
 
 
@@ -978,9 +959,7 @@ def _unique_pix_pos(ipix, npix):
 
 
 @numba.njit
-def _construct_maps_sub_helper(
-        xyz, box_edges_original, A, b, nrepeat, boxsize, rmin2, rmax2, apply_random_isometry, octant_only, nside, order,
-        ncap, npix):
+def _construct_maps_sub_helper(xyz, box_edges_original, A, b, nrepeat, boxsize, rmin2, rmax2, apply_random_isometry, octant_only, nside, order, ncap, npix):
     """
     Parallelized helper function for ShellBuilder.construct_shell_sub
     """
@@ -1030,9 +1009,7 @@ def _construct_maps_sub_helper(
 
                 ## add particles to shell
                 # compute corresponding healpy pixels of all particles (particles out of shell/octant quickly set to -1) with vec2pix and loc2pix (translated into python from Healpix code)
-                ipix = _vec2pix(
-                    nside, order, ncap, npix, xyz[:, 0], xyz[:, 1], xyz[:, 2], shift[0, 0], shift[0, 1], shift[0, 2],
-                    rmin2, rmax2, octant_only)
+                ipix = _vec2pix(nside, order, ncap, npix, xyz[:, 0], xyz[:, 1], xyz[:, 2], shift[0, 0], shift[0, 1], shift[0, 2], rmin2, rmax2, octant_only)
 
                 for i in range(n):
                     pos = ipix[i]
@@ -1044,8 +1021,7 @@ def _construct_maps_sub_helper(
 
 
 @numba.njit
-def _construct_catalog_sub_helper(
-        xyz, box_edges_original, A, b, nrepeat, boxsize, rmin2, rmax2, apply_random_isometry, octant_only):
+def _construct_catalog_sub_helper(xyz, box_edges_original, A, b, nrepeat, boxsize, rmin2, rmax2, apply_random_isometry, octant_only):
     """
     Parallelized helper function for ShellBuilder.construct_catalog_sub
     """
@@ -1097,8 +1073,7 @@ def _construct_catalog_sub_helper(
                     continue
 
                 # if catalog_mode:
-                tmpidx, tmpra, tmpdec, tmpr = _vec2radec(
-                    xyz[:, 0], xyz[:, 1], xyz[:, 2], shift[0, 0], shift[0, 1], shift[0, 2], rmin2, rmax2, octant_only)
+                tmpidx, tmpra, tmpdec, tmpr = _vec2radec(xyz[:, 0], xyz[:, 1], xyz[:, 2], shift[0, 0], shift[0, 1], shift[0, 2], rmin2, rmax2, octant_only)
 
                 w = tmpidx >= 0
                 if np.any(w):

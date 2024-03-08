@@ -5,6 +5,7 @@ import healpy as hp
 import numba
 import numpy as np
 import pymaster as nmt
+from astropy.io import fits
 from pynverse import inversefunc
 from scipy.integrate import quad as scipy_quad
 from scipy.spatial import KDTree
@@ -446,3 +447,16 @@ def sample_pdf(x, pdf, n):
     cdf = np.insert(cdf, 0, 0.)
     u = np.random.uniform(size=n)
     return np.interp(u, cdf, x)
+
+
+def save_dict_fits_file(fname, cat):
+    hdul = [fits.PrimaryHDU()]
+        
+    header = fits.Header()
+    cols = []
+    for name, array in cat.items():
+        cols.append(fits.Column(name=name, format='E', array=array))
+
+    hdul.append(fits.BinTableHDU.from_columns(cols, header))
+
+    fits.HDUList(hdul).writeto(fname, overwrite=True)

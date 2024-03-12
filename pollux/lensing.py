@@ -62,6 +62,7 @@ class LensingBuilder(MapBuilder):
             self.nkappas = self.shell_builder.nshells
         else:
             self.nkappas = len(nzs)
+            np.save(os.path.join(save_dir, 'nzs.npy'), nzs)
 
         base_fname = f'kappa_{shell_builder.reader.kind}_seed{shell_builder.seed}'
 

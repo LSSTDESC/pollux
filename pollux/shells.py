@@ -656,20 +656,31 @@ class ShellBuilder(MapBuilder):
             out[k] = np.concatenate(out[k])
 
         return out
-        
 
     def _noise_cls(self, ishell):
         return 1. / self.get_sky_density(ishell)
 
-    def compute_tidal_tensor_maps(self, ishells=None, smooth_Mpc=None, lmax=None):
+    def compute_tidal_tensor_maps(self, ishells=None, smooth_Mpc=None, lmax=None, replicate_octant=False):
+        """Compute the tidal fields of density maps
+
+        Parameters
+        ----------
+        ishells, optional
+            Shell indices, by default None
+        smooth_Mpc, optional
+            Smoothing scale of the density field in Mpc, by default None (no smoothing)
+        lmax, optional
+            Maximum multipole to consider, by default None
+        replicate_octant, optional
+            If True, alm's are recomputed from octant maps replicated to cover the full sky (irrelevant if `octant_only` is False), by default False  
+        """
         if lmax is None:
             lmax = 3 * self.nside - 1
 
         _, ipix = self.get_mask(return_ipix=True)
 
         for ishell in self.tqdm(ishells, desc="[compute_tidal_tensor]"):
-            alm_E = self.compute_alms(ishell, save=True, replicate_octant=self.octant_only, pol=False, lmax=lmax)[ishell]
-            print("alm done")
+            alm_E = self.compute_alms(ishell, save=not (replicate_octant), replicate_octant=replicate_octant, pol=False, lmax=lmax)[ishell]
 
             if smooth_Mpc is not None:
                 assert smooth_Mpc > 0.
@@ -681,10 +692,8 @@ class ShellBuilder(MapBuilder):
                     pol=False,
                     inplace=True,
                 )
-                print("smoothing done")
 
             Q, U = hp.alm2map_spin((alm_E, np.zeros_like(alm_E)), self.nside, spin=2, lmax=lmax)
-            print("QU done")
 
             Q = hp.reorder(Q, r2n=True)[ipix]
             U = hp.reorder(U, r2n=True)[ipix]
@@ -703,7 +712,6 @@ class ShellBuilder(MapBuilder):
             # t22 = (delta-Q)/2 - density/3
             # t12 = U
 
-            print("saving")
             for what, val in zip(['t11', 't22', 't12'], [density / 6. + Q / 2., density / 6. - Q / 2., U]):
                 hsp = healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
                 hsp.update_values_pix(ipix, val.astype(self.dtype))

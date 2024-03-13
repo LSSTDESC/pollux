@@ -37,7 +37,7 @@ class LensingBuilder(MapBuilder):
         shell_builder
             Shell builder object
         nzs
-            List of callables representing redshift distributions.
+            List of callables or arrays (format (z, n(z))) representing redshift distributions.
         kappa_dir, optional
             Folder where to save maps, by default None
         dtype, optional
@@ -103,7 +103,7 @@ class LensingBuilder(MapBuilder):
 
         return tracers
 
-    def compute_shear_maps(self, ikappas=None, lmax=None):
+    def compute_shear_maps(self, ikappas=None, lmax=None, replicate_octant=False):
         """Compute shear maps from convergence maps
 
         Parameters
@@ -112,6 +112,8 @@ class LensingBuilder(MapBuilder):
             Map indices, by default None
         lmax, optional
             Maximum multipole, by default None
+        replicate_octant, optional
+            If True, alm's are recomputed from octant maps replicated to cover the full sky (irrelevant if `octant_only` is False), by default False  
 
         Returns
         -------
@@ -135,7 +137,7 @@ class LensingBuilder(MapBuilder):
                 continue
 
             # Get harmonic coefficients of convergence map
-            klm = self.compute_alms(ikappa, save=True, replicate_octant=self.octant_only, pol=False, lmax=lmax)[ikappa]
+            klm = self.compute_alms(ikappa, save=not (replicate_octant), replicate_octant=replicate_octant, pol=False, lmax=lmax)[ikappa]
 
             # Convert to shear
             glm_E = hp.almxfl(klm, fl)

@@ -428,6 +428,8 @@ class MapBuilder:
         -------
             Dictionary of alm's
         """
+        assert not (save and replicate_octant)
+
         alms = {}
         for imap in self.tqdm(imaps, desc="[compute_alms]"):
             if save:

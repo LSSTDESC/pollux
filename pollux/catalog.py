@@ -247,7 +247,7 @@ class CatalogSourceClusteredPoisson(CatalogSourceGenerator):
 
     def __init__(self, lensing, nbar, biases, name='catpoisson', interp_list=['kappa', 'gamma1', 'gamma2'], interp_pixels=True):
         """
-        Catalog generator sampling the lightcone density field from a Poisson distribution (total number of galaxies fluctates).
+        Catalog generator sampling the lightcone density field from a Poisson distribution (total number of galaxies fluctuates).
         """
         super().__init__(lensing, nbar, name, interp_list=interp_list, interp_pixels=interp_pixels)
 
@@ -295,14 +295,17 @@ class CatalogSourceClusteredPoisson(CatalogSourceGenerator):
 
         # Loop over tomographic bins
         for ikappa in self.lensing.tqdm(ikappas, leave=False):
+            
+            rng = np.random.default_rng(self.lensing.shell_builder.seed + ishell + ikappa)
+            
             # Poisson sampling
             p = np.clip(1. + self.biases[ikappa] * density_masked, 0., None)
             lam = p * self.nbar_per_pix_per_bin[ikappa][ishell]
-            n_per_pix = np.random.poisson(lam=lam)
+            n_per_pix = rng.poisson(lam=lam)
             ipix = np.repeat(ipix_mask, n_per_pix)
 
             # Sampling ra, dec within pixel
-            ra, dec = generate_radec_in_pix(self.nside, ipix)
+            ra, dec = generate_radec_in_pix(self.nside, ipix, rng)
 
             catalog[ikappa]['ra'].append(ra)
             catalog[ikappa]['dec'].append(dec)
@@ -310,17 +313,20 @@ class CatalogSourceClusteredPoisson(CatalogSourceGenerator):
     def _generate_z(self, catalog, ikappa):
         reader = self.lensing.reader
         z_bins_edges = reader.shell_edges_redshift()
-
+        
         t = self.lensing.get_tracers()[ikappa]
         for ishell in self.lensing.shell_builder.tqdm(None, disable=True):
+            
+            rng = np.random.default_rng(self.lensing.shell_builder.seed + ishell + ikappa)
+            
             zz = np.linspace(z_bins_edges[ishell], z_bins_edges[ishell + 1], 100)
             nz = t.get_dndz(zz)
             ngal = len(catalog[ikappa]['ra'][ishell])
-            catalog[ikappa]['z'].append(sample_pdf(zz, nz, ngal))
+            catalog[ikappa]['z'].append(sample_pdf(zz, nz, ngal, rng))
             catalog[ikappa]['idx_shell'].append(np.full(ngal, ishell))
 
 
-def generate_radec_in_pix(nside, ipix, log2nside_high=29):
+def generate_radec_in_pix(nside, ipix, rng, log2nside_high=29):
     # Approximated by sampling at very high nside (2**29)
     # From https://astro.pages.rwth-aachen.de/astrotools/_modules/healpytools.html#rand_vec_from_map
     order = hp.nside2order(nside)
@@ -328,6 +334,6 @@ def generate_radec_in_pix(nside, ipix, log2nside_high=29):
     n_up = log2nside_high - order
 
     ipix_high = ipix * (4**n_up)
-    ipix_high += np.random.randint(0, 4**n_up, size=np.size(ipix))
+    ipix_high += rng.integers(0, 4**n_up, size=np.size(ipix))
 
     return hp.pix2ang(nside_high, ipix_high, nest=True, lonlat=True)  # ra, dec

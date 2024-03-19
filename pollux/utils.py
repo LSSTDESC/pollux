@@ -437,15 +437,15 @@ def subsample_ppf(z, n, ppf, keep_first_last=True):
     return unique_idx, z[unique_idx]
 
 
-def sample_pdf(x, pdf, n):
+def sample_pdf(x, pdf, n, rng):
     """
-    Sample a distribution given it's pdf.
+    Sample a distribution given its pdf.
     """
     dx = np.diff(x)
     trapz = 0.5 * (pdf[1:] + pdf[:-1]) * dx
     cdf = np.cumsum(trapz) / np.sum(trapz)
     cdf = np.insert(cdf, 0, 0.)
-    u = np.random.uniform(size=n)
+    u = rng.uniform(size=n)
     return np.interp(u, cdf, x)
 
 

@@ -655,7 +655,7 @@ class MapBuilder:
                 cl[i, j] = np.dot(bpws, hp.pixwin(self.nside)**2 * cl_raw)
                 if add_noise and i == j:
                     cl[i, j] += np.dot(bpws, hp.pixwin(self.nside)**2 * self._noise_cls(i))
-
+        
         if error_bars:
             dcl = {}
             for i, j in pairs:
@@ -664,14 +664,34 @@ class MapBuilder:
                 else:
                     dcl2_num = (cl[i, i] + self._noise_cls(i)) * (cl[j, j] + self._noise_cls(j)) + cl[order(i, j)]**2
                 dcl[i, j] = np.sqrt(dcl2_num / ((2 * ell + 1.) * fsky * nell))
+            dcl_full = {}
+            Dl = {}
+            for i, j in pairs:
+                Dl[i, j] = np.copy(cl[i, j])
+                Dl[j, i] = np.copy(cl[i, j])
+                if i == j:
+                    Dl[i, j] += self._noise_cls(i)
+            for i, j in pairs:
+                for k, l in pairs:
+                    dcl_full[i, j, k, l] = (Dl[i, l] * Dl[j, k] + Dl[i, k] * Dl[j, l]) / ((2 * ell + 1.) * fsky * nell)
+            cl_stacked = np.zeros(len(pairs) * len(ell))
+            cov = np.zeros([len(pairs) * len(ell), len(pairs) * len(ell)])
+            nrow = 0
+            for i, j in pairs:
+                cl_stacked[nrow * len(ell) : (nrow + 1) * len(ell)] = np.copy(cl[i, j])
+                ncol = 0
+                for k, l in pairs:
+                    cov[nrow * len(ell) : (nrow + 1) * len(ell), ncol * len(ell) : (ncol + 1) * len(ell)] = np.diag(dcl_full[i, j, k, l])
+                    ncol += 1
+                nrow += 1
             if keep_cls:
-                self.predicted_cls = ell, cl, dcl
-            return ell, cl, dcl
+                self.predicted_cls = ell, cl, dcl, cl_stacked, cov
+            return ell, cl, dcl, cl_stacked, cov
         else:
             if keep_cls:
                 self.predicted_cls = ell, cl
             return ell, cl
-
+        
     def triangle_plot_cls(
             self,
             auto_only=False,

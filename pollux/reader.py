@@ -334,7 +334,8 @@ class HACCReader(Reader):
             Neff=float(params['N_EFF_MASSLESS']),
             w0=float(params['W_DE']),
             wa=float(params['WA_DE']),
-            T_CMB=float(params['T_CMB']),
+            # T_CMB=float(params['T_CMB']),
+            T_CMB=2.726,
             Omega_k=0.)
         cosmo = pyccl.Cosmology(**cosmo_dict)
         print(f"  - Cosmology", cosmo)

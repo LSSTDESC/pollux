@@ -285,7 +285,9 @@ class HACCReader(Reader):
             snap_sub_match_dist_n=False,
             snap_sub_every_n=1,
             shell_edges_match='center_scale_factor',
-            group_along_x=False):
+            group_along_x=False,
+            matter_power_spectrum=None,
+    ):
         """Reader for HACC simulations
 
         Parameters
@@ -324,7 +326,7 @@ class HACCReader(Reader):
         print(f"  - Reading parameter file at", fname)
         params = read_params(fname)
 
-        # create cosmo object that can be used by builder
+        # create cosmo object that can be used by builder  
         cosmo_dict = dict(
             Omega_c=float(params['OMEGA_CDM']),
             Omega_b=float(params['DEUT']) / float(params['HUBBLE'])**2,
@@ -337,6 +339,8 @@ class HACCReader(Reader):
             # T_CMB=float(params['T_CMB']),
             T_CMB=2.726,
             Omega_k=0.)
+        if matter_power_spectrum is not None:
+            cosmo_dict['matter_power_spectrum']=matter_power_spectrum
         cosmo = pyccl.Cosmology(**cosmo_dict)
         print(f"  - Cosmology", cosmo)
 

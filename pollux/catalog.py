@@ -49,8 +49,8 @@ class CatalogSourceGenerator(CatalogGenerator):
         self.Ngal = (nbar * area_arcmin).astype(int)
         self.area_pix = hp.nside2pixarea(self.nside, degrees=False) * (180. * 60. / np.pi)**2
         self.nbar_per_pix = nbar * self.area_pix
-        
-        self.header_dict = {f'NBAR_{i}':n for i,n in enumerate(self.nbar)}
+
+        self.header_dict = {f'NBAR_{i}': n for i, n in enumerate(self.nbar)}
 
     def generate(self, ikappas=None):
         """ 
@@ -127,7 +127,7 @@ class CatalogSourceGenerator(CatalogGenerator):
             interp_colums = [fits.Column(name=k, format='E', array=catalog[ikappa][k]) for k in self.interp_list]
 
             header = fits.Header()
-            for k,v in self.header_dict.items():
+            for k, v in self.header_dict.items():
                 header[k] = v
 
             hdul = [fits.PrimaryHDU(), fits.BinTableHDU.from_columns([ra, dec, z, chi] + interp_colums, header)]
@@ -152,7 +152,7 @@ class CatalogSourceUniform(CatalogSourceGenerator):
         Catalog generator sampling uniformly across the mask.
         """
         super().__init__(lensing, nbar, name, interp_list=interp_list, interp_pixels=interp_pixels)
-    
+
     def _generate_galaxies(self, catalog, ikappas=None):
         # Generate ra, dec and redshift
         for ikappa in self.lensing.tqdm(ikappas, desc="[generate] generating ra, dec, z"):
@@ -163,10 +163,9 @@ class CatalogSourceUniform(CatalogSourceGenerator):
                 catalog[ikappa][k] = np.zeros_like(catalog[ikappa]['z'])
 
     def _generate_pos(self, catalog, ikappa):
+        rng = np.random.default_rng(self.lensing.shell_builder.seed + ikappa * self.nshells)
+
         # Generate random positions with a uniform distribution over the footprint
-        
-        rng = np.random.default_rng(self.lensing.shell_builder.seed + ikappa*self.nshells)
-        
         if self.lensing.octant_only:
             ra = rng.uniform(0., 90., self.Ngal[ikappa])
             dec = np.rad2deg(np.arcsin(np.random.uniform(0., 1., self.Ngal[ikappa])))
@@ -176,17 +175,17 @@ class CatalogSourceUniform(CatalogSourceGenerator):
 
         catalog[ikappa]['ra'] = ra
         catalog[ikappa]['dec'] = dec
-        
+
     def _generate_z(self, catalog, ikappa):
         reader = self.lensing.reader
         z_bins_edges = reader.shell_edges_redshift()
+
+        rng = np.random.default_rng(self.lensing.shell_builder.seed + ikappa * self.nshells)
 
         # Generate redshifts according to lensing object redshift distributions (using cdf sampling)
         t = self.lensing.get_tracers()[ikappa]
         zz = np.linspace(0, z_bins_edges[-1], 1000)
         nz = t.get_dndz(zz)
-        
-        rng = np.random.default_rng(self.lensing.shell_builder.seed + ikappa*self.nshells)
 
         z = sample_pdf(zz, nz, self.Ngal[ikappa], rng)
         chi = reader.cosmo.comoving_radial_distance(1. / (1. + z))
@@ -206,7 +205,7 @@ class CatalogSourceClusteredMultinomial(CatalogSourceUniform):
 
         assert len(biases) == self.lensing.nmaps
         self.biases = biases
-        for i,b in enumerate(self.biases):
+        for i, b in enumerate(self.biases):
             self.header_dict[f'BIAS_{i}'] = b
 
     def _generate_galaxies(self, catalog, ikappas=None):
@@ -258,7 +257,7 @@ class CatalogSourceClusteredPoisson(CatalogSourceGenerator):
 
         assert len(biases) == self.lensing.nmaps
         self.biases = biases
-        for i,b in enumerate(self.biases):
+        for i, b in enumerate(self.biases):
             self.header_dict[f'BIAS_{i}'] = b
 
     def _generate_galaxies(self, catalog, ikappas=None):
@@ -300,9 +299,8 @@ class CatalogSourceClusteredPoisson(CatalogSourceGenerator):
 
         # Loop over tomographic bins
         for ikappa in self.lensing.tqdm(ikappas, leave=False):
-            
-            rng = np.random.default_rng(self.lensing.shell_builder.seed + ishell + ikappa*self.nshells)
-            
+            rng = np.random.default_rng(self.lensing.shell_builder.seed + ishell + ikappa * self.nshells)
+
             # Poisson sampling
             p = np.clip(1. + self.biases[ikappa] * density_masked, 0., None)
             lam = p * self.nbar_per_pix_per_bin[ikappa][ishell]
@@ -318,15 +316,15 @@ class CatalogSourceClusteredPoisson(CatalogSourceGenerator):
     def _generate_z(self, catalog, ikappa):
         reader = self.lensing.reader
         z_bins_edges = reader.shell_edges_redshift()
-        
+
         t = self.lensing.get_tracers()[ikappa]
         for ishell in self.lensing.shell_builder.tqdm(None, disable=True):
-            
-            rng = np.random.default_rng(self.lensing.shell_builder.seed + ishell + ikappa*self.nshells)
-            
+            rng = np.random.default_rng(self.lensing.shell_builder.seed + ishell + ikappa * self.nshells)
+
             zz = np.linspace(z_bins_edges[ishell], z_bins_edges[ishell + 1], 100)
             nz = t.get_dndz(zz)
             ngal = len(catalog[ikappa]['ra'][ishell])
+
             catalog[ikappa]['z'].append(sample_pdf(zz, nz, ngal, rng))
             catalog[ikappa]['idx_shell'].append(np.full(ngal, ishell))
 

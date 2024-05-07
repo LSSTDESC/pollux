@@ -972,14 +972,14 @@ def _construct_maps_sub_helper(xyz, box_edges_original, A, b, nrepeat, boxsize, 
     Parallelized helper function for ShellBuilder.construct_shell_sub
     """
     n = len(xyz)
-
+    
     # precompute isometry on particles (since repeats are then only a shift away)
     if apply_random_isometry:
         xyz = Axpb(A, b, xyz)
         box_edges = Axpb(A, b, box_edges_original)
     else:
         box_edges = box_edges_original
-
+    
     count = np.zeros(npix, dtype=np.uint)
 
     dtype = xyz.dtype
@@ -997,13 +997,12 @@ def _construct_maps_sub_helper(xyz, box_edges_original, A, b, nrepeat, boxsize, 
 
                 # apply isometry to box edges
                 tmp_box_edges = shift + box_edges
-
+                
                 # check if box intersects octant, otherwise skip
                 # (to do so, we check if the box is fully contained in the x<0 or y<0 or z<0 half spaces)
                 if octant_only:
-                    for i in range(3):
-                        if np.all(tmp_box_edges[:, i] <= 0.):
-                            continue
+                    if np.any(np.all(tmp_box_edges <= 0., axis=0))
+                        continue
 
                 ## check if box intersects with shell, otherwise skip
                 # first, check if box fully inside inner sphere
@@ -1018,12 +1017,12 @@ def _construct_maps_sub_helper(xyz, box_edges_original, A, b, nrepeat, boxsize, 
                 ## add particles to shell
                 # compute corresponding healpy pixels of all particles (particles out of shell/octant quickly set to -1) with vec2pix and loc2pix (translated into python from Healpix code)
                 ipix = _vec2pix(nside, order, ncap, npix, xyz[:, 0], xyz[:, 1], xyz[:, 2], shift[0, 0], shift[0, 1], shift[0, 2], rmin2, rmax2, octant_only)
-
+                
                 for i in range(n):
                     pos = ipix[i]
                     if pos >= 0:
                         count[pos] += 1
-
+                                
     u = np.argwhere(count)[:, 0]
     return u, count[u]
 

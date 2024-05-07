@@ -475,8 +475,12 @@ class HACCReader(Reader):
         if assert_xyz_in_box:
             for i in range(3):
                 assert np.all(np.min(box_edges[:, i]) <= xyz[:, i]) and np.all(xyz[:, i] <= np.max(box_edges[:, i]))
+        else:
+            box_lims = np.stack([np.min(xyz, axis=0), np.max(xyz, axis=0)])
+            cube_nodes = ((np.arange(8)[:, None] & (1 << np.arange(3))) > 0).astype(int)  #[(0,0,0),(0,0,1),...,(1,1,1)]
+            box_edges = box_lims[0] + (box_lims[1] - box_lims[0]) * cube_nodes
 
-        return xyz, box_edges
+        return xyz, box_edges.astype(self.dtype)
 
 
 class HACCHaloReader(HACCReader):

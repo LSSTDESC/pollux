@@ -655,18 +655,22 @@ class MapBuilder:
                 cl[i, j] = np.dot(bpws, hp.pixwin(self.nside)**2 * cl_raw)
                 if add_noise and i == j:
                     cl[i, j] += np.dot(bpws, hp.pixwin(self.nside)**2 * self._noise_cls(i))
-        
+
         if error_bars:
             dcl = {}
+            # Diagonal error bars
             for i, j in pairs:
                 if i == j:
                     dcl2_num = 2 * (cl[i, i] + self._noise_cls(i))**2
                 else:
                     dcl2_num = (cl[i, i] + self._noise_cls(i)) * (cl[j, j] + self._noise_cls(j)) + cl[order(i, j)]**2
                 dcl[i, j] = np.sqrt(dcl2_num / ((2 * ell + 1.) * fsky * nell))
+
             if stacked:
                 dcl_full = {}
                 Dl = {}
+
+                # Compute covariance blocks
                 for i, j in pairs:
                     Dl[i, j] = np.copy(cl[i, j])
                     Dl[j, i] = np.copy(cl[i, j])
@@ -675,12 +679,15 @@ class MapBuilder:
                 for i, j in pairs:
                     for k, l in pairs:
                         dcl_full[i, j, k, l] = (Dl[i, l] * Dl[j, k] + Dl[i, k] * Dl[j, l]) / ((2 * ell + 1.) * fsky * nell)
+
+                # Stack Cl's and covariance blocks
                 cl_stacked = np.zeros(len(pairs) * len(ell))
                 cov = np.zeros([len(pairs) * len(ell), len(pairs) * len(ell)])
-                for nrow, (i,j) in enumerate(pairs):
-                    cl_stacked[nrow * len(ell) : (nrow + 1) * len(ell)] = np.copy(cl[i, j])
-                    for ncol, (k,l) in enumerate(pairs):
-                        cov[nrow * len(ell) : (nrow + 1) * len(ell), ncol * len(ell) : (ncol + 1) * len(ell)] = np.diag(dcl_full[i, j, k, l])
+                for nrow, (i, j) in enumerate(pairs):
+                    cl_stacked[nrow * len(ell):(nrow + 1) * len(ell)] = np.copy(cl[i, j])
+                    for ncol, (k, l) in enumerate(pairs):
+                        cov[nrow * len(ell):(nrow + 1) * len(ell), ncol * len(ell):(ncol + 1) * len(ell)] = np.diag(dcl_full[i, j, k, l])
+
                 if keep_cls:
                     self.predicted_cls = ell, cl, dcl, cl_stacked, cov
                 return ell, cl, dcl, cl_stacked, cov
@@ -691,8 +698,8 @@ class MapBuilder:
         else:
             if stacked:
                 cl_stacked = np.zeros(len(pairs) * len(ell))
-                for nrow, (i,j) in enumerate(pairs):
-                    cl_stacked[nrow * len(ell) : (nrow + 1) * len(ell)] = np.copy(cl[i, j])
+                for nrow, (i, j) in enumerate(pairs):
+                    cl_stacked[nrow * len(ell):(nrow + 1) * len(ell)] = np.copy(cl[i, j])
                 if keep_cls:
                     self.predicted_cls = ell, cl, cl_stacked
                 return ell, cl, cl_stacked
@@ -700,7 +707,7 @@ class MapBuilder:
                 if keep_cls:
                     self.predicted_cls = ell, cl
                 return ell, cl
-        
+
     def triangle_plot_cls(
             self,
             auto_only=False,

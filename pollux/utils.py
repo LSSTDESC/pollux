@@ -67,18 +67,7 @@ def _add_at(a, index, b):
 
 
 def make_healpix_map(
-        ra,
-        dec,
-        quantity,
-        nside,
-        mask=None,
-        weight=None,
-        ipix=None,
-        fill_UNSEEN=False,
-        return_w_maps=False,
-        return_extra=False,
-        nest=True,
-        mode='mean'):
+        ra, dec, quantity, nside, mask=None, weight=None, ipix=None, fill_UNSEEN=False, return_w_maps=False, return_extra=False, nest=True, mode='mean'):
     """
     Creates healpix maps of quantity observed at ra, dec (in degrees) by taking
     the mean or sum of quantity in each pixel.
@@ -251,17 +240,7 @@ def make_mask_radec_cuts(nside, ramin, ramax, decmin, decmax, dtype=float, nest=
     return mask
 
 
-def make_nmtbin(
-        nside,
-        lmin,
-        lmax,
-        n_ell_bins,
-        bin_func=np.linspace,
-        f_ell=None,
-        verbose=False,
-        b_lmax=None,
-        bins_ell=None,
-        **kwargs):
+def make_nmtbin(nside, lmin, lmax, n_ell_bins, bin_func=np.linspace, f_ell=None, verbose=False, b_lmax=None, bins_ell=None, **kwargs):
     """Create a NaMaster binning object `NmtBin`
 
     Parameters
@@ -293,8 +272,7 @@ def make_nmtbin(
     ells = np.arange(lmin, lmax + 1)
 
     if lmax > 3 * nside:
-        warnings.warn(
-            "Warning: lmax>3*nside so multipoles will be removed after 3*snide, but lmax will be used for binning.")
+        warnings.warn("Warning: lmax>3*nside so multipoles will be removed after 3*snide, but lmax will be used for binning.")
 
     # Make bin limits
     if bins_ell is not None:
@@ -451,7 +429,7 @@ def sample_pdf(x, pdf, n, rng):
 
 def save_dict_fits_file(fname, cat):
     hdul = [fits.PrimaryHDU()]
-        
+
     header = fits.Header()
     cols = []
     for name, array in cat.items():

@@ -1001,7 +1001,7 @@ def _construct_maps_sub_helper(xyz, box_edges_original, A, b, nrepeat, boxsize, 
                 # check if box intersects octant, otherwise skip
                 # (to do so, we check if the box is fully contained in the x<0 or y<0 or z<0 half spaces)
                 if octant_only:
-                    if np.any(np.all(tmp_box_edges <= 0., axis=0))
+                    if np.any([np.all(tmp_box_edges[:,i] <= 0.) for i in range(3)]):
                         continue
 
                 ## check if box intersects with shell, otherwise skip
@@ -1065,9 +1065,8 @@ def _construct_catalog_sub_helper(xyz, box_edges_original, A, b, nrepeat, boxsiz
                 # check if box intersects octant, otherwise skip
                 # (to do so, we check if the box is fully contained in the x<0 or y<0 or z<0 half spaces)
                 if octant_only:
-                    for i in range(3):
-                        if np.all(tmp_box_edges[:, i] <= 0.):
-                            continue
+                    if np.any([np.all(tmp_box_edges[:,i] <= 0.) for i in range(3)]):
+                        continue
 
                 ## check if box intersects with shell, otherwise skip
                 # first, check if box fully inside inner sphere

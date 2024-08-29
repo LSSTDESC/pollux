@@ -284,6 +284,7 @@ class HACCReader(Reader):
             snap_sub_aminstep=0.,
             snap_sub_match_dist_n=False,
             snap_sub_every_n=1,
+            snap_sub_index=None,
             shell_edges_match='center_scale_factor',
             group_along_x=False,
             matter_power_spectrum=None,
@@ -398,7 +399,10 @@ class HACCReader(Reader):
             snapshots = snapshots[idx]
 
         # subsample snapshots : every n'ths snapshots
-        self.snapshots = snapshots[::-snap_sub_every_n]  # snapshots ordered by redshift
+        if snap_sub_index is not None:
+            self.snapshots = snap_sub_index
+        else:
+            self.snapshots = snapshots[::-snap_sub_every_n]  # snapshots ordered by redshift
 
         if snap_sub_every_n > 1:
             print(f"  - Subsampling : keeping every {snap_sub_every_n} snapshots, returns {len(self.snapshots)} snapshots")

@@ -284,6 +284,7 @@ class HACCReader(Reader):
             snap_sub_aminstep=0.,
             snap_sub_match_dist_n=False,
             snap_sub_every_n=1,
+            snap_sub_index=None,
             shell_edges_match='center_scale_factor',
             group_along_x=False,
             matter_power_spectrum=None,
@@ -367,38 +368,41 @@ class HACCReader(Reader):
             asnapshots_all = np.linspace(1. / (1. + sim_zmax), 1. / (1. + sim_zmin), nsteps + 1)[1:]
             return asnapshots_all[idx]
 
-        # subsample snapshots : minimum step in scale factor
-        if snap_sub_aminstep > 0.:
-            _, idx = trim_array(get_asnapshots(snapshots), snap_sub_aminstep, return_indices=True)
-            print(f"  - Subsampling : minimum a step {snap_sub_aminstep}, returns {len(idx)} snapshots")
-            snapshots = snapshots[idx]
-
-        # subsample snapshots : maximum redshift
-        if snap_sub_zmax is not None:
-            w = np.argwhere(get_asnapshots(snapshots) > 1. / (1. + snap_sub_zmax))
-            if len(w) > 0:
-                snapshots = snapshots[w[0, 0]:]
-                print(f"  - Subsampling : max redshift {snap_sub_zmax}, returns {len(snapshots)} snapshots")
-
-        # subsample snapshots : match inferred bimodal distribution
-        if snap_sub_match_dist_n:
-            aa = get_asnapshots(snapshots)
-
-            # multimodal distribution in scale factor, need ppf (computed numerically)
-            s1, s2, lam = 0.12, 0.27, 0.4
-            amin = np.min(aa)
-            t1 = trunc_norm(amin, 1., 0.5, s1)
-            t2 = trunc_norm(amin, 1., 1., s2)
-            cdf = lambda a: lam * t1.cdf(a) + (1 - lam) * t2.cdf(a)
-            ppf = inversefunc(cdf, domain=[amin, 1.], image=[0., 1.])
-
-            idx, _ = subsample_ppf(aa, snap_sub_match_dist_n, ppf)
-            if len(idx) < len(snapshots):
-                print(f"  - Subsampling : match distribution, returns {len(idx)} snapshots")
-            snapshots = snapshots[idx]
-
-        # subsample snapshots : every n'ths snapshots
-        self.snapshots = snapshots[::-snap_sub_every_n]  # snapshots ordered by redshift
+        if snap_sub_index is not None:
+            self.snapshots = snap_sub_index
+        else:
+            # subsample snapshots : minimum step in scale factor
+            if snap_sub_aminstep > 0.:
+                _, idx = trim_array(get_asnapshots(snapshots), snap_sub_aminstep, return_indices=True)
+                print(f"  - Subsampling : minimum a step {snap_sub_aminstep}, returns {len(idx)} snapshots")
+                snapshots = snapshots[idx]
+    
+            # subsample snapshots : maximum redshift
+            if snap_sub_zmax is not None:
+                w = np.argwhere(get_asnapshots(snapshots) > 1. / (1. + snap_sub_zmax))
+                if len(w) > 0:
+                    snapshots = snapshots[w[0, 0]:]
+                    print(f"  - Subsampling : max redshift {snap_sub_zmax}, returns {len(snapshots)} snapshots")
+    
+            # subsample snapshots : match inferred bimodal distribution
+            if snap_sub_match_dist_n:
+                aa = get_asnapshots(snapshots)
+    
+                # multimodal distribution in scale factor, need ppf (computed numerically)
+                s1, s2, lam = 0.12, 0.27, 0.4
+                amin = np.min(aa)
+                t1 = trunc_norm(amin, 1., 0.5, s1)
+                t2 = trunc_norm(amin, 1., 1., s2)
+                cdf = lambda a: lam * t1.cdf(a) + (1 - lam) * t2.cdf(a)
+                ppf = inversefunc(cdf, domain=[amin, 1.], image=[0., 1.])
+    
+                idx, _ = subsample_ppf(aa, snap_sub_match_dist_n, ppf)
+                if len(idx) < len(snapshots):
+                    print(f"  - Subsampling : match distribution, returns {len(idx)} snapshots")
+                snapshots = snapshots[idx]
+    
+            # subsample snapshots : every n'ths snapshots
+            self.snapshots = snapshots[::-snap_sub_every_n]  # snapshots ordered by redshift
 
         if snap_sub_every_n > 1:
             print(f"  - Subsampling : keeping every {snap_sub_every_n} snapshots, returns {len(self.snapshots)} snapshots")

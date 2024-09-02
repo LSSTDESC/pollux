@@ -266,8 +266,10 @@ class BornLensingBuilder(LensingBuilder):
         for ishell in trange(self.nshells, desc="[construct_maps]"):
             shell = (self.shell_builder.load_maps(ishell)).astype(self.dtype)
             if self.nbar_from_maps:
-                s = shell[:]
-                nbar = np.mean(s[s > 0.])
+                if self.octant_only:
+                    nbar = shell.get_values_pix(shell.valid_pixels,nest=True).sum()/(self.npix / 8.)
+                else:
+                    nbar = shell.get_values_pix(shell.valid_pixels,nest=True).sum()/self.npix
             else:
                 nbar = self.shell_builder.get_pixel_density(ishell)
 

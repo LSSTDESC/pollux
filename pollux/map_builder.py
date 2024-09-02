@@ -676,17 +676,29 @@ class MapBuilder:
                     Dl[j, i] = np.copy(cl[i, j])
                     if i == j:
                         Dl[i, j] += self._noise_cls(i)
-                for i, j in pairs:
-                    for k, l in pairs:
-                        dcl_full[i, j, k, l] = (Dl[i, l] * Dl[j, k] + Dl[i, k] * Dl[j, l]) / ((2 * ell + 1.) * fsky * nell)
+                
+                if auto_only:
+                    for i, j in pairs:
+                        dcl_full[i, j, i, j] = (Dl[i, j] * Dl[j, i] + Dl[i, i] * Dl[j, j]) / ((2 * ell + 1.) * fsky * nell)
 
-                # Stack Cl's and covariance blocks
-                cl_stacked = np.zeros(len(pairs) * len(ell))
-                cov = np.zeros([len(pairs) * len(ell), len(pairs) * len(ell)])
-                for nrow, (i, j) in enumerate(pairs):
-                    cl_stacked[nrow * len(ell):(nrow + 1) * len(ell)] = np.copy(cl[i, j])
-                    for ncol, (k, l) in enumerate(pairs):
-                        cov[nrow * len(ell):(nrow + 1) * len(ell), ncol * len(ell):(ncol + 1) * len(ell)] = np.diag(dcl_full[i, j, k, l])
+                    # Stack Cl's and covariance blocks
+                    cl_stacked = np.zeros(len(pairs) * len(ell))
+                    cov = np.zeros([len(pairs) * len(ell), len(pairs) * len(ell)])
+                    for nrow, (i, j) in enumerate(pairs):
+                        cl_stacked[nrow * len(ell):(nrow + 1) * len(ell)] = np.copy(cl[i, j])
+                        cov[nrow * len(ell):(nrow + 1) * len(ell), nrow * len(ell):(nrow + 1) * len(ell)] = np.diag(dcl_full[i, j, i, j])
+                else:
+                    for i, j in pairs:
+                        for k, l in pairs:
+                            dcl_full[i, j, k, l] = (Dl[i, l] * Dl[j, k] + Dl[i, k] * Dl[j, l]) / ((2 * ell + 1.) * fsky * nell)
+
+                    # Stack Cl's and covariance blocks
+                    cl_stacked = np.zeros(len(pairs) * len(ell))
+                    cov = np.zeros([len(pairs) * len(ell), len(pairs) * len(ell)])
+                    for nrow, (i, j) in enumerate(pairs):
+                        cl_stacked[nrow * len(ell):(nrow + 1) * len(ell)] = np.copy(cl[i, j])
+                        for ncol, (k, l) in enumerate(pairs):
+                            cov[nrow * len(ell):(nrow + 1) * len(ell), ncol * len(ell):(ncol + 1) * len(ell)] = np.diag(dcl_full[i, j, k, l])
 
                 if keep_cls:
                     self.predicted_cls = ell, cl, dcl, cl_stacked, cov

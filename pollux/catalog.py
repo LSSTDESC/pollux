@@ -13,7 +13,7 @@ class CatalogGenerator:
 
 class CatalogSourceGenerator(CatalogGenerator):
 
-    def __init__(self, lensing, nbar, name, interp_list=['kappa', 'gamma1', 'gamma2'], interp_pixels=True):
+    def __init__(self, lensing, nbar, name, interp_list=['kappa', 'gamma1', 'gamma2'], interp_pixels=True, remove_mean_list=['kappa']):
         """`CatalogSourceGenerator` is a generic class to generate mock catalogs of source galaxies (ie those used in lensing).
 
         Parameters
@@ -40,6 +40,7 @@ class CatalogSourceGenerator(CatalogGenerator):
 
         self.interp_list = interp_list
         self.interp_pixels = interp_pixels
+        self.remove_mean_list = remove_mean_list
 
         self.name = name
 
@@ -86,6 +87,12 @@ class CatalogSourceGenerator(CatalogGenerator):
                         map_high = self.lensing.shell_builder.load_maps(ishell, what=k)
                     else:
                         map_high = self.snap_lensing.load_maps(ishell, what=None if k == 'kappa' else k)
+                if k in self.remove_mean_list:
+                    print('Removing mean from '+k+' map')
+                    valid_pixels = map_high.valid_pixels
+                    values = map_high.get_values_pix(valid_pixels)
+                    values -= values.mean()
+                    map_high.update_values_pix(valid_pixels, values)
 
                 chi_low, chi_high = chi_bins_edges[[ishell, ishell + 1]]
 
@@ -147,11 +154,11 @@ class CatalogSourceGenerator(CatalogGenerator):
 
 class CatalogSourceUniform(CatalogSourceGenerator):
 
-    def __init__(self, lensing, nbar, name='catuniform', interp_list=['kappa', 'gamma1', 'gamma2'], interp_pixels=True):
+    def __init__(self, lensing, nbar, name='catuniform', interp_list=['kappa', 'gamma1', 'gamma2'], interp_pixels=True, remove_mean_list=['kappa']):
         """
         Catalog generator sampling uniformly across the mask.
         """
-        super().__init__(lensing, nbar, name, interp_list=interp_list, interp_pixels=interp_pixels)
+        super().__init__(lensing, nbar, name, interp_list=interp_list, interp_pixels=interp_pixels, remove_mean_list=remove_mean_list)
 
     def _generate_galaxies(self, catalog, ikappas=None):
         # Generate ra, dec and redshift
@@ -168,10 +175,10 @@ class CatalogSourceUniform(CatalogSourceGenerator):
         # Generate random positions with a uniform distribution over the footprint
         if self.lensing.octant_only:
             ra = rng.uniform(0., 90., self.Ngal[ikappa])
-            dec = np.rad2deg(np.arcsin(np.random.uniform(0., 1., self.Ngal[ikappa])))
+            dec = np.rad2deg(np.arcsin(rng.uniform(0., 1., self.Ngal[ikappa])))
         else:
             ra = rng.uniform(0., 360., self.Ngal[ikappa])
-            dec = np.rad2deg(np.arcsin(np.random.uniform(-1., 1., self.Ngal[ikappa])))
+            dec = np.rad2deg(np.arcsin(rng.uniform(-1., 1., self.Ngal[ikappa])))
 
         catalog[ikappa]['ra'] = ra
         catalog[ikappa]['dec'] = dec
@@ -197,11 +204,11 @@ class CatalogSourceUniform(CatalogSourceGenerator):
 
 class CatalogSourceClusteredMultinomial(CatalogSourceUniform):
 
-    def __init__(self, lensing, nbar, biases, name='catmultinom', interp_list=['kappa', 'gamma1', 'gamma2'], interp_pixels=True):
+    def __init__(self, lensing, nbar, biases, name='catmultinom', interp_list=['kappa', 'gamma1', 'gamma2'], interp_pixels=True, remove_mean_list=['kappa']):
         """
         Catalog generator sampling the lightcone density field from a multionomial distribution (total number of galaxies fixed).
         """
-        super().__init__(lensing, nbar, name, interp_list=interp_list, interp_pixels=interp_pixels)
+        super().__init__(lensing, nbar, name, interp_list=interp_list, interp_pixels=interp_pixels, remove_mean_list=remove_mean_list)
 
         assert len(biases) == self.lensing.nmaps
         self.biases = biases
@@ -249,11 +256,11 @@ class CatalogSourceClusteredMultinomial(CatalogSourceUniform):
 
 class CatalogSourceClusteredPoisson(CatalogSourceGenerator):
 
-    def __init__(self, lensing, nbar, biases, name='catpoisson', interp_list=['kappa', 'gamma1', 'gamma2'], interp_pixels=True):
+    def __init__(self, lensing, nbar, biases, name='catpoisson', interp_list=['kappa', 'gamma1', 'gamma2'], interp_pixels=True, remove_mean_list=['kappa']):
         """
         Catalog generator sampling the lightcone density field from a Poisson distribution (total number of galaxies fluctuates).
         """
-        super().__init__(lensing, nbar, name, interp_list=interp_list, interp_pixels=interp_pixels)
+        super().__init__(lensing, nbar, name, interp_list=interp_list, interp_pixels=interp_pixels, remove_mean_list=remove_mean_list)
 
         assert len(biases) == self.lensing.nmaps
         self.biases = biases

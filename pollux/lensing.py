@@ -71,7 +71,7 @@ class LensingBuilder(MapBuilder):
             nside=shell_builder.nside, dtype=dtype, save_dir=save_dir, base_fname=base_fname, nmaps=self.nkappas, sacc_type="galaxy_convergence_cl", **kwargs)
 
     def _create_tracers(self, Nz=1000):
-        z_shell_bins = self.reader.shell_edges_redshift()
+        z_shell_bins = self.shell_builder.shell_edges_redshift()
 
         tracers = []
         if self.nzs == 'zsnapshots':
@@ -88,7 +88,7 @@ class LensingBuilder(MapBuilder):
         return tracers
 
     def _create_tracers_sacc(self, Nz=1000):
-        z_shell_bins = self.reader.shell_edges_redshift()
+        z_shell_bins = self.shell_builder.shell_edges_redshift()
 
         tracers = []
         if self.nzs == 'zsnapshots':
@@ -196,7 +196,7 @@ class BornLensingBuilder(LensingBuilder):
 
             self.mpart_over_area = mpart / area
 
-            zmax = self.reader.shell_edges_redshift()[-1]
+            zmax = self.shell_builder.shell_edges_redshift()[-1]
             self.dndz_norm = [quad(lambda z: t.get_dndz(z), 0., zmax) if isinstance(t, pyccl.tracers.WeakLensingTracer) else np.nan for t in self.get_tracers()]
             self.zlens = [self.shell_builder.get_mean_z(ishell) for ishell in range(self.nshells)]
 
@@ -213,7 +213,7 @@ class BornLensingBuilder(LensingBuilder):
         tracer = self.get_tracers()[ikappa]
 
         if self.multiple_planes:
-            zmax = self.reader.shell_edges_redshift()[-1]
+            zmax = self.shell_builder.shell_edges_redshift()[-1]
             zlens = self.zlens[ishell]
 
             if zlens is None:
@@ -240,7 +240,7 @@ class BornLensingBuilder(LensingBuilder):
 
             return w * self.mpart_over_area / d_A_lens**2
         else:
-            chi_min, chi_max = self.reader.shell_edges_comoving_distance()[ishell:ishell + 2]
+            chi_min, chi_max = self.shell_builder.shell_edges_comoving_distance()[ishell:ishell + 2]
             return quad(lambda chi: tracer.get_kernel(chi), chi_min, chi_max)
 
     def construct_maps(self, ikappas=None):
@@ -253,7 +253,7 @@ class BornLensingBuilder(LensingBuilder):
 
         _ikappas = []
         for ikappa in ikappas:
-            fname = self.get_fname(ikappa, what='alms', force_fits=True)
+            fname = self.get_fname(ikappa, what='alms', format='fits')
             if not self.check_maps(ikappa, read=True):
                 _ikappas.append(ikappa)
         if len(_ikappas) == 0:

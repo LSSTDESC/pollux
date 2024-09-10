@@ -331,22 +331,27 @@ def make_nmtbin_powspaced(nside, lmin, lmax, n_ell_bins, power, f_ell=None, **kw
     return make_nmtbin(nside, lmin, lmax, n_ell_bins, bin_func=partial(powspace, power=power), f_ell=f_ell, **kwargs)
 
 
-def trim_array(a, mindiff, return_indices=False):
+def split_bins(x, func=None, ifunc=None, zmax=None):
     """
-    Trim a monotonously increasing array such that the difference between adjacent values is the largest possible below `mindiff`
+    Compute the redshift of the shell edges, set at the center in some space defined by `func` or its inverse `ifunc`
     """
-    x = [a[0]]
-    idx = [0]
-    for i in range(1, len(a) - 1):
-        if a[i + 1] - x[-1] > mindiff:
-            x.append(a[i])
-            idx.append(i)
-    x.append(a[i + 1])
-    idx.append(i + 1)
-    if return_indices:
-        return np.array(x), idx
+    assert func or ifunc
+
+    if func is None:
+        func = inversefunc(ifunc, domain=[0., None], image=[0., None])
+    if ifunc is None:
+        ifunc = inversefunc(func, domain=[0., None], image=[0., None])
+
+    n = len(x)
+    bins = np.zeros(n + 1)
+    bins[1:n] = ifunc(0.5 * (func(x[:-1]) + func(x[1:])))
+
+    if zmax is None:
+        bins[n] = ifunc(2 * func(x[-1]) - func(bins[n - 1]))
     else:
-        return np.array(x)
+        bins[n] = zmax
+
+    return bins
 
 
 def read_params(fname):
@@ -365,26 +370,72 @@ def read_params(fname):
     return params
 
 
-def compute_shell_edges(zsnapshots, func=None, ifunc=None, zmax=None, return_fzbins=False):
+def save_dict_fits_file(fname, cat):
     """
-    Compute the redshift of the shell edges, set at the center in some space defined by `func` or its inverse `ifunc`
+    Dump a dictionary of floats to a fits file table.
     """
-    assert func or ifunc
-    if func is None:
-        func = inversefunc(ifunc, domain=[0., None], image=[0., None])
-    if ifunc is None:
-        ifunc = inversefunc(func, domain=[0., None], image=[0., None])
-    nshell = len(zsnapshots)
-    z_shell_bins = np.zeros(nshell + 1)
-    z_shell_bins[1:nshell] = ifunc(0.5 * (func(zsnapshots[:-1]) + func(zsnapshots[1:])))
-    if zmax is None:
-        z_shell_bins[nshell] = ifunc(2 * func(zsnapshots[-1]) - func(z_shell_bins[nshell - 1]))
+    hdul = [fits.PrimaryHDU()]
+    header = fits.Header()
+
+    cols = []
+    for name, array in cat.items():
+        cols.append(fits.Column(name=name, format='E', array=array))
+    hdul.append(fits.BinTableHDU.from_columns(cols, header))
+
+    fits.HDUList(hdul).writeto(fname, overwrite=True)
+
+
+def trim(a, mindiff, return_indices=False):
+    """
+    Trim a monotonously increasing array such that the difference between adjacent values is the largest possible below `mindiff`
+    """
+    x = [a[0]]
+    idx = [0]
+    for i in range(1, len(a) - 1):
+        if a[i + 1] - x[-1] > mindiff:
+            x.append(a[i])
+            idx.append(i)
+    x.append(a[i + 1])
+    idx.append(i + 1)
+    if return_indices:
+        return np.array(x), idx
     else:
-        z_shell_bins[nshell] = zmax
-    if return_fzbins:
-        return z_shell_bins, func(z_shell_bins)
-    else:
-        return z_shell_bins
+        return np.array(x)
+
+
+@numba.njit(parallel=True)
+def inter_diff(idx1, idx2):
+    """
+    Given two arrays of unique integer values, return the indices of their intersection and difference.
+    """
+
+    idx = np.concatenate((idx1, idx2))
+
+    order = np.argsort(idx, kind='mergesort')
+    sidx = idx[order]
+
+    # intersection
+    mask = sidx[1:] == sidx[:-1]
+    idx1_int = order[:-1][mask]
+    idx2_int = order[1:][mask] - idx1.size
+
+    # difference
+    flag = np.concatenate((np.array([True]), ~mask, np.array([True])))
+    z = order[flag[1:] & flag[:-1]]
+    w = z >= idx1.size
+    idx1_diff = z[~w]
+    idx2_diff = z[w] - idx1.size
+
+    return idx1_int, idx2_int, idx1_diff, idx2_diff
+
+
+def arange_endpoint(start, end, step):
+    """
+    np.arange but last point is replaced by `end`
+    """
+    out = np.arange(start, end, step)
+    out[-1] = end
+    return out
 
 
 def trunc_norm(myclip_a, myclip_b, loc, scale):
@@ -425,16 +476,3 @@ def sample_pdf(x, pdf, n, rng):
     cdf = np.insert(cdf, 0, 0.)
     u = rng.uniform(size=n)
     return np.interp(u, cdf, x)
-
-
-def save_dict_fits_file(fname, cat):
-    hdul = [fits.PrimaryHDU()]
-
-    header = fits.Header()
-    cols = []
-    for name, array in cat.items():
-        cols.append(fits.Column(name=name, format='E', array=array))
-
-    hdul.append(fits.BinTableHDU.from_columns(cols, header))
-
-    fits.HDUList(hdul).writeto(fname, overwrite=True)

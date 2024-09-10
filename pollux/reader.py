@@ -6,7 +6,9 @@ import numpy as np
 import pyccl
 from pynverse import inversefunc
 
-from .utils import (compute_shell_edges, read_params, subsample_ppf, trim_array, trunc_norm)
+from .utils import (read_params, subsample_ppf, trim, trunc_norm)
+
+from time import time
 
 os.environ["GENERICIO_NO_MPI"] = "y"
 try:
@@ -17,7 +19,7 @@ except:
 
 class Reader:
 
-    def __init__(self, cosmo, kind, unit, nparticles, zsnapshots, zmax, nsubs, shell_edges_match, dtype=np.float64):
+    def __init__(self, cosmo, kind, unit, nparticles, zsnapshots, zmax, nsubs, dtype=np.float64):
         """`Reader` is a generic class to read particles from N-body simulations.
 
         Parameters
@@ -36,8 +38,6 @@ class Reader:
             Maximum redshift considered
         nsubs
             Number of sub-boxes
-        shell_edges_match
-            Method to define shells for snapshots redshifts, must be 'center_redshift', 'center_scale_factor', 'center_comoving_distance' or 'center_comoving_volume'
         dtype, optional
             dtype of particle data, by default np.float64
         """
@@ -57,102 +57,44 @@ class Reader:
         if zmax is not None:
             assert np.all(self.zsnapshots < zmax)
         self.asnapshots = 1. / (1. + zsnapshots)
-        self.nshells = len(zsnapshots)
+        self.nsnapshots = len(zsnapshots)
         self.nsubs = nsubs
-        self.shell_edges_match = shell_edges_match
 
         # independent jobs
-        self._sub_args = list(itertools.product(range(self.nshells), range(nsubs)))
+        self._sub_args = list(itertools.product(range(self.nsnapshots), range(nsubs)))
         self.njobs = len(self._sub_args)
 
         self.dtype = dtype
 
-    def get_ishell(self, isub):
+    def get_isnapshot(self, isub):
         """
-        Get shell index from overall sub-volume/snapshot index
+        Get snapshot index from overall sub-volume/snapshot index
         """
         return self._sub_args[isub][0]
 
-    def get_isubs_for_shell(self, ishell):
+    def get_isubs_for_snapshot(self, isnapshot):
         """
-        Get sub-volume/snapshot indices for a given shell index
+        Get sub-volume/snapshot indices for a given snapshot index
         """
-        return np.argwhere([x[0] == ishell for x in self._sub_args])[:, 0]
-
-    def shell_edges_comoving_distance(self):
-        """
-        Compute comoving distance to shell edges
-        """
-        return pyccl.comoving_radial_distance(self.cosmo, 1. / (1 + self.shell_edges_redshift()))
-
-    def shell_edges_redshift(self, return_fzbins=False):
-        """Compute redshift to shell edges
-
-        Parameters
-        ----------
-        return_fzbins, optional
-            Whether to return the value of the function used to find center between snapshot redshifts, by default False
-
-        Returns
-        -------
-            Redshifts of shell edges
-        """
-        if hasattr(self, 'z_shell_bins'):
-            return self.z_shell_bins
-        else:
-            if self.shell_edges_match == 'center_redshift':
-                func = lambda z: z
-                ifunc = func
-            elif self.shell_edges_match == 'center_scale_factor':
-                func = lambda z: 1. / (1. + z)
-                ifunc = lambda a: 1. / a - 1.
-            elif self.shell_edges_match == 'center_comoving_distance':
-                func = lambda z: 1e-3 * pyccl.comoving_radial_distance(self.cosmo, 1. / (1. + z))
-                ifunc = None
-            elif self.shell_edges_match == 'center_comoving_volume':
-                func = lambda z: (1e-3 * pyccl.comoving_radial_distance(self.cosmo, 1. / (1. + z)))**3
-                ifunc = None
-            else:
-                raise ValueError
-
-            res = compute_shell_edges(self.zsnapshots, func=func, ifunc=ifunc, zmax=self.zmax, return_fzbins=return_fzbins)
-
-            if return_fzbins:
-                self.z_shell_bins = res[0]
-            else:
-                self.z_shell_bins = res
-
-            return self.z_shell_bins
-
-    def shell_info(self, fname=None):
-        z_shell_bins = self.shell_edges_redshift()
-        names = ['ishell', 'zsnapshot', 'zmin', 'zmax', 'snapshot_id']
-        dtypes = ['int', 'float', 'float', 'float', 'int']
-        out = np.array(list(zip(np.arange(self.nshells), self.zsnapshots, z_shell_bins[:-1], z_shell_bins[1:], self.snapshots)), dtype=list(zip(names, dtypes)))
-        if fname is not None:
-            if '.txt' in fname:
-                np.savetxt(fname, out, header=' '.join(names), fmt='%8i %16.8f %16.8f %16.8f %8i')
-            else:
-                np.save(fname, out)
-        return out
+        return np.argwhere([x[0] == isnapshot for x in self._sub_args])[:, 0]
 
     def boxsize(self):
         raise NotImplementedError
 
-    def read_sub(self, isub, verbose=False, assert_xyz_in_box=False, read_box_edges_only=False):
+    def read_sub(self, isub, assert_xyz_in_box=False, read_box_edges_only=False, extra_variables=[], verbose=False):
         """Reads a sub volume of a simulation snapshot.
 
         Parameters
         ----------
         isub
             Index of the sub-volume/snapshot element. This should be computed automatically.
-        verbose, optional
-            Print feedback, by default False
         assert_xyz_in_box, optional
             Check whether particle , by default False
         read_box_edges_only, optional
             Read only the sub-volume cube nodes, by default False
-
+        verbose, optional
+            Print feedback, by default False
+            
         Returns
         -------
             Particle positions and sub-volume cube nodes, to quickly determine if volume/shell intersect.
@@ -196,8 +138,7 @@ class SLICSReader(Reader):
             nodes_dim=4,
             ncc=768,
             rnc=3072.0,
-            zmax=None,
-            shell_edges_match='center_comoving_distance'):
+            zmax=None):
         """Reader for SLICS simulations by Joachim Harnois-Deraps.
 
         Parameters
@@ -218,8 +159,6 @@ class SLICSReader(Reader):
             Scale, by default 3072.0
         zmax, optional
             Maximum redshift considered, by default None
-        shell_edges_match, optional
-            Method to define shells, by default 'center_comoving_distance'
         """
         self.path = path
         self.boxsize = boxsize
@@ -233,14 +172,14 @@ class SLICSReader(Reader):
         # number of sub boxes (constant here)
         ncube = self.nodes_dim**3
 
-        super().__init__(cosmo, 'slics', 'Mpc', nparticles, zsnapshots, zmax, ncube, shell_edges_match, dtype=np.float32)
+        super().__init__(cosmo, 'slics', 'Mpc', nparticles, zsnapshots, zmax, ncube, dtype=np.float32)
 
     def boxsize(self):
         return self.boxsize
 
-    def read_sub(self, isub, verbose=False, assert_xyz_in_box=False, read_box_edges_only=False):
-        ishell, i = self._sub_args[isub]
-        z = self.zsnapshots[ishell]
+    def read_sub(self, isub, assert_xyz_in_box=False, read_box_edges_only=False, extra_variables=[], verbose=False):
+        isnapshot, i = self._sub_args[isub]
+        z = self.zsnapshots[isnapshot]
         filename = os.path.join(self.path, f'{z:.3f}xv{i}.dat')
 
         for k1 in range(self.nodes_dim):
@@ -284,7 +223,6 @@ class HACCReader(Reader):
             snap_sub_aminstep=0.,
             snap_sub_match_dist_n=False,
             snap_sub_every_n=1,
-            shell_edges_match='center_scale_factor',
             group_along_x=False,
             matter_power_spectrum=None,
     ):
@@ -310,8 +248,6 @@ class HACCReader(Reader):
             Minimum step in scale factor to downsample snapshots, by default 0.
         sampling_match_n, optional
             Number of snapshots to try to keep while matching roughly optimal distribution, by default False
-        shell_edges_match, optional
-            Method to define shells, by default 'center_comoving_distance'
         group_along_x, optional
             Whether to group sub-boxes along x to define contiguous box volumes, by default False
         """
@@ -369,7 +305,7 @@ class HACCReader(Reader):
 
         # subsample snapshots : minimum step in scale factor
         if snap_sub_aminstep > 0.:
-            _, idx = trim_array(get_asnapshots(snapshots), snap_sub_aminstep, return_indices=True)
+            _, idx = trim(get_asnapshots(snapshots), snap_sub_aminstep, return_indices=True)
             print(f"  - Subsampling : minimum a step {snap_sub_aminstep}, returns {len(idx)} snapshots")
             snapshots = snapshots[idx]
 
@@ -407,7 +343,6 @@ class HACCReader(Reader):
         zsnapshots = 1. / get_asnapshots(self.snapshots) - 1.
 
         # simulation properties
-
         if False:
             step = self.snapshots[0]
             name = os.path.join(self.path, 'output', f'STEP{step}/m000.full.mpicosmo.{step}')
@@ -424,7 +359,7 @@ class HACCReader(Reader):
                                [ibox % 4, (ibox % 4) + 1]] for ibox in range(64)])
 
         nsub = 16 if self.group_along_x else 64
-        super().__init__(cosmo, 'hacc', 'Mpc_over_h', nparticles, zsnapshots, snap_sub_zmax, nsub, shell_edges_match, dtype=dtype)
+        super().__init__(cosmo, 'hacc', 'Mpc_over_h', nparticles, zsnapshots, snap_sub_zmax, nsub, dtype=dtype)
 
     def boxsize(self):
         return self.boxsize_h / self.cosmo["h"]
@@ -438,7 +373,7 @@ class HACCReader(Reader):
         if self.group_along_x:
             box_lims = np.array([[0, 4], self.lims[ibox][1], self.lims[ibox][2]]) * boxsize / 4.
         else:
-            box_lims = np.array([self.lims[ibox][i] for i in range(3)]) * boxsize / 4.
+            box_lims = np.array([self.lims[ibox][i] for i in range(3)]) * boxsize / 4. # this is not always how sub-volumes are saved...
 
         cube_nodes = ((np.arange(8)[:, None] & (1 << np.arange(3))) > 0).astype(int)  #[(0,0,0),(0,0,1),...,(1,1,1)]
         box_edges = np.zeros(cube_nodes.shape)
@@ -451,25 +386,27 @@ class HACCReader(Reader):
     def _get_name(self, step, ifile):
         return os.path.join(self.path, 'output', f'STEP{step}/m000.full.mpicosmo.{step}#{ifile}')
 
-    def read_sub(self, isub, verbose=False, assert_xyz_in_box=False, read_box_edges_only=False):
+    def read_sub(self, isub, assert_xyz_in_box=False, read_box_edges_only=False, extra_variables=[], verbose=False):
         box_edges, ibox, step = self._read_sub_helper(isub)
+        
+        assert not (assert_xyz_in_box and read_box_edges_only)
 
         if read_box_edges_only:
             return np.zeros((17, 3), dtype=self.dtype), box_edges
 
-        out = {k: [] for k in self.variables}
-
+        out = {k: [] for k in self.variables+extra_variables}
+        
         nx = 4 if self.group_along_x else 1
         for ix in range(nx):
             ifile = ix * 16 + ibox
             name = self._get_name(step, ifile)
             if verbose:
                 print("Reading", name)
-            data = pygio.read_genericio(name, variables=self.variables)
-            for k in self.variables:
+            data = pygio.read_genericio(name, variables=self.variables+extra_variables)
+            for k in self.variables+extra_variables:
                 out[k].append(data[k])
+        
         xyz = np.array([np.concatenate(out[k]) for k in self.variables]).T
-
         xyz /= self.cosmo["h"]
 
         if assert_xyz_in_box:
@@ -480,7 +417,10 @@ class HACCReader(Reader):
             cube_nodes = ((np.arange(8)[:, None] & (1 << np.arange(3))) > 0).astype(int)  #[(0,0,0),(0,0,1),...,(1,1,1)]
             box_edges = box_lims[0] + (box_lims[1] - box_lims[0]) * cube_nodes
 
-        return xyz, box_edges.astype(self.dtype)
+        if len(extra_variables)>0:
+            return xyz, box_edges.astype(self.dtype), {k:np.concatenate(out[k]) for k in extra_variables}
+        else:
+            return xyz, box_edges.astype(self.dtype)
 
 
 class HACCHaloReader(HACCReader):
@@ -513,7 +453,7 @@ class HACCHaloReader(HACCReader):
 
 class SkySimReader(HACCReader):
 
-    def __init__(self, path, cosmo, nsteps=500, sim_zmin=0., sim_zmax=200., aminstep=0., zmax=None, shell_edges_match='center_scale_factor'):
+    def __init__(self, path, cosmo, nsteps=500, sim_zmin=0., sim_zmax=200., aminstep=0., zmax=None,):
         self.path = path
         self.aminstep = aminstep
 
@@ -526,7 +466,7 @@ class SkySimReader(HACCReader):
         asnapshots_all = np.linspace(amin, amax, nsteps + 1)[1:]
         asnapshots_all = asnapshots_all[snapshots]
 
-        asnapshots, idx = trim_array(asnapshots_all, self.aminstep, return_indices=True)
+        asnapshots, idx = trim(asnapshots_all, self.aminstep, return_indices=True)
         if len(idx) < len(snapshots):
             print(f"Subsampling snapshots with aminstep={aminstep} returns {len(idx)} snapshots")
         zsnapshots = 1. / asnapshots[::-1] - 1.
@@ -545,30 +485,26 @@ class SkySimReader(HACCReader):
         dtype = np.float32
         nsub = 1
 
-        Reader.__init__(self, cosmo, 'skysim', 'Mpc_over_h', nparticles, zsnapshots, zmax, nsub, shell_edges_match, dtype=dtype)
+        Reader.__init__(self, cosmo, 'skysim', 'Mpc_over_h', nparticles, zsnapshots, zmax, nsub, dtype=dtype)
 
 
 class MockReader(Reader):
 
-    def __init__(self, cosmo, boxsize=200., nshells=3, nsplit=2, nparticule_per_sub=10, zmax=2.):
+    def __init__(self, cosmo, boxsize=200., nsnapshots=3, nsplit=2, nparticule_per_sub=10, zmax=2.):
         self.boxsize = boxsize
-        self.xyzs = np.random.uniform(high=self.boxsize, size=(nsplit**3 * nshells, nparticule_per_sub, 3))
+        self.xyzs = np.random.uniform(high=self.boxsize, size=(nsplit**3 * nsnapshots, nparticule_per_sub, 3))
 
         nparticles = nsplit**3 * nparticule_per_sub
-        zsnapshots = np.zeros(nshells)
+        zsnapshots = np.zeros(nsnapshots)
         nsubs = nsplit**3
 
         super().__init__(cosmo, 'dummy', 'Mpc', nparticles, zsnapshots, zmax, nsubs, dtype=np.float64)
-
-    def shell_edges_comoving_distance(self, cosmo):
-        chi_max = pyccl.comoving_radial_distance(cosmo, 1. / (1. + self.zmax))
-        return np.linspace(0, chi_max, self.nshells + 1)
 
     def boxsize(self, cosmo):
         return self.boxsize
 
     def read_sub(self, isub, verbose=False, assert_xyz_in_box=False, read_box_edges_only=False):
-        cube_nodes = ((np.arange(8)[:, None] & (1 << np.arange(3))) > 0).astype(int)  #[(0,0,0),(0,0,1),...,(1,1,1)]
+        cube_nodes = ((np.arange(8)[:, None] & (1 << np.arange(3))) > 0).astype(int) #[(0,0,0),(0,0,1),...,(1,1,1)]
         box_edges = cube_nodes * self.boxsize
         xyz = self.xyzs[isub]
         return xyz, box_edges
@@ -581,4 +517,4 @@ class DummyReader(Reader):
 
     def __init__(self, cosmo, kind, unit, nsnapshots):
         super().__init__(
-            cosmo, kind, unit, nparticles=0., zsnapshots=np.zeros(nsnapshots), zmax=None, nsubs=0, shell_edges_match='center_scale_factor', dtype=np.float64)
+            cosmo, kind, unit, nparticles=0., zsnapshots=np.zeros(nsnapshots), zmax=None, nsubs=0, dtype=np.float64)

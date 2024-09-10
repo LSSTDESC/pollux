@@ -104,7 +104,7 @@ class MapBuilder:
         else:
             raise ValueError
 
-    def get_fname(self, imap=None, sub=None, what=None, force_fits=False):
+    def get_fname(self, imap=None, sub=None, what=None, format=None):
         """
         Helper function to generate file names
         """
@@ -119,8 +119,8 @@ class MapBuilder:
         if sub is not None:
             fname += f'_sub{sub}'
 
-        if force_fits:
-            fname += '.fits'
+        if format is not None:
+            fname += f'.{format}' 
         else:
             fname += f'.{self.save_format}'
 
@@ -327,7 +327,7 @@ class MapBuilder:
         hp.graticule()
 
         if save:
-            fname = self.get_fname(force_fits=True).replace('.fits', '.png')
+            fname = self.get_fname(format='png')
             plt.savefig(fname, bbox_inches='tight', dpi=150, transparent=False)
 
     def _create_mask(self):
@@ -433,7 +433,7 @@ class MapBuilder:
         alms = {}
         for imap in self.tqdm(imaps, desc="[compute_alms]"):
             if save:
-                fname = self.get_fname(imap, what='alms', force_fits=True)
+                fname = self.get_fname(imap, what='alms', format='fits')
                 if os.path.exists(fname):
                     try:
                         alms[imap] = hp.read_alm(fname)
@@ -468,7 +468,7 @@ class MapBuilder:
 
         maps = []
         for imap in self.tqdm(imaps, desc="[compute_maps_from_alms]"):
-            alm = hp.read_alm(self.get_fname(imap, what='alms', force_fits=True))
+            alm = hp.read_alm(self.get_fname(imap, what='alms', format='fits'))
             values = hp.reorder(hp.alm2map(alm, nside=self.nside, pol=False), r2n=True)
             tmp = healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
             tmp.update_values_pix(ipix, values[ipix].astype(self.dtype))
@@ -490,7 +490,7 @@ class MapBuilder:
         for i, j in cl.keys():
             for _ell, _cl in zip(ell, cl[i, j]):
                 s.add_data_point(self.sacc_type, [tracers[i].name, tracers[j].name], _cl, ell=_ell)
-        fname = self.get_fname(what='cls', force_fits=True)
+        fname = self.get_fname(what='cls', format='fits')
         s.save_fits(fname, overwrite=True)
 
     def compute_cls(self, imaps=None, auto_only=False, save=True, use_precomputed_alms=True, pair_job=None):
@@ -533,12 +533,12 @@ class MapBuilder:
                     if not pair_count == pair_job:
                         continue
                 if not i == previous_pair[0]:
-                    almi = hp.read_alm(self.get_fname(i, what='alms', force_fits=True))
+                    almi = hp.read_alm(self.get_fname(i, what='alms', format='fits'))
                 if i == j:
                     almj = almi
                 else:
                     if not j == previous_pair[1]:
-                        almj = hp.read_alm(self.get_fname(j, what='alms', force_fits=True))
+                        almj = hp.read_alm(self.get_fname(j, what='alms', format='fits'))
                 pcl = hp.alm2cl(almi, almj)
                 cl[i, j] = wsp.decouple_cell([pcl])[0]
                 previous_pair = (i, j)
@@ -571,7 +571,7 @@ class MapBuilder:
         -------
             Angular power spectra in dictionary or SACC format
         """
-        fname = self.get_fname(what='cls', force_fits=True)
+        fname = self.get_fname(what='cls', format='fits')
         s = sacc.Sacc.load_fits(fname)
         if return_dict:
             tracers = list(s.tracers.keys())
@@ -822,7 +822,7 @@ class MapBuilder:
         fig.tight_layout()
 
         if save:
-            fname = self.get_fname(what='cls', force_fits=True).replace('.fits', '.png')
+            fname = self.get_fname(what='cls', format='png')
             fig.savefig(fname, bbox_inches='tight')
 
         # plt.show()

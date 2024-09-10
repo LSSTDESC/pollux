@@ -68,8 +68,8 @@ class CatalogSourceGenerator(CatalogGenerator):
         self._save_catalogs(catalog, ikappas=ikappas)
 
     def _interpolate_maps(self, catalog, ikappas=None):
-        reader = self.lensing.reader
-        chi_bins_edges = reader.shell_edges_comoving_distance()
+        builder = self.lensing.shell_builder
+        chi_bins_edges = builder.shell_edges_comoving_distance()
 
         # Interpolate shear values, looping over shells for speed
         for k in self.interp_list:
@@ -132,7 +132,7 @@ class CatalogSourceGenerator(CatalogGenerator):
 
             hdul = [fits.PrimaryHDU(), fits.BinTableHDU.from_columns([ra, dec, z, chi] + interp_colums, header)]
 
-            fname = self.lensing.get_fname(ikappa, what=self.name, force_fits=True)
+            fname = self.lensing.get_fname(ikappa, what=self.name, format='fits')
             fits.HDUList(hdul).writeto(fname, overwrite=True)
 
         return catalog
@@ -141,7 +141,7 @@ class CatalogSourceGenerator(CatalogGenerator):
         """
         Load catalog fits file
         """
-        fname = self.lensing.get_fname(ikappa, what=self.name, force_fits=True)
+        fname = self.lensing.get_fname(ikappa, what=self.name, format='fits')
         return fits.open(fname)
 
 
@@ -177,8 +177,8 @@ class CatalogSourceUniform(CatalogSourceGenerator):
         catalog[ikappa]['dec'] = dec
 
     def _generate_z(self, catalog, ikappa):
-        reader = self.lensing.reader
-        z_bins_edges = reader.shell_edges_redshift()
+        builder = self.lensing.shell_builder
+        z_bins_edges = builder.shell_edges_redshift()
 
         rng = np.random.default_rng(self.lensing.shell_builder.seed + ikappa * self.nshells)
 
@@ -188,7 +188,7 @@ class CatalogSourceUniform(CatalogSourceGenerator):
         nz = t.get_dndz(zz)
 
         z = sample_pdf(zz, nz, self.Ngal[ikappa], rng)
-        chi = reader.cosmo.comoving_radial_distance(1. / (1. + z))
+        chi = builder.cosmo.comoving_radial_distance(1. / (1. + z))
 
         catalog[ikappa]['z'] = z
         catalog[ikappa]['chi'] = chi
@@ -261,8 +261,8 @@ class CatalogSourceClusteredPoisson(CatalogSourceGenerator):
             self.header_dict[f'BIAS_{i}'] = b
 
     def _generate_galaxies(self, catalog, ikappas=None):
-        reader = self.lensing.reader
-        z_bins_edges = reader.shell_edges_redshift()
+        builder = self.lensing.shell_builder
+        z_bins_edges = builder.shell_edges_redshift()
 
         # First, we compute the mean density per shell for each tracer's n(z)
         nbar_per_pix_per_bin = []
@@ -288,7 +288,7 @@ class CatalogSourceClusteredPoisson(CatalogSourceGenerator):
             catalog[ikappa]['dec'] = np.concatenate(catalog[ikappa]['dec'])
             catalog[ikappa]['z'] = np.concatenate(catalog[ikappa]['z'])
             catalog[ikappa]['idx_shell'] = np.concatenate(catalog[ikappa]['idx_shell'])
-            catalog[ikappa]['chi'] = reader.cosmo.comoving_radial_distance(1. / (1. + catalog[ikappa]['z']))
+            catalog[ikappa]['chi'] = builder.cosmo.comoving_radial_distance(1. / (1. + catalog[ikappa]['z']))
             for k in self.interp_list:
                 catalog[ikappa][k] = np.zeros_like(catalog[ikappa]['z'])
 
@@ -314,8 +314,8 @@ class CatalogSourceClusteredPoisson(CatalogSourceGenerator):
             catalog[ikappa]['dec'].append(dec)
 
     def _generate_z(self, catalog, ikappa):
-        reader = self.lensing.reader
-        z_bins_edges = reader.shell_edges_redshift()
+        builder = self.lensing.shell_builder
+        z_bins_edges = builder.shell_edges_redshift()
 
         t = self.lensing.get_tracers()[ikappa]
         for ishell in self.lensing.shell_builder.tqdm(None, disable=True):

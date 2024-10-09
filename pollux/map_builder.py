@@ -747,7 +747,8 @@ class MapBuilder:
         m = 1 if auto_only else n
         sharey = sharey or False  #False if auto_only else 'row'
         if figaxes is None:
-            fig, axes = plt.subplots(m, n, figsize=(4 * n, 3 * m), sharex=True, sharey=sharey, squeeze=False)
+            # fig, axes = plt.subplots(m, n, figsize=(4 * n, 3 * m), sharex=True, sharey=sharey, squeeze=False)
+            fig, axes = plt.subplots(m, n, figsize=(3 * n, 3 * m), sharex=True, sharey=sharey, squeeze=False)
         else:
             fig, axes = figaxes
 

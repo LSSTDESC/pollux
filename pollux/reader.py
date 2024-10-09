@@ -421,6 +421,297 @@ class HACCReader(Reader):
             return xyz, box_edges.astype(self.dtype), {k:np.concatenate(out[k]) for k in extra_variables}
         else:
             return xyz, box_edges.astype(self.dtype)
+        
+        
+        
+class HACCReaderLarsen(Reader):
+
+    def __init__(
+            self,
+            path,
+            run_params='run/run000/indat.params',
+            snap_sub_every_n=1,
+    ):
+        """Reader for HACC simulations
+
+        Parameters
+        ----------
+        path
+            Root folder where particle data is located
+        cosmo, optional
+            CCL cosmology object, by default None
+        read_cosmo_params, optional
+            Whether to read cosmology from HACC run files, by default False
+        nsteps, optional
+            Number of steps in simulation, by default 500
+        sim_zmin, optional
+            Minimum redshift in simulation, by default 0.
+        sim_zmax, optional
+            Maximum redshift in simulation, by default 200.
+        zmax, optional
+            Maximum redshift considered, by default None
+        aminstep, optional
+            Minimum step in scale factor to downsample snapshots, by default 0.
+        sampling_match_n, optional
+            Number of snapshots to try to keep while matching roughly optimal distribution, by default False
+        group_along_x, optional
+            Whether to group sub-boxes along x to define contiguous box volumes, by default False
+        """
+        self.path = path
+        self.variables = ['x', 'y', 'z']
+
+        print("*** HACC reader ***")
+
+        # read run parameters
+        fname = os.path.join(path, run_params)
+        print(f"  - Reading parameter file at", fname)
+        params = read_params(fname)
+
+        # create cosmo object that can be used by builder  
+        cosmo_dict = dict(
+            Omega_c=float(params['OMEGA_CDM']),
+            Omega_b=float(params['DEUT']) / float(params['HUBBLE'])**2,
+            h=float(params['HUBBLE']),
+            n_s=float(params['NS']),
+            sigma8=float(params['SS8']),
+            Neff=float(params['N_EFF_MASSLESS']),
+            w0=float(params['W_DE']),
+            wa=float(params['WA_DE']),
+            # T_CMB=float(params['T_CMB']),
+            T_CMB=2.726,
+            Omega_k=0.)
+        cosmo = pyccl.Cosmology(**cosmo_dict)
+        print(f"  - Cosmology", cosmo)
+
+        # read parameters to determine redshifts of snapshots
+        nsteps = int(params['N_STEPS'])
+        sim_zmax = float(params['Z_IN'])
+        sim_zmin = float(params['Z_FIN'])
+
+        # simulation snapshot redshifts : step are constant in scale factor, but only a fraction of steps are saved
+        snapshots = np.array(list(map(int, params['ALIVE_DUMP'].split())))
+        snapshot_dir = os.path.join(path, 'output')
+        if os.path.exists(snapshot_dir):
+            try:
+                snapshot_dirs = os.listdir(snapshot_dir)
+                snapshots_output = np.array([i for i in range(nsteps) if f'STEP{i}' in snapshot_dirs])
+                np.testing.assert_array_equal(snapshots, snapshots_output)
+            except AssertionError:
+                snapshots = snapshots_output
+                warnings.warn("We are using the snapshots found in the `output` folder, which do not match those in the parameter file.")
+        print(f"  - Found {len(snapshots)} snapshots :", snapshots)
+
+        # helper function : we only work on the list of snapshots to avoid mistakes in book-keeping
+        def get_asnapshots(idx):
+            asnapshots_all = np.linspace(1. / (1. + sim_zmax), 1. / (1. + sim_zmin), nsteps + 1)[1:]
+            return asnapshots_all[idx]
+
+        # subsample snapshots : every n'ths snapshots
+        self.snapshots = snapshots[::-snap_sub_every_n]  # snapshots ordered by redshift
+
+        if snap_sub_every_n > 1:
+            print(f"  - Subsampling : keeping every {snap_sub_every_n} snapshots, returns {len(self.snapshots)} snapshots")
+
+        # done with subsampling !
+        zsnapshots = 1. / get_asnapshots(self.snapshots) - 1.
+
+        # simulation properties
+        if False:
+            step = self.snapshots[0]
+            name = os.path.join(self.path, 'output', f'STEP{step}/m000.full.mpicosmo.{step}')
+            self.boxsize_h = pygio.read_phys_scale(name)[0]
+            nparticles = pygio.read_num_elems(name)
+            dtype = pygio.read_variable_dtypes(name)['x']
+        else:
+            self.boxsize_h = float(params['RL'])
+            nparticles = int(params['NP'])**3
+            dtype = np.float32
+
+        # simulation box limits
+        self.lims = np.array([[[np.floor(ibox / (16)) * 0.5, np.floor(ibox / (16)) * 0.5 + 2.5], [np.floor(ibox / 4) % 4, (np.floor(ibox / 4) % 4) + 1],
+                               [ibox % 4, (ibox % 4) + 1]] for ibox in range(64)])
+
+        nsub = 8
+        super().__init__(cosmo, 'hacc', 'Mpc_over_h', nparticles, zsnapshots, None, nsub, dtype=dtype)
+        
+    def boxsize(self):
+        return self.boxsize_h / self.cosmo["h"]
+
+    def read_sub(self, isnapshot, isub):
+        
+        snapshot = self.snapshots[isnapshot]
+        
+        import re
+        # isim = re.search(r'HACC\d+_\d+', self.path).group()
+        isim = re.search(r'HACC\d+', self.path).group()
+        
+        path_subs = '/pscratch/sd/p/plarsen/LC_HOS/'+isim+'/'+str(self.nsnapshots)+'_steps/lc{lc}'
+        
+        file = path_subs.replace('{lc}',str(snapshot))+'/lc.'+str(snapshot)+'#'+str(isub)
+        
+        out = pygio.read_genericio(file, variables = ['x', 'y', 'z'])
+        
+        out = {key: value / self.cosmo["h"] for key, value in out.items()}
+        
+        return np.column_stack([out['x'],out['y'],out['z']])
+    
+    
+    
+class HACCReaderHeitmann(Reader):
+
+    def __init__(
+            self,
+            path,
+            run_params='run/run000/indat.params',
+            snap_sub_every_n=1,
+            snap_sub_zmax=None,
+    ):
+        """Reader for HACC simulations
+
+        Parameters
+        ----------
+        path
+            Root folder where particle data is located
+        cosmo, optional
+            CCL cosmology object, by default None
+        read_cosmo_params, optional
+            Whether to read cosmology from HACC run files, by default False
+        nsteps, optional
+            Number of steps in simulation, by default 500
+        sim_zmin, optional
+            Minimum redshift in simulation, by default 0.
+        sim_zmax, optional
+            Maximum redshift in simulation, by default 200.
+        zmax, optional
+            Maximum redshift considered, by default None
+        aminstep, optional
+            Minimum step in scale factor to downsample snapshots, by default 0.
+        sampling_match_n, optional
+            Number of snapshots to try to keep while matching roughly optimal distribution, by default False
+        group_along_x, optional
+            Whether to group sub-boxes along x to define contiguous box volumes, by default False
+        """
+        self.path = path
+        self.variables = ['x', 'y', 'z']
+
+        print("*** HACC reader ***")
+
+        # read run parameters
+        fname = os.path.join(path, run_params)
+        print(f"  - Reading parameter file at", fname)
+        params = read_params(fname)
+
+        # create cosmo object that can be used by builder  
+        cosmo_dict = dict(
+            Omega_c=float(params['OMEGA_CDM']),
+            Omega_b=float(params['DEUT']) / float(params['HUBBLE'])**2,
+            h=float(params['HUBBLE']),
+            n_s=float(params['NS']),
+            sigma8=float(params['SS8']),
+            Neff=float(params['N_EFF_MASSLESS']),
+            w0=float(params['W_DE']),
+            wa=float(params['WA_DE']),
+            # T_CMB=float(params['T_CMB']),
+            T_CMB=2.726,
+            Omega_k=0.)
+        cosmo = pyccl.Cosmology(**cosmo_dict)
+        print(f"  - Cosmology", cosmo)
+
+        # read parameters to determine redshifts of snapshots
+        nsteps = int(params['N_STEPS'])
+        sim_zmax = float(params['Z_IN'])
+        sim_zmin = float(params['Z_FIN'])
+        
+        if snap_sub_every_n is None:
+            snapshots = np.arange(248,500)
+        else:
+            # simulation snapshot redshifts : step are constant in scale factor, but only a fraction of steps are saved
+            snapshots = np.array(list(map(int, params['ALIVE_DUMP'].split())))
+            snapshot_dir = os.path.join(path, 'output')
+            if os.path.exists(snapshot_dir):
+                try:
+                    snapshot_dirs = os.listdir(snapshot_dir)
+                    snapshots_output = np.array([i for i in range(nsteps) if f'STEP{i}' in snapshot_dirs])
+                    np.testing.assert_array_equal(snapshots, snapshots_output)
+                except AssertionError:
+                    snapshots = snapshots_output
+                    warnings.warn("We are using the snapshots found in the `output` folder, which do not match those in the parameter file.")
+        print(f"  - Found {len(snapshots)} snapshots :", snapshots)
+
+        # helper function : we only work on the list of snapshots to avoid mistakes in book-keeping
+        def get_asnapshots(idx):
+            asnapshots_all = np.linspace(1. / (1. + sim_zmax), 1. / (1. + sim_zmin), nsteps + 1)[1:]
+            return asnapshots_all[idx]
+
+        # subsample snapshots : maximum redshift
+        if snap_sub_zmax is not None:
+            w = np.argwhere(get_asnapshots(snapshots) > 1. / (1. + snap_sub_zmax))
+            if len(w) > 0:
+                snapshots = snapshots[w[0, 0]:]
+                print(f"  - Subsampling : max redshift {snap_sub_zmax}, returns {len(snapshots)} snapshots")
+
+        if snap_sub_every_n is None:
+            self.snapshots = snapshots[::-1]
+        else:
+            # subsample snapshots : every n'ths snapshots
+            self.snapshots = snapshots[::-snap_sub_every_n]  # snapshots ordered by redshift
+
+            if snap_sub_every_n > 1:
+                print(f"  - Subsampling : keeping every {snap_sub_every_n} snapshots, returns {len(self.snapshots)} snapshots")
+                
+        snapshots_fulllist = np.arange(248,500)
+        self.snapshots_fulllist = snapshots_fulllist[::-1]
+
+        # done with subsampling !
+        zsnapshots = 1. / get_asnapshots(self.snapshots) - 1.
+        
+
+        # simulation properties
+        if False:
+            step = self.snapshots[0]
+            name = os.path.join(self.path, 'output', f'STEP{step}/m000.full.mpicosmo.{step}')
+            self.boxsize_h = pygio.read_phys_scale(name)[0]
+            nparticles = pygio.read_num_elems(name)
+            dtype = pygio.read_variable_dtypes(name)['x']
+        else:
+            self.boxsize_h = float(params['RL'])
+            nparticles = int(params['NP'])**3
+            dtype = np.float32
+
+        # simulation box limits
+        self.lims = np.array([[[np.floor(ibox / (16)) * 0.5, np.floor(ibox / (16)) * 0.5 + 2.5], [np.floor(ibox / 4) % 4, (np.floor(ibox / 4) % 4) + 1],
+                               [ibox % 4, (ibox % 4) + 1]] for ibox in range(64)])
+
+        nsub = 8
+        super().__init__(cosmo, 'hacc', 'Mpc_over_h', nparticles, zsnapshots, snap_sub_zmax, nsub, dtype=dtype)
+        
+    def boxsize(self):
+        return self.boxsize_h / self.cosmo["h"]
+
+    def read_sub(self, isnapshot, isub):
+        
+        # snapshot = self.snapshots[isnapshot]
+        snapshot = self.snapshots_fulllist[isnapshot]
+        
+        import re
+        isim = re.search(r'HACC\d+_\d+', self.path).group()
+        # isim = re.search(r'HACC\d+', self.path).group()
+        
+        path_subs = '/pscratch/sd/h/heitmann/'+isim+'/Lightcones'
+        
+        file = os.path.join(path_subs, 'm000.lc.mpicosmo.'+str(snapshot)+'#'+str(isub))
+        
+        out = pygio.read_genericio(file, variables = ['x', 'y', 'z'])
+        
+        out = {key: value / self.cosmo["h"] for key, value in out.items()}
+        
+        return np.column_stack([out['x'],out['y'],out['z']])
+
+
+
+
+
+
 
 
 class HACCHaloReader(HACCReader):

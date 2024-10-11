@@ -65,7 +65,7 @@ class LensingBuilder(MapBuilder):
             os.makedirs(save_dir, exist_ok=True)
             np.save(os.path.join(save_dir, 'nzs.npy'), nzs)
 
-        base_fname = f'kappa_{shell_builder.reader.kind}_seed{shell_builder.seed}'
+        base_fname = f'kappa_{shell_builder.reader.kind}'
 
         super().__init__(
             nside=shell_builder.nside, dtype=dtype, save_dir=save_dir, base_fname=base_fname, nmaps=self.nkappas, sacc_type="galaxy_convergence_cl", **kwargs)

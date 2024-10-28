@@ -505,7 +505,7 @@ class HACCReaderLarsen(Reader):
         def get_asnapshots(idx):
             asnapshots_all = np.linspace(1. / (1. + sim_zmax), 1. / (1. + sim_zmin), nsteps + 1)[1:]
             return asnapshots_all[idx]
-
+        
         # subsample snapshots : every n'ths snapshots
         self.snapshots = snapshots[::-snap_sub_every_n]  # snapshots ordered by redshift
 
@@ -557,7 +557,7 @@ class HACCReaderLarsen(Reader):
     
     
     
-class HACCReaderHeitmann(Reader):
+class HACCLightconeReader(Reader):
 
     def __init__(
             self,
@@ -565,6 +565,7 @@ class HACCReaderHeitmann(Reader):
             run_params='run/run000/indat.params',
             snap_sub_every_n=1,
             snap_sub_zmax=None,
+            matter_power_spectrum=None,
     ):
         """Reader for HACC simulations
 
@@ -614,6 +615,8 @@ class HACCReaderHeitmann(Reader):
             # T_CMB=float(params['T_CMB']),
             T_CMB=2.726,
             Omega_k=0.)
+        if matter_power_spectrum is not None:
+            cosmo_dict['matter_power_spectrum']=matter_power_spectrum
         cosmo = pyccl.Cosmology(**cosmo_dict)
         print(f"  - Cosmology", cosmo)
 
@@ -621,6 +624,10 @@ class HACCReaderHeitmann(Reader):
         nsteps = int(params['N_STEPS'])
         sim_zmax = float(params['Z_IN'])
         sim_zmin = float(params['Z_FIN'])
+        
+        self.nsteps = nsteps
+        self.sim_zmax = sim_zmax
+        self.sim_zmin = sim_zmin
         
         if snap_sub_every_n is None:
             snapshots = np.arange(248,500)
@@ -642,7 +649,7 @@ class HACCReaderHeitmann(Reader):
         def get_asnapshots(idx):
             asnapshots_all = np.linspace(1. / (1. + sim_zmax), 1. / (1. + sim_zmin), nsteps + 1)[1:]
             return asnapshots_all[idx]
-
+        
         # subsample snapshots : maximum redshift
         if snap_sub_zmax is not None:
             w = np.argwhere(get_asnapshots(snapshots) > 1. / (1. + snap_sub_zmax))
@@ -685,6 +692,9 @@ class HACCReaderHeitmann(Reader):
         nsub = 8
         super().__init__(cosmo, 'hacc', 'Mpc_over_h', nparticles, zsnapshots, snap_sub_zmax, nsub, dtype=dtype)
         
+        self.snap_sub_every_n = snap_sub_every_n
+        self.cosmo = cosmo
+        
     def boxsize(self):
         return self.boxsize_h / self.cosmo["h"]
 
@@ -707,8 +717,9 @@ class HACCReaderHeitmann(Reader):
         
         return np.column_stack([out['x'],out['y'],out['z']])
 
-
-
+    def get_r2snapshots(self, idx):
+        r2snapshots_all = self.cosmo.comoving_radial_distance(np.linspace(1. / (1. + self.sim_zmax), 1. / (1. + self.sim_zmin), self.nsteps + 1)[1:])**2
+        return r2snapshots_all[idx]
 
 
 

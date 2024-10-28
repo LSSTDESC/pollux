@@ -66,6 +66,7 @@ class ShellBuilder(MapBuilder):
         self.seed = seed
         self.apply_grid_isometry = apply_grid_isometry
         self.apply_replicate_rotflip = apply_replicate_rotflip
+        self.nocompress = True
         assert (not apply_grid_isometry) or (
             not apply_replicate_rotflip
         )  # they do not commute and grid isometry is slow and can be applied once, whereas replicate_rotflip is fast but must be applied to each replicate
@@ -92,16 +93,20 @@ class ShellBuilder(MapBuilder):
                 assert A.shape == (3, 3)
                 assert b.shape == (3,)
             self.Abs = self.apply_grid_isometry
+            self.apply_grid_isometry = True
         elif self.apply_grid_isometry:
             self.Abs = self.get_random_isometries(group_isometries)
+            self.apply_grid_isometry = True
         else:
-            assert self.apply_grid_isometry is None
+            # assert self.apply_grid_isometry is None
             self.Abs = [(np.zeros((3, 3), dtype=self.dtype), np.zeros(3, dtype=self.dtype)) for _ in range(self.nshells)]
+            self.apply_grid_isometry = False
 
         # Draw random replicate rotation/flips
         if type(self.apply_replicate_rotflip) is dict:
             warnings.info("Shell builder using user-provided replicate rot/flip: make sure not to miss any!")
             self.replicate_rotflip = self.apply_replicate_rotflip
+            self.apply_replicate_rotflip = True
         elif self.apply_replicate_rotflip:
             # get number of replicates per direction
             rmax = self.shell_edges_comoving_distance()[-1]
@@ -114,11 +119,25 @@ class ShellBuilder(MapBuilder):
             for ix in range(-nreplicate, nreplicate + 1):
                 for iy in range(-nreplicate, nreplicate + 1):
                     for iz in range(-nreplicate, nreplicate + 1):
-                        self.replicate_rotflip[ix, iy, iz] = rng.randint(48)
+                        # self.replicate_rotflip[ix, iy, iz] = rng.randint(48)
+                        self.replicate_rotflip[ix, iy, iz] = rng.integers(low=0, high=48)
+            self.apply_replicate_rotflip = True
         else:
-            assert self.apply_replicate_rotflip is None
+            # assert self.apply_replicate_rotflip is None
+            # self.replicate_rotflip = numba.typed.Dict.empty(key_type=numba.types.UniTuple(numba.types.int32,3),value_type=numba.types.float32[:])
             self.replicate_rotflip = {}
-
+            # self.replicate_rotflip[0, 0, 0] = 0
+            self.apply_replicate_rotflip = False
+            
+        if len(self.replicate_rotflip)>0:
+            self.replicate_rotflip = np.empty((len(self.replicate_rotflip),4), dtype=np.int64)
+            # for i,(k,v) in enumerate(self.replicate_rotflip.items()):
+            #     self.replicate_rotflip[i,:3] = k
+            #     self.replicate_rotflip[i,3] = v
+        else:
+            self.replicate_rotflip = np.zeros((1,4), dtype=np.int64)
+            
+        
         # Try getting shell information from reader, if not dummy.
         try:
             # Make sure snapshots are larger than the shells
@@ -457,7 +476,7 @@ class ShellBuilder(MapBuilder):
                 tmp_shell = healsparse.HealSparseMap.read(self.get_fname(ishell, sub='orphan'))
                 shell = healsparse.operations.sum_union([shell, tmp_shell])
 
-            shell.write(fname, clobber=True, format=self.save_format)
+            shell.write(fname, clobber=True, format=self.save_format, nocompress=self.nocompress)
 
             shells.append(shell)
 
@@ -620,9 +639,15 @@ class SnapshotShellBuilder(ShellBuilder):
         order = hp.nside2order(self.nside)
         ncap = (nside * nside - nside) << 1
         npix = self.npix
+        
+        # print(self.apply_grid_isometry)
+        # print(self.Abs[ishell][0], self.Abs[ishell][1])
+        # print(self.apply_replicate_rotflip)
+        print(self.replicate_rotflip)
+        # print(self.octant_only)
 
         uipix, c = _construct_maps_sub_helper(
-            xyz, box_edges_original, boxsize, rmin2, rmax2, self.apply_grid_isometry, self.Abs[ishell][0], self.Abs[ishell][1], self.apply_replicate_rotflip,
+            True, xyz, box_edges_original, boxsize, rmin2, rmax2, self.apply_grid_isometry, self.Abs[ishell][0], self.Abs[ishell][1], self.apply_replicate_rotflip,
             self.replicate_rotflip, self.octant_only, nside, order, ncap, npix)
         if len(uipix) > 0:
             if verbose:
@@ -633,7 +658,7 @@ class SnapshotShellBuilder(ShellBuilder):
                 print("Found no particle.")
 
         if self.save_dir is not None:
-            shell.write(fname, clobber=True, format=self.save_format)
+            shell.write(fname, clobber=True, format=self.save_format, nocompress=self.nocompress)
             if verbose:
                 print(f"Saved to file {fname}")
 
@@ -852,7 +877,7 @@ class SnapshotShellBuilderLarsenTEST(ShellBuilder):
             npix = self.npix
 
             uipix, c = _construct_maps_sub_helper(
-                xyz, box_edges_original, boxsize, rmin2, rmax2, self.apply_grid_isometry, self.Abs[ishell][0], self.Abs[ishell][1],
+                False, xyz, box_edges_original, boxsize, rmin2, rmax2, self.apply_grid_isometry, self.Abs[ishell][0], self.Abs[ishell][1],
                 self.apply_replicate_rotflip, self.replicate_rotflip, self.octant_only, nside, order, ncap, npix)
             if len(uipix) > 0:
                 if verbose:
@@ -863,7 +888,7 @@ class SnapshotShellBuilderLarsenTEST(ShellBuilder):
                     print("Found no particle.")
 
             if self.save_dir is not None:
-                shell.write(fname, clobber=True, format=self.save_format)
+                shell.write(fname, clobber=True, format=self.save_format, nocompress=self.nocompress)
                 if verbose:
                     print(f"Saved to file {fname}")
 
@@ -890,7 +915,7 @@ class SnapshotShellBuilderLarsenTEST(ShellBuilder):
                 except:
                     continue
             if n_subs_added != 0:
-                shell.write(fname, clobber=True, format=self.save_format)
+                shell.write(fname, clobber=True, format=self.save_format, nocompress=self.nocompress)
                 shells.append(shell)
             else:
                 print('Zero sub files found for shell number ' + str(ishell) + '!')
@@ -995,7 +1020,7 @@ class SnapshotShellBuilderLarsen(ShellBuilder):
             npix = self.npix
 
             uipix, c = _construct_maps_sub_helper(
-                xyz, box_edges_original, boxsize, rmin2, rmax2, self.apply_grid_isometry, self.Abs[ishell][0], self.Abs[ishell][1],
+                False, xyz, box_edges_original, boxsize, rmin2, rmax2, self.apply_grid_isometry, self.Abs[ishell][0], self.Abs[ishell][1],
                 self.apply_replicate_rotflip, self.replicate_rotflip, self.octant_only, nside, order, ncap, npix)
             if len(uipix) > 0:
                 if verbose:
@@ -1006,7 +1031,7 @@ class SnapshotShellBuilderLarsen(ShellBuilder):
                     print("Found no particle.")
 
             if self.save_dir is not None:
-                shell.write(fname, clobber=True, format=self.save_format)
+                shell.write(fname, clobber=True, format=self.save_format, nocompress=self.nocompress)
                 if verbose:
                     print(f"Saved to file {fname}")
 
@@ -1033,7 +1058,7 @@ class SnapshotShellBuilderLarsen(ShellBuilder):
                 except:
                     continue
             if n_subs_added != 0:
-                shell.write(fname, clobber=True, format=self.save_format)
+                shell.write(fname, clobber=True, format=self.save_format, nocompress=self.nocompress)
                 shells.append(shell)
             else:
                 print('Zero sub files found for shell number ' + str(ishell) + '!')
@@ -1064,7 +1089,7 @@ class SnapshotShellBuilderHeitmann(ShellBuilder):
 
         super().__init__(reader.nsnapshots, reader, nside, save_dir, kind='snapshot', **kwargs)
 
-    def construct_maps_sub(self, isnapshot, isub, verbose=False):
+    def construct_maps_sub(self, ishell, isub, verbose=False):
         """Construct a single shell from a simulation sub-volume/snapshot, applying isometries and replicating it as necessary.
 
         Parameters
@@ -1078,7 +1103,8 @@ class SnapshotShellBuilderHeitmann(ShellBuilder):
         if not os.path.exists(os.path.join(self.save_dir, 'subs')):
             os.makedirs(os.path.join(self.save_dir, 'subs'))
 
-        fname = os.path.join(self.save_dir, 'subs/shell_hacc_nside' + str(self.nside) + '_imap' + str(isnapshot) + '_sub' + str(isub) + '.fits')
+        # fname = os.path.join(self.save_dir, 'subs/shell_hacc_nside' + str(self.nside) + '_imap' + str(ishell) + '_sub' + str(isub) + '.fits')
+        fname = self.get_fname(ishell, sub=isub)
 
         if self.check_maps(read=True, fname=fname):
             print(fname + ' already exists!')
@@ -1087,52 +1113,43 @@ class SnapshotShellBuilderHeitmann(ShellBuilder):
 
             # get shell radii
             chi_shell_bins = self.shell_edges_comoving_distance()
-            rmin2, rmax2 = chi_shell_bins[isnapshot]**2, chi_shell_bins[isnapshot + 1]**2
+            rmin2, rmax2 = chi_shell_bins[ishell]**2, chi_shell_bins[ishell + 1]**2
 
             Abs = [(np.zeros((3, 3), dtype=self.dtype), np.zeros(3, dtype=self.dtype)) for _ in range(self.nshells)]
 
-            boxsize = self.reader.boxsize()
+            boxsize = self.dtype(self.reader.boxsize())
+            
+#             r2snapshot_fulllist = self.reader.get_r2snapshots(self.reader.snapshots_fulllist)
+            
+#             xyz = []
+            
+#             try:
+            
+#                 for isnapshot in range(len(r2snapshot_fulllist)-1):
+#                     if rmin2 > r2snapshot_fulllist[isnapshot+1]:
+#                         continue
+#                     if rmax2 < r2snapshot_fulllist[isnapshot]:
+#                         continue
+#                     xyz.append(self.reader.read_sub(isnapshot, isub))
+#                 xyz = np.vstack(xyz)
 
+#                 print([(xyz[:,0]**2+xyz[:,1]**2+xyz[:,2]**2).min(),rmin2,rmax2,(xyz[:,0]**2+xyz[:,1]**2+xyz[:,2]**2).max()])
+#             except:
+#                 pass
+            
             if self.reader.snap_sub_every_n is None:
-                # read box
-                #                 if isnapshot == 0:
-                #                     xyz = self.reader.read_sub(0, isub)
-                #                 else:
-                #                     try:
-                #                         xyz_i = self.reader.read_sub(isnapshot-1, isub)
-                #                     except:
-                #                         xyz_i = None
-
-                #                     try:
-                #                         xyz_f = self.reader.read_sub(isnapshot, isub)
-                #                     except:
-                #                         xyz_f = None
-
-                #                     if xyz_i is None and xyz_f is None:
-                #                         print(f"Sub {isub} not available for neither snapshot {isnapshot-1} or {isnapshot}. Exiting.")
-                #                     elif xyz_i is None:
-                #                         print(f"Sub {isub} only loaded for snapshot {isnapshot}.")
-                #                         xyz = xyz_f
-                #                     elif xyz_f is None:
-                #                         print(f"Sub {isub} only loaded for snapshot {isnapshot-1}.")
-                #                         xyz = xyz_i
-                #                     else:
-                #                         print(f"Sub {isub} loaded successfully for both snapshots {isnapshot-1} and {isnapshot}. Merging files and processing them.")
-                #                         xyz = np.vstack((xyz_i, xyz_f))
-                if isnapshot == 0:
+                if ishell == 0:
                     xyz = self.reader.read_sub(0, isub)
                 else:
-                    xyz_i = self.reader.read_sub(isnapshot - 1, isub)
-                    xyz_f = self.reader.read_sub(isnapshot, isub)
+                    xyz_i = self.reader.read_sub(ishell - 1, isub)
+                    xyz_f = self.reader.read_sub(ishell, isub)
                     xyz = np.vstack((xyz_i, xyz_f))
-
             else:
-
                 # read box
-                if isnapshot == 0:
-                    i = np.argwhere(self.reader.snapshots[isnapshot] == self.reader.snapshots_fulllist)[0][0]
-                    f = np.argwhere(self.reader.snapshots[isnapshot + 1] == self.reader.snapshots_fulllist)[0][0]
-                    f = int(f / 2 + 1)
+                if ishell == 0:
+                    i = np.argwhere(self.reader.snapshots[ishell] == self.reader.snapshots_fulllist)[0][0]
+                    f = np.argwhere(self.reader.snapshots[ishell + 1] == self.reader.snapshots_fulllist)[0][0]
+                    f = int(f / 2 + 1)+1
                     for k in np.arange(i, f):
                         try:
                             xyz = np.vstack((xyz, self.reader.read_sub(k, isub)))
@@ -1143,10 +1160,10 @@ class SnapshotShellBuilderHeitmann(ShellBuilder):
                     # except:
                     #     pass
                 else:
-                    i = np.argwhere(self.reader.snapshots[isnapshot - 1] == self.reader.snapshots_fulllist)[0][0]
-                    f = np.argwhere(self.reader.snapshots[isnapshot] == self.reader.snapshots_fulllist)[0][0]
+                    i = np.argwhere(self.reader.snapshots[ishell - 1] == self.reader.snapshots_fulllist)[0][0]
+                    f = np.argwhere(self.reader.snapshots[ishell] == self.reader.snapshots_fulllist)[0][0]
                     delta = int((f - i) / 2)
-                    i += delta
+                    i += delta-1
                     f += delta
                     for k in np.arange(i, f):
                         try:
@@ -1157,6 +1174,7 @@ class SnapshotShellBuilderHeitmann(ShellBuilder):
                     #     print([(xyz[:,0]**2+xyz[:,1]**2+xyz[:,2]**2).min(),rmin2,rmax2,(xyz[:,0]**2+xyz[:,1]**2+xyz[:,2]**2).max()])
                     # except:
                     #     pass
+                    
 
             try:
                 box_lims = np.stack([np.min(xyz, axis=0), np.max(xyz, axis=0)])
@@ -1175,9 +1193,9 @@ class SnapshotShellBuilderHeitmann(ShellBuilder):
             order = hp.nside2order(self.nside)
             ncap = (nside * nside - nside) << 1
             npix = self.npix
-
+            
             uipix, c = _construct_maps_sub_helper(
-                xyz, box_edges_original, boxsize, rmin2, rmax2, self.apply_grid_isometry, self.Abs[ishell][0], self.Abs[ishell][1],
+                False, xyz, box_edges_original, boxsize, rmin2, rmax2, self.apply_grid_isometry, self.Abs[ishell][0], self.Abs[ishell][1],
                 self.apply_replicate_rotflip, self.replicate_rotflip, self.octant_only, nside, order, ncap, npix)
             if len(uipix) > 0:
                 if verbose:
@@ -1188,7 +1206,7 @@ class SnapshotShellBuilderHeitmann(ShellBuilder):
                     print("Found no particle.")
 
             if self.save_dir is not None:
-                shell.write(fname, clobber=True, format=self.save_format)
+                shell.write(fname, clobber=True, format=self.save_format, nocompress=self.nocompress)
                 if verbose:
                     print(f"Saved to file {fname}")
 
@@ -1202,6 +1220,7 @@ class SnapshotShellBuilderHeitmann(ShellBuilder):
 
         for ishell in self.tqdm(ishells, desc="[combine_maps_subs]"):
             fname = self.get_fname(ishell)
+            # fname = os.path.join(self.save_dir, 'shell_hacc_nside' + str(self.nside) + '_imap' + str(ishell) + '.fits')
             if self.check_maps(read=True, fname=fname):
                 continue
             shell = healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
@@ -1215,7 +1234,7 @@ class SnapshotShellBuilderHeitmann(ShellBuilder):
                 except:
                     continue
             if n_subs_added != 0:
-                shell.write(fname, clobber=True, format=self.save_format)
+                shell.write(fname, clobber=True, format=self.save_format, nocompress=self.nocompress)
                 shells.append(shell)
             else:
                 print('Zero sub files found for shell number ' + str(ishell) + '!')
@@ -1456,7 +1475,7 @@ class LightconeShellBuilder(ShellBuilder):
                 return replicates
 
         if self.save_dir is not None:
-            shell.write(fname, clobber=True, format=self.save_format)
+            shell.write(fname, clobber=True, format=self.save_format, nocompress=self.nocompress)
             if verbose:
                 print(f"Saved to file {fname}")
 
@@ -1771,11 +1790,17 @@ def _unique_pix_pos(ipix, npix):
 
 @numba.njit
 def _construct_maps_sub_helper(
-        xyz_original, box_edges_original, boxsize, rmin2, rmax2, apply_grid_isometry, A, b, apply_replicate_rotflip, rep2rot, octant_only, nside, order, ncap,
+        do_replicate, xyz_original, box_edges_original, boxsize, rmin2, rmax2, apply_grid_isometry, A, b, apply_replicate_rotflip, rep2rot, octant_only, nside, order, ncap,
         npix):
     """
     Parallelized helper function for ShellBuilder.construct_shell_sub
     """
+    
+    rot_dict = numba.typed.Dict()
+    for i in range(len(rep2rot)):
+        ix, iy, iz = rep2rot[i,:3]
+        rot_dict[ix, iy, iz] = rep2rot[i,3]
+    
     # precompute isometry on particles (since replicates are then only a shift away)
     if apply_grid_isometry:
         xyz = Axpb(A, b, xyz_original)
@@ -1787,7 +1812,10 @@ def _construct_maps_sub_helper(
     n = len(xyz)
     dtype = xyz.dtype
     count = np.zeros(npix, dtype=np.uint)
-    nreplicate = int(np.ceil(np.sqrt(rmax2) / boxsize)) + 2
+    if do_replicate:
+        nreplicate = int(np.ceil(np.sqrt(rmax2) / boxsize)) + 2
+    else:
+        nreplicate = 0
 
     # replicate the box
     for ix in range(-nreplicate, nreplicate + 1):
@@ -1822,7 +1850,7 @@ def _construct_maps_sub_helper(
                 ## add particles to shell
                 # rotate/flip replicate
                 if apply_replicate_rotflip:
-                    xyz = rotflip(rep2rot[ix, iy, iz], xyz_original, boxsize)
+                    xyz = rotflip(rot_dict[ix, iy, iz], xyz_original, boxsize).astype(dtype)
 
                 # compute corresponding healpy pixels of all particles (particles out of shell/octant quickly set to -1) with vec2pix and loc2pix (translated into python from Healpix code)
                 ipix = _vec2pix(nside, order, ncap, npix, xyz[:, 0], xyz[:, 1], xyz[:, 2], shift[0, 0], shift[0, 1], shift[0, 2], rmin2, rmax2, octant_only)

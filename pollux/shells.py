@@ -104,7 +104,7 @@ class ShellBuilder(MapBuilder):
 
         # Draw random replicate rotation/flips
         if type(self.apply_replicate_rotflip) is dict:
-            warnings.info("Shell builder using user-provided replicate rot/flip: make sure not to miss any!")
+            warnings.warn("Shell builder using user-provided replicate rot/flip: make sure not to miss any!")
             self.replicate_rotflip = self.apply_replicate_rotflip
             self.apply_replicate_rotflip = True
         elif self.apply_replicate_rotflip:
@@ -130,12 +130,14 @@ class ShellBuilder(MapBuilder):
             self.apply_replicate_rotflip = False
             
         if len(self.replicate_rotflip)>0:
-            self.replicate_rotflip = np.empty((len(self.replicate_rotflip),4), dtype=np.int64)
-            # for i,(k,v) in enumerate(self.replicate_rotflip.items()):
-            #     self.replicate_rotflip[i,:3] = k
-            #     self.replicate_rotflip[i,3] = v
+            replicate_rotflip = np.empty((len(self.replicate_rotflip),4), dtype=np.int64)
+            for i,(k,v) in enumerate(self.replicate_rotflip.items()):
+                replicate_rotflip[i,:3] = k
+                replicate_rotflip[i,3] = v
+            self.replicate_rotflip = replicate_rotflip
         else:
             self.replicate_rotflip = np.zeros((1,4), dtype=np.int64)
+        
             
         
         # Try getting shell information from reader, if not dummy.
@@ -401,7 +403,7 @@ class ShellBuilder(MapBuilder):
                         ngal_pix *= 8.
                     snr_pix = 1. / np.sqrt(ngal_pix)  # S/N per pixel
                     # S/N at redshift subsample_box_auto_z
-                    snr_pix_cut = np.interp(self.subsample_box_params['densitymax_z'], [self.get_mean_z(ishell) for ishell in range(self.nshells)], snr_pix)
+                    snr_pix_cut = np.interp(self.subsample_box['densitymax_z'], [self.get_mean_z(ishell) for ishell in range(self.nshells)], snr_pix)
                     # fraction of particles to maintain S/N of z>subsample_box_auto_z
                     self.subsample_ratios = np.minimum(1., (snr_pix / snr_pix_cut)**2)
                 elif 'clmax_r' in self.subsample_box.keys():
@@ -412,7 +414,7 @@ class ShellBuilder(MapBuilder):
                     # compute theory Cl's
                     cl = self.predict_cls(auto_only=True, approximate=True)[1]
                     # fix particle density such that shot-noise is 100 times lower than Cl at lmax
-                    nbar_th = self.subsample_box_params['clmax_r'] / np.array([cl[i, i][-1] for i in range(self.nshells)])
+                    nbar_th = self.subsample_box['clmax_r'] / np.array([cl[i, i][-1] for i in range(self.nshells)])
                     # convert to desired number of particles per pixel
                     ngal_th = nbar_th * hp.nside2pixarea(self.nside, degrees=False)
                     self.subsample_ratios = np.minimum(1., ngal_th / ngal_pix)
@@ -643,7 +645,7 @@ class SnapshotShellBuilder(ShellBuilder):
         # print(self.apply_grid_isometry)
         # print(self.Abs[ishell][0], self.Abs[ishell][1])
         # print(self.apply_replicate_rotflip)
-        print(self.replicate_rotflip)
+        # print(self.replicate_rotflip)
         # print(self.octant_only)
 
         uipix, c = _construct_maps_sub_helper(
@@ -1596,7 +1598,7 @@ def random_isometry(rng, boxsize):
     """
     Generate a random isometry defined by a matrix representing rotations/permutations/flips and a vector translation
     """
-    pcomb = list(itertools.product([1, -1], replicate=3))  # all permuted orders
+    pcomb = list(itertools.product([1, -1], repeat=3))  # all permuted orders
     r = Rotation.random(random_state=rng).as_matrix()
     p = pcomb[rng.choice(len(pcomb))]
     A = np.dot(r, np.diag(np.array(p)))
@@ -1800,7 +1802,7 @@ def _construct_maps_sub_helper(
     for i in range(len(rep2rot)):
         ix, iy, iz = rep2rot[i,:3]
         rot_dict[ix, iy, iz] = rep2rot[i,3]
-    
+        
     # precompute isometry on particles (since replicates are then only a shift away)
     if apply_grid_isometry:
         xyz = Axpb(A, b, xyz_original)

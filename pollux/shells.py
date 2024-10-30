@@ -259,8 +259,11 @@ class ShellBuilder(MapBuilder):
             np.savetxt(fname, shell_info, header=' '.join(names), fmt=fmt)
 
         # Save cosmology
-        self.reader.cosmo.write_yaml(os.path.join(self.save_dir, "cosmo_ccl.yaml"))
-
+        try:
+            self.reader.cosmo.write_yaml(os.path.join(self.save_dir, "cosmo_ccl.yaml"))
+        except ValueError:
+            warnings.warn("Cannot write cosmo yaml file, likely due to using non-serializable options (eg P(k)).")
+            
         # Save simulation and maps info
         data = {
             "nparticles": self.reader.nparticles,

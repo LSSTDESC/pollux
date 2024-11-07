@@ -327,7 +327,7 @@ class ShellBuilder(MapBuilder):
 
         return quad(lambda z: z * dVdz(z), zmin, zmax) / quad(dVdz, zmin, zmax)
 
-    def get_random_isometries(self, group_isometries=None):
+    def get_random_isometries(self, group_isometries=None, get_shell_identifier=False):
         """Generate random isometries for each shell
 
         Returns
@@ -353,6 +353,7 @@ class ShellBuilder(MapBuilder):
         Abs = []
         n_isometries = 0
         dchi_iso = np.inf
+        shell_identifier = {}
 
         for ishell in range(self.nshells):
             dchi_shell = chi_shell_bins[ishell + 1] - chi_shell_bins[ishell]
@@ -363,13 +364,17 @@ class ShellBuilder(MapBuilder):
                 dchi_iso = 0.
             dchi_iso += dchi_shell
             Abs.append([A.astype(self.reader.dtype), b.astype(self.reader.dtype)])
+            shell_identifier[ishell] = n_isometries
 
         if group_isometries is not None:
             print(f"  - Using {n_isometries} isometries grouped within {dchi_iso_max:.2f} Mpc.")
         else:
             print(f"  - Using {n_isometries} isometries.")
-
-        return Abs
+        
+        if get_shell_identifier:
+            return Abs, shell_identifier
+        else:
+            return Abs
 
     def estimate_replicates(self, ishell):
         """
@@ -1810,12 +1815,9 @@ def _construct_maps_sub_helper(
     if apply_grid_isometry:
         xyz = Axpb(A, b, xyz_original)
         box_edges = Axpb(A, b, box_edges_original)
-    else:
-        xyz = xyz_original
-        box_edges = box_edges_original
 
-    n = len(xyz)
-    dtype = xyz.dtype
+    n = len(xyz_original)
+    dtype = xyz_original.dtype
     count = np.zeros(npix, dtype=np.uint)
     if do_replicate:
         nreplicate = int(np.ceil(np.sqrt(rmax2) / boxsize)) + 2
@@ -1832,7 +1834,13 @@ def _construct_maps_sub_helper(
                     shift = Ax(A, shift_original)
                 else:
                     shift = shift_original
-
+                
+                if apply_replicate_rotflip:
+                    if (ix,iy,iz) not in rot_dict:
+                        continue
+                    else:
+                        box_edges = rotflip(rot_dict[ix, iy, iz], box_edges_original, boxsize).astype(dtype)
+                
                 # apply shift to box edges
                 box_edges_shifted = shift + box_edges
 
@@ -1848,17 +1856,24 @@ def _construct_maps_sub_helper(
                     continue
 
                 # second, check if box intersects with outer sphere
-                sphere_center = -b if apply_grid_isometry else np.zeros(3, dtype=dtype)
-                if not _AABB_sphere_intersect(box_edges_original + shift_original, sphere_center, rmax2):
-                    continue
-
+                if apply_grid_isometry:
+                    if not _AABB_sphere_intersect(box_edges_original + shift_original, -b, rmax2):
+                        continue
+                else:
+                    if not _AABB_sphere_intersect(box_edges_shifted, np.zeros(3, dtype=dtype), rmax2):
+                        continue
+                        
                 ## add particles to shell
                 # rotate/flip replicate
                 if apply_replicate_rotflip:
                     xyz = rotflip(rot_dict[ix, iy, iz], xyz_original, boxsize).astype(dtype)
-
+                    
                 # compute corresponding healpy pixels of all particles (particles out of shell/octant quickly set to -1) with vec2pix and loc2pix (translated into python from Healpix code)
                 ipix = _vec2pix(nside, order, ncap, npix, xyz[:, 0], xyz[:, 1], xyz[:, 2], shift[0, 0], shift[0, 1], shift[0, 2], rmin2, rmax2, octant_only)
+                
+                # print([ipix.min(), ipix.max()])
+                
+                # return
 
                 for i in range(n):
                     pos = ipix[i]

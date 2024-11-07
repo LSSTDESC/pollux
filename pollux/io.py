@@ -9,7 +9,7 @@ from astropy.io import fits
 
 class PolluxIO:
 
-    def __init__(self, sim_path, seed, tomo="SRDv1_nz", catalog="poisson"):
+    def __init__(self, sim_path, seed, tomo="SRDv1_nz", catalog="poisson", interp_pixels=True, bias=1):
         """`PolluxIO` creates an interface to Pollux/HACC simulations data products.
 
         Parameters
@@ -19,15 +19,21 @@ class PolluxIO:
         seed
             Seed used for pseudo-independent realizations.
         tomo, optional
-            Name of the tomographic redshift distributions used for lensing products, by default "SRDv1_nz" (other option are "kappa_Euclid_dndz_fu08_bin1-5" and "kappa_zsnapshots" for individual shells).
+            Name of the tomographic redshift distributions used for lensing products, by default "SRDv1_nz" (the other option is "kappa_zsnapshots" for individual shells).
         catalog, optional
             Source catalog sampling method, by default "poisson" (other options are "uniform" and "multinomial").
+        interp_pixels, optional
+            Whether to interpolate between adjacent pixels when creating the mock catalogs, by default True.
+        bias, optional
+            Value for the galaxy bias used for the Poisson mock catalogs.
         """
         self.sim_path = sim_path
         self.seed = seed
         if tomo is not None:
             self.tomo = tomo
         self.catalog = catalog
+        self.interp_pixels = interp_pixels
+        self.bias = bias
         print("*** PolluxIO ***")
         print(" - path =", sim_path)
 
@@ -67,6 +73,27 @@ class PolluxIO:
             f"shell_{self.kind}_seed{self.seed}_nside{self.nside}_haloes_props_imap{i}.fits",
         )
         return fits.open(fname)
+    
+    def load_IA(self, i):
+        fname = os.path.join(
+            self.sim_path,
+            f"shell_{self.kind}_seed{self.seed}_nside{self.nside}_t11_imap{i}.fits",
+        )
+        t11 = healsparse.HealSparseMap.read(fname)
+
+        fname = os.path.join(
+            self.sim_path,
+            f"shell_{self.kind}_seed{self.seed}_nside{self.nside}_t12_imap{i}.fits",
+        )
+        t12 = healsparse.HealSparseMap.read(fname)
+        
+        fname = os.path.join(
+            self.sim_path,
+            f"shell_{self.kind}_seed{self.seed}_nside{self.nside}_t22_imap{i}.fits",
+        )
+        t22 = healsparse.HealSparseMap.read(fname)
+
+        return t11, t12, t22
 
     def load_kappa(self, i):
         fname = os.path.join(
@@ -94,9 +121,17 @@ class PolluxIO:
         return g1, g2
 
     def load_catalog(self, i):
-        fname = os.path.join(
-            self.sim_path,
-            self.tomo,
-            f"kappa_{self.kind}_seed{self.seed}_nside{self.nside}_cat{self.catalog}_imap{i}.fits",
-        )
+        interp_pixels_dict = {True: 'interppixels',False: 'nointerppixels'}
+        if self.catalog == 'poisson':
+            fname = os.path.join(
+                self.sim_path,
+                self.tomo,
+                f"kappa_{self.kind}_seed{self.seed}_nside{self.nside}_cat{self.catalog}_{interp_pixels_dict[self.interp_pixels]}_b{self.bias}_imap{i}.fits",
+            )
+        elif self.catalog == 'uniform':
+            fname = os.path.join(
+                self.sim_path,
+                self.tomo,
+                f"kappa_{self.kind}_seed{self.seed}_nside{self.nside}_cat{self.catalog}_{interp_pixels_dict[self.interp_pixels]}_imap{i}.fits",
+            )
         return fits.open(fname)

@@ -563,6 +563,7 @@ class HACCLightconeReader(Reader):
             self,
             path,
             run_params='run/run000/indat.params',
+            snapshots=None,
             snap_sub_every_n=1,
             snap_sub_zmax=None,
             matter_power_spectrum=None,
@@ -629,9 +630,7 @@ class HACCLightconeReader(Reader):
         self.sim_zmax = sim_zmax
         self.sim_zmin = sim_zmin
         
-        if snap_sub_every_n is None:
-            snapshots = np.arange(248,500)
-        else:
+        if snapshots is None:
             # simulation snapshot redshifts : step are constant in scale factor, but only a fraction of steps are saved
             snapshots = np.array(list(map(int, params['ALIVE_DUMP'].split())))
             snapshot_dir = os.path.join(path, 'output')
@@ -643,16 +642,18 @@ class HACCLightconeReader(Reader):
                 except AssertionError:
                     snapshots = snapshots_output
                     warnings.warn("We are using the snapshots found in the `output` folder, which do not match those in the parameter file.")
-        print(f"  - Found {len(snapshots)} snapshots :", snapshots)
+            print(f"  - Found {len(snapshots)} snapshots :", snapshots)
+            
+        self.snapshots_fulllist = np.copy(snapshots[::-1])
 
-        # helper function : we only work on the list of snapshots to avoid mistakes in book-keeping
-        def get_asnapshots(idx):
-            asnapshots_all = np.linspace(1. / (1. + sim_zmax), 1. / (1. + sim_zmin), nsteps + 1)[1:]
-            return asnapshots_all[idx]
+        # # helper function : we only work on the list of snapshots to avoid mistakes in book-keeping
+        # def get_asnapshots(idx):
+        #     asnapshots_all = np.linspace(1. / (1. + sim_zmax), 1. / (1. + sim_zmin), nsteps + 1)[1:]
+        #     return asnapshots_all[idx]
         
         # subsample snapshots : maximum redshift
         if snap_sub_zmax is not None:
-            w = np.argwhere(get_asnapshots(snapshots) > 1. / (1. + snap_sub_zmax))
+            w = np.argwhere(self.get_asnapshots(snapshots) > 1. / (1. + snap_sub_zmax))
             if len(w) > 0:
                 snapshots = snapshots[w[0, 0]:]
                 print(f"  - Subsampling : max redshift {snap_sub_zmax}, returns {len(snapshots)} snapshots")
@@ -665,12 +666,9 @@ class HACCLightconeReader(Reader):
 
             if snap_sub_every_n > 1:
                 print(f"  - Subsampling : keeping every {snap_sub_every_n} snapshots, returns {len(self.snapshots)} snapshots")
-                
-        snapshots_fulllist = np.arange(248,500)
-        self.snapshots_fulllist = snapshots_fulllist[::-1]
 
         # done with subsampling !
-        zsnapshots = 1. / get_asnapshots(self.snapshots) - 1.
+        zsnapshots = 1. / self.get_asnapshots(self.snapshots) - 1.
         
 
         # simulation properties
@@ -711,15 +709,19 @@ class HACCLightconeReader(Reader):
         
         file = os.path.join(path_subs, 'm000.lc.mpicosmo.'+str(snapshot)+'#'+str(isub))
         
-        out = pygio.read_genericio(file, variables = ['x', 'y', 'z'])
+        out = pygio.read_genericio(file, variables = ['x', 'y', 'z'], print_stats=False)
         
         out = {key: value / self.cosmo["h"] for key, value in out.items()}
         
         return np.column_stack([out['x'],out['y'],out['z']])
 
-    def get_r2snapshots(self, idx):
-        r2snapshots_all = self.cosmo.comoving_radial_distance(np.linspace(1. / (1. + self.sim_zmax), 1. / (1. + self.sim_zmin), self.nsteps + 1)[1:])**2
-        return r2snapshots_all[idx]
+    # def get_r2snapshots(self, idx):
+    #     r2snapshots_all = self.cosmo.comoving_radial_distance(np.linspace(1. / (1. + self.sim_zmax), 1. / (1. + self.sim_zmin), self.nsteps + 1)[1:])**2
+    #     return r2snapshots_all[idx]
+    
+    def get_asnapshots(self, idx):
+        asnapshots_all = np.linspace(1. / (1. + self.sim_zmax), 1. / (1. + self.sim_zmin), self.nsteps + 1)[1:]
+        return asnapshots_all[idx]
 
 
 

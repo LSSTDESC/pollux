@@ -252,7 +252,10 @@ class ShellBuilder(MapBuilder):
         if ext == 'npy':
             if os.path.exists(fname):
                 shell_info_existing = np.load(fname)
-                np.testing.assert_array_equal(shell_info, shell_info_existing)
+                try:
+                    np.testing.assert_array_equal(shell_info, shell_info_existing)
+                except TypeError:
+                    warnings.warn('Shell info file exists, different type!')
             else:
                 np.save(fname, shell_info)
         else:

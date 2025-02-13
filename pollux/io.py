@@ -33,7 +33,7 @@ class PolluxIO:
 
         # Basic simulations info
         print(" - simulations info")
-        info = yaml.safe_load(open(os.path.join(self.sim_path, "sim_info.yaml"), "r"))
+        info = yaml.unsafe_load(open(os.path.join(self.sim_path, "sim_info.yaml"), "r"))
         for k, v in info.items():
             setattr(self, k, v)
             print(f"    * {k} = {v}")

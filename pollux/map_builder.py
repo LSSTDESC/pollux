@@ -440,6 +440,7 @@ class MapBuilder:
                 if os.path.exists(fname):
                     try:
                         alms[imap] = hp.read_alm(fname)
+                        print('They already exist!')
                         continue
                     except:
                         pass
@@ -894,3 +895,133 @@ class MapBuilder:
             fig.savefig(fname, bbox_inches='tight')
 
         # plt.show()
+
+        
+        
+    def compute_kappa_moments(self):
+        """Compute the second, third and fourth moments of convergence maps
+        
+        Returns
+        -------
+            theta, kappa_2, kappa_3, kappa_4
+        """
+        
+        fname = self.get_fname(what='2nd_3rd_4th_moments', format='npy')
+        
+        if not os.path.exists(fname):
+        
+            kappa = {}
+
+            theta_range = np.geomspace(2.5, 250, 8)
+            
+            nside_small = 512
+            lmax_out = 2*nside_small
+            
+            # Mask
+
+            mask_octant = make_mask_radec_cuts(nside_small, 0, 90, 0, 90, nest=True).astype(bool)
+            ipix_octant = np.where(mask_octant)[0]
+
+            for bin_z in range(len(self.nmaps)):
+
+                kappa[bin_z] = {}
+
+                alm = self.compute_alms(imaps=bin_z)[bin_z]
+                lmax = hp.Alm.getlmax(len(alm))
+                alm = hp.sphtfunc.resize_alm(alm, lmax=lmax, mmax=lmax, lmax_out=lmax_out, mmax_out=lmax_out)
+
+                # Let's measure kappa from the alms
+
+                for theta in theta_range:
+
+                    kappa_map = hp.alm2map(alm, nside_small, sigma=theta*1/60*np.pi/180, lmax=lmax_out)
+                    kappa_map = hp.pixelfunc.reorder(kappa_map, r2n=True)
+                    kappa_map[~mask_octant] = hp.UNSEEN
+                    kappa[bin_z][theta] = kappa_map
+
+            # 2nd moment
+
+            second_moment = {}
+
+            for theta in theta_range:
+
+                second_moment[theta] = np.cov(np.stack([kappa[bin_z][theta][ipix_octant] for bin_z in range(len(self.nmaps))], axis=0))
+
+            # 3rd moment
+
+            from itertools import product
+
+            third_moment = {}
+
+            for theta in theta_range:
+                # Stack data for all bins at the given theta
+                data = np.stack([kappa[bin_z][theta][ipix_octant] for bin_z in range(len(self.nmaps))], axis=0)
+
+                # Calculate the means for each bin
+                means = np.mean(data, axis=1)  # Shape: (n_bins,)
+
+                # Center the data
+                centered_data = data - means[:, np.newaxis]  # Shape: (n_bins, n_realizations)
+
+                # Compute third moments across all bin combinations
+                n_bins = centered_data.shape[0]
+                n_realizations = centered_data.shape[1]
+                third_moment_theta = np.zeros((n_bins, n_bins, n_bins))
+
+                for i, j, k in product(range(n_bins), repeat=3):
+                    third_moment_theta[i, j, k] = np.mean(
+                        centered_data[i] * centered_data[j] * centered_data[k]
+                    )
+
+                # Store the third moment tensor for this theta
+                third_moment[theta] = third_moment_theta
+
+            # 4th moment
+
+            fourth_moment = {}
+
+            for theta in theta_range:
+                # Stack data for all bins at the given theta
+                data = np.stack([kappa[bin_z][theta][ipix_octant] for bin_z in range(len(self.nmaps))], axis=0)
+
+                # Calculate the means for each bin
+                means = np.mean(data, axis=1)  # Shape: (n_bins,)
+
+                # Center the data
+                centered_data = data - means[:, np.newaxis]  # Shape: (n_bins, n_realizations)
+
+                # Compute 4th moments across all bin combinations
+                n_bins = centered_data.shape[0]
+                n_realizations = centered_data.shape[1]
+                fourth_moment_theta = np.zeros((n_bins, n_bins, n_bins, n_bins))
+
+                for i, j, k, l in product(range(n_bins), repeat=4):
+                    fourth_moment_theta[i, j, k, l] = np.mean(
+                        centered_data[i] * centered_data[j] * centered_data[k] * centered_data[l]
+                    )
+
+                # Store the 4th moment tensor for this theta
+                fourth_moment[theta] = fourth_moment_theta
+                
+            # Let's save them all
+            
+            moments = {}
+            
+            moments['theta_range'] = theta_range
+            moments['second_moment'] = second_moment
+            moments['third_moment'] = third_moment
+            moments['fourth_moment'] = fourth_moment
+
+            print('Saving output as: ' +fname)
+            
+            np.save(fname, moments)
+            
+        else:
+            
+            print('Loading pre-existing file: ' +fname)
+            
+            moments = np.load(fname, allow_pickle=True).item()
+
+            theta_range, second_moment, third_moment, fourth_moment = moments['theta_range'], moments['second_moment'], moments['third_moment'], moments['fourth_moment']
+            
+        return theta_range, second_moment, third_moment, fourth_moment

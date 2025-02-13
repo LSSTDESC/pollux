@@ -207,14 +207,14 @@ class ShellBuilder(MapBuilder):
         Compute summary shell information
         """
         z_shell_bins = self.shell_edges_redshift()
-        names = ['ishell', 'zsnapshot', 'zmin', 'zmax', 'snapshot_id']
-        dtypes = ['int', 'float', 'float', 'float', 'int']
+        names = ['ishell', 'zsnapshot', 'zmin', 'zmax', 'chisnapshot', 'chimin', 'chimax', 'snapshot_id']
+        dtypes = ['int', 'float', 'float', 'float', 'float', 'float', 'float', 'int']
         out = np.array(
-            list(zip(np.arange(self.nshells), self.reader.zsnapshots, z_shell_bins[:-1], z_shell_bins[1:], self.reader.snapshots)),
+            list(zip(np.arange(self.nshells), self.reader.zsnapshots, z_shell_bins[:-1], z_shell_bins[1:], self.cosmo.comoving_radial_distance(1/(1+self.reader.zsnapshots)), self.cosmo.comoving_radial_distance(1/(1+z_shell_bins[:-1])), self.cosmo.comoving_radial_distance(1/(1+z_shell_bins[1:])), self.reader.snapshots)),
             dtype=list(zip(names, dtypes)))
         if fname is not None:
             if '.txt' in fname:
-                np.savetxt(fname, out, header=' '.join(names), fmt='%8i %16.8f %16.8f %16.8f %8i')
+                np.savetxt(fname, out, header=' '.join(names), fmt='%8i %16.8f %16.8f %16.8f %16.8f %16.8f %16.8f %8i')
             else:
                 np.save(fname, out)
         return out
@@ -231,15 +231,14 @@ class ShellBuilder(MapBuilder):
         pixel_density = [self.get_pixel_density(ishell) for ishell in range(self.nshells)]
         sky_density = [self.get_sky_density(ishell) for ishell in range(self.nshells)]
         if self.kind == 'snapshot':
-            names = ['ishell', 'zsnapshot', 'zmin', 'zmax', 'snapshot_id', 'pixel_density', 'sky_density']
-            dtypes = ['int', 'float', 'float', 'float', 'int', 'float', 'float']
+            names = ['ishell', 'zsnapshot', 'zmin', 'zmax', 'chisnapshot', 'chimin', 'chimax', 'snapshot_id', 'pixel_density', 'sky_density']
+            dtypes = ['int', 'float', 'float', 'float', 'float', 'float', 'float', 'int', 'float', 'float']
             shell_info = np.array(
                 list(
                     zip(
-                        np.arange(self.nshells), self.reader.zsnapshots, z_shell_bins[:-1], z_shell_bins[1:], self.reader.snapshots, pixel_density,
-                        sky_density)),
+                        np.arange(self.nshells), self.reader.zsnapshots, z_shell_bins[:-1], z_shell_bins[1:], self.cosmo.comoving_radial_distance(1/(1+self.reader.zsnapshots)), self.cosmo.comoving_radial_distance(1/(1+z_shell_bins[:-1])), self.cosmo.comoving_radial_distance(1/(1+z_shell_bins[1:])), self.reader.snapshots, pixel_density, sky_density)),
                 dtype=list(zip(names, dtypes)))
-            fmt = '%8i %16.8f %16.8f %16.8f %8i %16.8f %16.8f'
+            fmt = '%8i %16.8f %16.8f %16.8f %16.8f %16.8f %16.8f %8i %16.8f %16.8f'
         elif self.kind == 'lightcone':
             names = ['ishell', 'zmin', 'zmax', 'pixel_density', 'sky_density']
             dtypes = ['int', 'float', 'float', 'float', 'float']
@@ -274,9 +273,9 @@ class ShellBuilder(MapBuilder):
             "mass_particles": self.reader.mass_particles,
             "box_comoving_density": self.reader.box_comoving_density(),
             "kind": self.reader.kind,
-            "snapshots": self.reader.snapshots,
+            "snapshots": self.reader.snapshots.tolist(),
             "nsnapshots": self.reader.nsnapshots,
-            "zsnapshots": self.reader.zsnapshots,
+            "zsnapshots": self.reader.zsnapshots.tolist(),
             "nshells": self.nshells,
             "nside": self.nside,
             "nside_c": self.nside_c,
@@ -330,7 +329,7 @@ class ShellBuilder(MapBuilder):
 
         return quad(lambda z: z * dVdz(z), zmin, zmax) / quad(dVdz, zmin, zmax)
 
-    def get_random_isometries(self, group_isometries=None):
+    def get_random_isometries(self, group_isometries=None, get_shell_identifier=False):
         """Generate random isometries for each shell
 
         Returns
@@ -356,6 +355,7 @@ class ShellBuilder(MapBuilder):
         Abs = []
         n_isometries = 0
         dchi_iso = np.inf
+        shell_identifier = {}
 
         for ishell in range(self.nshells):
             dchi_shell = chi_shell_bins[ishell + 1] - chi_shell_bins[ishell]
@@ -366,13 +366,17 @@ class ShellBuilder(MapBuilder):
                 dchi_iso = 0.
             dchi_iso += dchi_shell
             Abs.append([A.astype(self.reader.dtype), b.astype(self.reader.dtype)])
+            shell_identifier[ishell] = n_isometries
 
         if group_isometries is not None:
             print(f"  - Using {n_isometries} isometries grouped within {dchi_iso_max:.2f} Mpc.")
         else:
             print(f"  - Using {n_isometries} isometries.")
-
-        return Abs
+        
+        if get_shell_identifier:
+            return Abs, shell_identifier
+        else:
+            return Abs
 
     def estimate_replicates(self, ishell):
         """
@@ -1119,69 +1123,79 @@ class SnapshotShellBuilderHeitmann(ShellBuilder):
             shell = healsparse.HealSparseMap.read(fname)
         else:
 
-            # get shell radii
             chi_shell_bins = self.shell_edges_comoving_distance()
             rmin2, rmax2 = chi_shell_bins[ishell]**2, chi_shell_bins[ishell + 1]**2
+            
+            z_shell_bins = self.shell_edges_redshift()
+            zmin, zmax = z_shell_bins[ishell], z_shell_bins[ishell + 1]
 
             Abs = [(np.zeros((3, 3), dtype=self.dtype), np.zeros(3, dtype=self.dtype)) for _ in range(self.nshells)]
 
             boxsize = self.dtype(self.reader.boxsize())
             
-#             r2snapshot_fulllist = self.reader.get_r2snapshots(self.reader.snapshots_fulllist)
             
-#             xyz = []
+            # 1
             
-#             try:
+            zsnapshot_fulllist = 1/self.reader.get_asnapshots(self.reader.snapshots_fulllist) - 1
             
-#                 for isnapshot in range(len(r2snapshot_fulllist)-1):
-#                     if rmin2 > r2snapshot_fulllist[isnapshot+1]:
-#                         continue
-#                     if rmax2 < r2snapshot_fulllist[isnapshot]:
-#                         continue
-#                     xyz.append(self.reader.read_sub(isnapshot, isub))
-#                 xyz = np.vstack(xyz)
+            xyz = []
+            
+            try:
+            
+                for isnapshot in range(len(zsnapshot_fulllist) - 1):
+                    if zmin > zsnapshot_fulllist[isnapshot + 1]:
+                        continue
+                    if zmax < zsnapshot_fulllist[isnapshot]:
+                        continue
+                    xyz.append(self.reader.read_sub(isnapshot, isub))
+                xyz = np.vstack(xyz)
+                
+                if ishell == 0:
+                    print(['Edges', rmin2, (xyz[:,0]**2+xyz[:,1]**2+xyz[:,2]**2).min(), rmax2, (xyz[:,0]**2+xyz[:,1]**2+xyz[:,2]**2).max()])
+                else:
+                    print(['Edges', (xyz[:,0]**2+xyz[:,1]**2+xyz[:,2]**2).min(), rmin2, rmax2, (xyz[:,0]**2+xyz[:,1]**2+xyz[:,2]**2).max()])
+            except:
+                pass
+            
+            # 2
 
-#                 print([(xyz[:,0]**2+xyz[:,1]**2+xyz[:,2]**2).min(),rmin2,rmax2,(xyz[:,0]**2+xyz[:,1]**2+xyz[:,2]**2).max()])
-#             except:
-#                 pass
-            
-            if self.reader.snap_sub_every_n is None:
-                if ishell == 0:
-                    xyz = self.reader.read_sub(0, isub)
-                else:
-                    xyz_i = self.reader.read_sub(ishell - 1, isub)
-                    xyz_f = self.reader.read_sub(ishell, isub)
-                    xyz = np.vstack((xyz_i, xyz_f))
-            else:
-                # read box
-                if ishell == 0:
-                    i = np.argwhere(self.reader.snapshots[ishell] == self.reader.snapshots_fulllist)[0][0]
-                    f = np.argwhere(self.reader.snapshots[ishell + 1] == self.reader.snapshots_fulllist)[0][0]
-                    f = int(f / 2 + 1)+1
-                    for k in np.arange(i, f):
-                        try:
-                            xyz = np.vstack((xyz, self.reader.read_sub(k, isub)))
-                        except:
-                            xyz = self.reader.read_sub(k, isub)
-                    # try:
-                    #     print([rmin2,(xyz[:,0]**2+xyz[:,1]**2+xyz[:,2]**2).min(),rmax2,(xyz[:,0]**2+xyz[:,1]**2+xyz[:,2]**2).max()])
-                    # except:
-                    #     pass
-                else:
-                    i = np.argwhere(self.reader.snapshots[ishell - 1] == self.reader.snapshots_fulllist)[0][0]
-                    f = np.argwhere(self.reader.snapshots[ishell] == self.reader.snapshots_fulllist)[0][0]
-                    delta = int((f - i) / 2)
-                    i += delta-1
-                    f += delta
-                    for k in np.arange(i, f):
-                        try:
-                            xyz = np.vstack((xyz, self.reader.read_sub(k, isub)))
-                        except:
-                            xyz = self.reader.read_sub(k, isub)
-                    # try:
-                    #     print([(xyz[:,0]**2+xyz[:,1]**2+xyz[:,2]**2).min(),rmin2,rmax2,(xyz[:,0]**2+xyz[:,1]**2+xyz[:,2]**2).max()])
-                    # except:
-                    #     pass
+            # if self.reader.snap_sub_every_n is None and self.reader.snap_sub_every_n_downsample is None:
+            #     if ishell == 0:
+            #         xyz = self.reader.read_sub(0, isub)
+            #     else:
+            #         xyz_i = self.reader.read_sub(ishell - 1, isub)
+            #         xyz_f = self.reader.read_sub(ishell, isub)
+            #         xyz = np.vstack((xyz_i, xyz_f))
+            # else:
+            #     # read box
+            #     if ishell == 0:
+            #         i = np.argwhere(self.reader.snapshots[ishell] == self.reader.snapshots_fulllist)[0][0]
+            #         f = np.argwhere(self.reader.snapshots[ishell + 1] == self.reader.snapshots_fulllist)[0][0]
+            #         f = int(f / 2 + 1)+1
+            #         for k in np.arange(i, f):
+            #             try:
+            #                 xyz = np.vstack((xyz, self.reader.read_sub(k, isub)))
+            #             except:
+            #                 xyz = self.reader.read_sub(k, isub)
+            #         try:
+            #             print(['Edges',rmin2,(xyz[:,0]**2+xyz[:,1]**2+xyz[:,2]**2).min(),rmax2,(xyz[:,0]**2+xyz[:,1]**2+xyz[:,2]**2).max()])
+            #         except:
+            #             pass
+            #     else:
+            #         i = np.argwhere(self.reader.snapshots[ishell - 1] == self.reader.snapshots_fulllist)[0][0]
+            #         f = np.argwhere(self.reader.snapshots[ishell] == self.reader.snapshots_fulllist)[0][0]
+            #         delta = int((f - i) / 2)
+            #         i += delta-1
+            #         f += delta+1
+            #         for k in np.arange(i, f):
+            #             try:
+            #                 xyz = np.vstack((xyz, self.reader.read_sub(k, isub)))
+            #             except:
+            #                 xyz = self.reader.read_sub(k, isub)
+            #         try:
+            #             print(['Edges',(xyz[:,0]**2+xyz[:,1]**2+xyz[:,2]**2).min(),rmin2,rmax2,(xyz[:,0]**2+xyz[:,1]**2+xyz[:,2]**2).max()])
+            #         except:
+            #             pass
                     
 
             try:
@@ -1201,6 +1215,15 @@ class SnapshotShellBuilderHeitmann(ShellBuilder):
             order = hp.nside2order(self.nside)
             ncap = (nside * nside - nside) << 1
             npix = self.npix
+            
+            # print(xyz)
+            # print(box_edges_original)
+            # print(boxsize)
+            # print(rmin2)
+            # print(rmax2)
+            # print(self.apply_grid_isometry)
+            # print(self.apply_replicate_rotflip, self.replicate_rotflip, self.octant_only, nside, order, ncap, npix)
+            
             
             uipix, c = _construct_maps_sub_helper(
                 False, xyz, box_edges_original, boxsize, rmin2, rmax2, self.apply_grid_isometry, self.Abs[ishell][0], self.Abs[ishell][1],
@@ -1341,7 +1364,7 @@ class LightconeShellBuilder(ShellBuilder):
                 [np.min([np.min(xyz_i, axis=0), np.min(xyz_f, axis=0)], axis=0),
                  np.max([np.max(xyz_i, axis=0), np.max(xyz_f, axis=0)], axis=0)])
             cube_nodes = ((np.arange(8)[:, None] & (1 << np.arange(3))) > 0).astype(int)  #[(0,0,0),(0,0,1),...,(1,1,1)]
-            box_edges_original = box_lims[0] + (box_lims[1] - box_lims[0]) * cube_nodes
+            box_edges_original = (box_lims[0] + (box_lims[1] - box_lims[0]) * cube_nodes).astype(self.dtype)
 
         else:
             xyz_i, box_edges_original, idx_i = self.reader.read_sub(isub, extra_variables=['id'])
@@ -1369,17 +1392,18 @@ class LightconeShellBuilder(ShellBuilder):
 
             if verbose:
                 print(f"Found {len(idx_i_in)} particles in both boxes, {len(idx_i_out)}/{len(idx_f_out)} orphans in initial/final boxes saved.")
-
+        
         # particle sub-sampling
         if self.subsample_box is not None:
-            raise NotImplementedError
-            # ratio = self.get_subsample_ratio(ishell)
-            # nparticles_kept = int(len(xyz) * ratio)
-            # if verbose:
-            #     print(f"Keeping {nparticles_kept} particles, ie a fraction {ratio}.")
-            # if nparticles_kept < len(xyz):
-            #     rng = np.random.default_rng(self.seed + ishell)
-            #     xyz = xyz[rng.choice(len(xyz), size=nparticles_kept, replace=False), :]
+            ratio = self.get_subsample_ratio(isnap)
+            nparticles_kept = int(len(xyz_i) * ratio)
+            if verbose:
+                print(f"Keeping {nparticles_kept} particles, ie a fraction {ratio}.")
+            if nparticles_kept < len(xyz_i):
+                rng = np.random.default_rng(self.seed + isnap)
+                s = rng.choice(len(xyz_i), size=nparticles_kept, replace=False)
+                xyz_i = xyz_i[s, :]
+                xyz_f = xyz_f[s, :]
 
         # initialize shell
         shell = healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
@@ -1814,17 +1838,18 @@ def _construct_maps_sub_helper(
         xyz = Axpb(A, b, xyz_original)
         box_edges = Axpb(A, b, box_edges_original)
     else:
-        xyz = xyz_original
-        box_edges = box_edges_original
+        if not apply_replicate_rotflip:
+            xyz = xyz_original
+            box_edges = box_edges_original
 
-    n = len(xyz)
-    dtype = xyz.dtype
+    n = len(xyz_original)
+    dtype = xyz_original.dtype
     count = np.zeros(npix, dtype=np.uint)
     if do_replicate:
         nreplicate = int(np.ceil(np.sqrt(rmax2) / boxsize)) + 2
     else:
         nreplicate = 0
-
+        
     # replicate the box
     for ix in range(-nreplicate, nreplicate + 1):
         for iy in range(-nreplicate, nreplicate + 1):
@@ -1835,34 +1860,43 @@ def _construct_maps_sub_helper(
                     shift = Ax(A, shift_original)
                 else:
                     shift = shift_original
-
+                
+                if apply_replicate_rotflip:
+                    if (ix,iy,iz) not in rot_dict:
+                        continue
+                    else:
+                        box_edges = rotflip(rot_dict[ix, iy, iz], box_edges_original, boxsize).astype(dtype)
+                
                 # apply shift to box edges
                 box_edges_shifted = shift + box_edges
-
+                
                 ## check if box intersects octant, otherwise skip
                 # (to do so, we check if the box is fully contained in the x<0 or y<0 or z<0 half spaces)
                 if octant_only:
                     if np.any(np.array([np.all(box_edges_shifted[:, i] <= 0.) for i in range(3)])):
                         continue
-
+                        
                 ## check if box intersects with shell, otherwise skip
                 # first, check if box fully inside inner sphere
                 if np.all(xyz2r2(box_edges_shifted) < rmin2):
                     continue
-
+                    
                 # second, check if box intersects with outer sphere
-                sphere_center = -b if apply_grid_isometry else np.zeros(3, dtype=dtype)
-                if not _AABB_sphere_intersect(box_edges_original + shift_original, sphere_center, rmax2):
-                    continue
-
+                if apply_grid_isometry:
+                    if not _AABB_sphere_intersect(box_edges_original + shift_original, -b, rmax2):
+                        continue
+                else:
+                    if not _AABB_sphere_intersect(box_edges_shifted, np.zeros(3, dtype=dtype), rmax2):
+                        continue
+                        
                 ## add particles to shell
                 # rotate/flip replicate
                 if apply_replicate_rotflip:
                     xyz = rotflip(rot_dict[ix, iy, iz], xyz_original, boxsize).astype(dtype)
-
+                    
                 # compute corresponding healpy pixels of all particles (particles out of shell/octant quickly set to -1) with vec2pix and loc2pix (translated into python from Healpix code)
                 ipix = _vec2pix(nside, order, ncap, npix, xyz[:, 0], xyz[:, 1], xyz[:, 2], shift[0, 0], shift[0, 1], shift[0, 2], rmin2, rmax2, octant_only)
-
+                
                 for i in range(n):
                     pos = ipix[i]
                     if pos >= 0:

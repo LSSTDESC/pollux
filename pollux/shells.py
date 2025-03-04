@@ -718,7 +718,7 @@ class SnapshotShellBuilder(ShellBuilder):
             print(f"Loaded box {isub} (shell {ishell}) with {len(xyz)} particles.")
 
         idx, ra, dec, r = _construct_catalog_sub_helper(
-            xyz, box_edges_original, boxsize, rmin2, rmax2, self.apply_grid_isometry, self.Abs[ishell][0], self.Abs[ishell][1], self.apply_replicate_rotflip,
+            True, xyz, box_edges_original, boxsize, rmin2, rmax2, self.apply_grid_isometry, self.Abs[ishell][0], self.Abs[ishell][1], self.apply_replicate_rotflip,
             self.replicate_rotflip, self.octant_only)
         if len(idx) > 0:
             return np.concatenate(idx), np.concatenate(ra), np.concatenate(dec), np.concatenate(r)
@@ -1916,18 +1916,24 @@ def _construct_maps_sub_helper(
 
 @numba.njit
 def _construct_catalog_sub_helper(
-        xyz_original, box_edges_original, boxsize, rmin2, rmax2, apply_grid_isometry, A, b, apply_replicate_rotflip, rep2rot, octant_only):
+        do_replicate, xyz_original, box_edges_original, boxsize, rmin2, rmax2, apply_grid_isometry, A, b, apply_replicate_rotflip, rep2rot, octant_only):
     """
     Parallelized helper function for ShellBuilder.construct_catalog_sub
     """
+
+    rot_dict = numba.typed.Dict()
+    for i in range(len(rep2rot)):
+        ix, iy, iz = rep2rot[i,:3]
+        rot_dict[ix, iy, iz] = rep2rot[i,3]
 
     # precompute isometry on particles (since replicates are then only a shift away)
     if apply_grid_isometry:
         xyz = Axpb(A, b, xyz_original)
         box_edges = Axpb(A, b, box_edges_original)
     else:
-        xyz = xyz_original
-        box_edges = box_edges_original
+        if not apply_replicate_rotflip:
+            xyz = xyz_original
+            box_edges = box_edges_original
 
     idx = []
     ra = []
@@ -1935,7 +1941,10 @@ def _construct_catalog_sub_helper(
     r = []
 
     dtype = xyz.dtype
-    nreplicate = int(np.ceil(np.sqrt(rmax2) / boxsize)) + 2
+    if do_replicate:
+        nreplicate = int(np.ceil(np.sqrt(rmax2) / boxsize)) + 2
+    else:
+        nreplicate = 0
 
     # replicate the box
     for ix in range(-nreplicate, nreplicate + 1):
@@ -1963,14 +1972,17 @@ def _construct_catalog_sub_helper(
                     continue
 
                 # second, check if box intersects with outer sphere
-                sphere_center = -b if apply_grid_isometry else np.zeros(3, dtype=dtype)
-                if not _AABB_sphere_intersect(box_edges_original + shift_original, sphere_center, rmax2):
-                    continue
+                if apply_grid_isometry:
+                    if not _AABB_sphere_intersect(box_edges_original + shift_original, -b, rmax2):
+                        continue
+                else:
+                    if not _AABB_sphere_intersect(box_edges_shifted, np.zeros(3, dtype=dtype), rmax2):
+                        continue
 
                 ## add particles to catalog
                 # rotate/flip replicate
                 if apply_replicate_rotflip:
-                    xyz = rotflip(rep2rot[ix, iy, iz], xyz_original, boxsize)
+                    xyz = rotflip(rot_dict[ix, iy, iz], xyz_original, boxsize).astype(dtype)
 
                 # compute ra, dec and radial comoving distance (idx is -1 for particles to reject)
                 tmpidx, tmpra, tmpdec, tmpr = _vec2radec(xyz[:, 0], xyz[:, 1], xyz[:, 2], shift[0, 0], shift[0, 1], shift[0, 2], rmin2, rmax2, octant_only)

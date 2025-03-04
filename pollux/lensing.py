@@ -127,8 +127,7 @@ class LensingBuilder(MapBuilder):
         fl = np.zeros(len(ell))
         fl[1:] = -np.sqrt((ell[1:] + 2.) * (ell[1:] - 1.) / (ell[1:] * (ell[1:] + 1.)))
 
-        _, ipix_nest = self.get_mask(return_ipix=True)
-        ipix_ring = hp.nest2ring(self.nside, ipix_nest)
+        _, ipix = self.get_mask(nest=False, return_ipix=True)
 
         gammas = []
         alms = []
@@ -149,8 +148,8 @@ class LensingBuilder(MapBuilder):
             gamma1 = healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
             gamma2 = healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
 
-            gamma1.update_values_pix(ipix_nest, g1[ipix_ring].astype(self.dtype), nest=True)
-            gamma2.update_values_pix(ipix_nest, g2[ipix_ring].astype(self.dtype), nest=True)
+            gamma1.update_values_pix(ipix, g1[ipix].astype(self.dtype), nest=False)
+            gamma2.update_values_pix(ipix, g2[ipix].astype(self.dtype), nest=False)
 
             gamma1.write(self.get_fname(ikappa, what='gamma1'), clobber=True)
             gamma2.write(self.get_fname(ikappa, what='gamma2'), clobber=True)
@@ -265,20 +264,29 @@ class BornLensingBuilder(LensingBuilder):
 
         for ishell in trange(self.nshells, desc="[construct_maps]"):
             shell = (self.shell_builder.load_maps(ishell)).astype(self.dtype)
-            if self.nbar_from_maps:
-                s = shell[:]
-                nbar = np.mean(s[s > 0.])
+            if self.shell_builder.save_density:
+                density = shell
             else:
-                nbar = self.shell_builder.get_pixel_density(ishell)
+                if self.nbar_from_maps:
+                    s = shell[:]
+                    nbar = np.mean(s[s > 0.])
+                else:
+                    nbar = self.shell_builder.get_pixel_density(ishell)
+                nbar = self.dtype(nbar)
+                if self.multiple_planes:
+                     density = shell - nbar 
+                else:
+                    density = shell/nbar -1. 
 
             for ikappa, kappa in kappas.items():
                 w = self.compute_weight(ishell, ikappa)
-                # only one multiplication and one addition
-                if self.multiple_planes:
-                    tmp = (shell - self.dtype(nbar)) * self.dtype(w)
-                else:
-                    tmp = (shell * self.dtype(w / nbar)) - self.dtype(w)
-                kappas[ikappa] = healsparse.operations.sum_union([tmp, kappa])
+                # # only one multiplication and one addition
+                # if self.multiple_planes:
+                #     tmp = (shell - self.dtype(nbar)) * self.dtype(w)
+                # else:
+                #     tmp = (shell * self.dtype(w / nbar)) - self.dtype(w)
+                # kappas[ikappa] = healsparse.operations.sum_union([tmp, kappa])
+                kappas[ikappa] = healsparse.operations.sum_union([density*w, kappa])
 
         for ikappa, kappa in kappas.items():
             fname = self.get_fname(ikappa)

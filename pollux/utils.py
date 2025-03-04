@@ -240,7 +240,7 @@ def make_mask_radec_cuts(nside, ramin, ramax, decmin, decmax, dtype=float, nest=
     return mask
 
 
-def make_nmtbin(nside, lmin, lmax, n_ell_bins, bin_func=np.linspace, f_ell=None, verbose=False, b_lmax=None, bins_ell=None, **kwargs):
+def make_nmtbin(nside, lmin, lmax, n_ell_bins, bin_func=np.linspace, f_ell=None, verbose=False, b_lmax=None, bins_ell=None):
     """Create a NaMaster binning object `NmtBin`
 
     Parameters
@@ -280,6 +280,7 @@ def make_nmtbin(nside, lmin, lmax, n_ell_bins, bin_func=np.linspace, f_ell=None,
         assert bins_ell[0] == lmin and bins_ell[-1] == lmax
     else:
         bins_ell = bin_func(lmin, lmax, n_ell_bins + 1).astype(float)
+        # bins_ell = bin_func(lmin, lmax, n_ell_bins + 1).astype(int)
 
     # Get bands
     bpws = np.digitize(ells.astype(float), bins_ell) - 1
@@ -292,13 +293,26 @@ def make_nmtbin(nside, lmin, lmax, n_ell_bins, bin_func=np.linspace, f_ell=None,
     # Multiplicative factor
     if f_ell is not None:
         if f_ell == 'pixwin':
-            f_ell = np.ones(len(ells))
-            f_ell[:min(lmax + 1, 3 * nside) - lmin] = 1. / hp.pixwin(nside)[lmin:min(lmax + 1, 3 * nside)]**2
+            f_ell = 1. / hp.pixwin(nside)[lmin:lmax+1]**2
         else:
             assert type(f_ell) == np.ndarray
             assert len(f_ell) == len(ells)
 
-    b = nmt.NmtBin(nside, ells=ells, bpws=bpws, weights=np.ones(len(ells)), f_ell=f_ell, lmax=b_lmax, **kwargs)
+    if b_lmax is None:
+        b_lmax = 3 * nside - 1
+
+    b = nmt.NmtBin(ells=ells, bpws=bpws, weights=None, f_ell=f_ell, lmax=b_lmax)
+
+    # # Multiplicative factor
+    # if f_ell is not None:
+    #     if f_ell == 'pixwin':
+    #         # f_ell = np.ones(bins_ell[-1])
+    #         f_ell = 1. / hp.pixwin(nside)[bins_ell[0]:bins_ell[-1]]**2
+    #     else:
+    #         assert type(f_ell) == np.ndarray
+    #         assert len(f_ell) == len(ells)
+
+    # b = nmt.NmtBin.from_edges(ell_ini=bins_ell[:-1], ell_end=bins_ell[1:], f_ell=f_ell)
 
     if b.get_n_bands() != n_ell_bins:
         warnings.warn("Warning: for some reason, b.get_n_bands() != n_ell_bins")

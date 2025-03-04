@@ -8,6 +8,7 @@ import numpy as np
 import pyccl
 import pymaster as nmt
 import sacc
+from itertools import product
 from tqdm.auto import tqdm, trange
 
 from .utils import *
@@ -29,7 +30,9 @@ class MapBuilder:
             sacc_type=None,
             b=None,
             nlb=20,
-            remove_monopole=True):
+            remove_monopole=True,
+            nocompress=True,
+            f_ell='pixwin'):
         """`MapBuilder` is a generic class to build maps that groups functions for I/O, Cl's computations, etc.
 
         Parameters
@@ -60,6 +63,8 @@ class MapBuilder:
             Number of multipole bins, by default 20
         remove_monopole, optional
             Whether the monopole should be removed when computing alm's and Cl's
+        nocompress, optional
+            Whether to use compression to save HealSparse maps (bug makes it slow)
         """
         self.nside = nside
         self.npix = hp.nside2npix(nside)
@@ -75,6 +80,8 @@ class MapBuilder:
             wsp_dir = save_dir
         self.wsp_dir = wsp_dir
         self.remove_monopole = remove_monopole
+        self.nocompress = nocompress
+        self.f_ell = f_ell            
 
         if b is not None:
             self.b = b
@@ -91,14 +98,14 @@ class MapBuilder:
         print(f"  - Number of maps = {self.nmaps}")
         print(f"  - Maps saved to", self.save_dir)
 
-    def tqdm(self, it=None, **kwargs):
+    def tqdm(self, it=None, **tqdm_kwargs):
         """
         Helper function for progress bars
         """
         if it is None:
-            return trange(self.nmaps, **kwargs)
+            return trange(self.nmaps, **tqdm_kwargs)
         elif isinstance(it, Iterable):
-            return tqdm(it, **kwargs)
+            return tqdm(it, **tqdm_kwargs)
         elif type(it) is int:
             return [it]
         else:
@@ -118,15 +125,15 @@ class MapBuilder:
 
         if sub is not None:
             fname += f'_sub{sub}'
-            
+
         if extra is not None:
             fname += f'_{extra}'
 
         if format is not None:
-            fname += f'.{format}' 
+            fname += f'.{format}'
         else:
             fname += f'.{self.save_format}'
-            
+
         if sub is None:
             return os.path.join(self.save_dir, fname)
         else:
@@ -231,7 +238,7 @@ class MapBuilder:
         else:
             return out
 
-    def load_maps(self, imaps=None, **kwargs):
+    def load_maps(self, imaps=None, **fname_kwargs):
         """Loads maps.
 
         Parameters
@@ -245,7 +252,7 @@ class MapBuilder:
         """
         maps = []
         for imap in self.tqdm(imaps, desc="[load_maps]"):
-            fname = self.get_fname(imap, **kwargs)
+            fname = self.get_fname(imap, **fname_kwargs)
             maps.append(healsparse.HealSparseMap.read(fname, nside_coverage=self.nside_c))
 
         if len(maps) == 1:
@@ -253,7 +260,7 @@ class MapBuilder:
         else:
             return maps
 
-    def plot_maps(self, maps_or_imaps=None, nx=None, log=False, title_prefix=None, cbar=True, save=True, **kwargs):
+    def plot_maps(self, maps_or_imaps=None, nx=None, log=False, title_prefix=None, cbar=True, save=True, **hpview_kwargs):
         """Plots particle maps.
 
         Parameters
@@ -322,9 +329,9 @@ class MapBuilder:
                     min=0. if log else None,
                     margins=(0., 0., 0., 0.),
                     nest=True,
-                    **kwargs)
+                    **hpview_kwargs)
             else:
-                hp.mollview(hp_map, sub=(ny, nx, sub), title=title, cbar=cbar, min=0. if log else None, margins=(0., 0., 0., 0.), nest=True, **kwargs)
+                hp.mollview(hp_map, sub=(ny, nx, sub), title=title, cbar=cbar, min=0. if log else None, margins=(0., 0., 0., 0.), nest=True, **hpview_kwargs)
             sub += 1
 
         hp.graticule()
@@ -341,22 +348,31 @@ class MapBuilder:
             self.mask = np.ones(self.npix)
             self.ipix = np.arange(self.npix)
 
-    def get_mask(self, return_ipix=False):
+        self.mask_ring = hp.reorder(self.mask, n2r=True)
+        self.ipix_ring = hp.nest2ring(self.nside, self.ipix)
+
+    def get_mask(self, nest=True, return_ipix=False):
         """
         Helper function to compute the mask
         """
         if not hasattr(self, 'mask'):
             self._create_mask()
-        if return_ipix:
-            return self.mask, self.ipix
+        if nest:
+            if return_ipix:
+                return self.mask, self.ipix
+            else:
+                return self.mask
         else:
-            return self.mask
+            if return_ipix:
+                return self.mask_ring, self.ipix_ring
+            else:
+                return self.mask_ring
 
-    def get_octant_to_fullsky_ipix(self):
+    def get_octant_to_fullsky_ipix(self, nest=True):
         assert self.octant_only
         if not hasattr(self, 'ipix_oct_fullsky'):
-            theta, phi = hp.pix2ang(self.nside, np.arange(self.npix), nest=True)
-            self.ipix_oct_fullsky = hp.ang2pix(self.nside, np.where(theta <= np.pi / 2., theta, np.pi - theta), phi % np.pi / 2., nest=True)
+            theta, phi = hp.pix2ang(self.nside, np.arange(self.npix), nest=nest)
+            self.ipix_oct_fullsky = hp.ang2pix(self.nside, np.where(theta <= np.pi / 2., theta, np.pi - theta), phi % np.pi / 2., nest=nest)
 
         return self.ipix_oct_fullsky
 
@@ -365,7 +381,7 @@ class MapBuilder:
         Workaround to keep MapBuilder serializable...
         """
         if not hasattr(self, 'b'):
-            self.b = make_nmtbin_logspaced(self.nside, 8, 2 * self.nside, self._nlb, f_ell='pixwin')
+            self.b = make_nmtbin_logspaced(self.nside, 8, 2 * self.nside, self._nlb, f_ell=self.f_ell)
         return self.b
 
     def get_cls_wsp(self):
@@ -386,38 +402,34 @@ class MapBuilder:
                 self.wsp.read_from(fname)
             else:
                 print("Computing and saving workspace in", fname)
-                mask = self.get_mask()
-                dummy_f = nmt.NmtField(mask, [np.zeros_like(mask)])
-                self.wsp.compute_coupling_matrix(dummy_f, dummy_f, self.get_cls_b())
+                mask = self.get_mask(nest=False)
+                b = self.get_cls_b()
+                dummy_f = nmt.NmtField(mask, [np.zeros_like(mask)], lite=True)
+                self.wsp.compute_coupling_matrix(dummy_f, dummy_f, b)
                 self.wsp.write_to(fname)
             return self.wsp
 
-    def _field_map(self, imap):
-        return self.load_maps(imap).generate_healpix_map()
+    def _field_map(self, imap, nest=True):
+        return self.load_maps(imap).generate_healpix_map(nest=nest)
 
-    def get_field_map(self, imap, reorder_n2r=True, replicate_octant=False):
+    def get_field_map(self, imap, nest=True, replicate_octant=False):
         """"
         Create map ready for a NaMaster field object or healpy map2alm calculations.
         """
-
-        mask, ipix = self.get_mask(return_ipix=True)
-
-        _map = self._field_map(imap) * mask
+        _map = self._field_map(imap, nest=nest)
 
         if self.remove_monopole:
+            _, ipix = self.get_mask(nest=nest, return_ipix=True)
             _map[ipix] -= np.mean(_map[ipix])
 
         # Replicate if needed and apply mask
         if replicate_octant:
-            ipix_o2f = self.get_octant_to_fullsky_ipix()
+            ipix_o2f = self.get_octant_to_fullsky_ipix(nest=nest)
             _map = _map[ipix_o2f]
-
-        if reorder_n2r:
-            _map = hp.reorder(_map, n2r=True)
 
         return _map
 
-    def compute_alms(self, imaps=None, save=True, replicate_octant=False, **kwargs):
+    def compute_alms(self, imaps=None, save=True, replicate_octant=False, **map2am_kwargs):
         """Compute spherical harmonic coefficients
 
         Parameters
@@ -445,9 +457,10 @@ class MapBuilder:
                     except:
                         pass
 
-            _map = self.get_field_map(imap, reorder_n2r=True, replicate_octant=replicate_octant)
+            mask = self.get_mask(nest=False)
+            _map = self.get_field_map(imap, nest=False, replicate_octant=replicate_octant)
 
-            alms[imap] = hp.map2alm(_map, **kwargs)
+            alms[imap] = hp.map2alm(_map * mask, **map2am_kwargs)
 
             if save:
                 hp.write_alm(fname, alms[imap], overwrite=True)
@@ -468,14 +481,14 @@ class MapBuilder:
         -------
             List of maps
         """
-        _, ipix = self.get_mask(return_ipix=True)
+        _, ipix = self.get_mask(nest=False, return_ipix=True)
 
         maps = []
         for imap in self.tqdm(imaps, desc="[compute_maps_from_alms]"):
             alm = hp.read_alm(self.get_fname(imap, what='alms', format='fits'))
-            values = hp.reorder(hp.alm2map(alm, nside=self.nside, pol=False), r2n=True)
+            values = hp.alm2map(alm, nside=self.nside, pol=False)
             tmp = healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
-            tmp.update_values_pix(ipix, values[ipix].astype(self.dtype))
+            tmp.update_values_pix(ipix, values[ipix].astype(self.dtype), nest=False)
             if save:
                 fname = self.get_fname(imap)
                 tmp.write(fname, clobber=True)
@@ -547,13 +560,13 @@ class MapBuilder:
                 cl[i, j] = wsp.decouple_cell([pcl])[0]
                 previous_pair = (i, j)
         else:
-            mask = self.get_mask()
+            mask = self.get_mask(nest=False)
             fields = {i: None for i in imaps}
             for i, j in tqdm(pairs, desc="[compute_cls]"):
                 if fields[i] is None:
-                    fields[i] = nmt.NmtField(mask, [self.get_field_map(i, reorder_n2r=True)])
+                    fields[i] = nmt.NmtField(mask, [self.get_field_map(i, nest=False)])
                 if fields[j] is None:
-                    fields[j] = nmt.NmtField(mask, [self.get_field_map(j, reorder_n2r=True)])
+                    fields[j] = nmt.NmtField(mask, [self.get_field_map(j, nest=False)])
                 cl[i, j] = nmt.compute_full_master(fields[i], fields[j], b, workspace=wsp)[0]
 
         ell = b.get_effective_ells()
@@ -592,7 +605,7 @@ class MapBuilder:
     def _noise_cls(self, imap):
         raise NotImplementedError
 
-    def predict_cls(self, imaps=None, auto_only=False, approximate=False, add_noise=False, error_bars=False, keep_cls=False, stacked=False):
+    def predict_cls(self, imaps=None, auto_only=False, approximate=False, add_noise=False, error_bars=False, keep_cls=False, stacked=False, ell=None):
         """Compute theory angular power spectra of convergence maps with CCL
 
         Parameters
@@ -625,8 +638,12 @@ class MapBuilder:
 
         b = self.get_cls_b()
 
-        ell = b.get_effective_ells()
-        nell = b.get_nell_list()
+        if ell is None:
+            ell = b.get_effective_ells()
+            nell = b.get_nell_list()
+        else:
+            assert approximate
+            assert not error_bars
         fsky = 1 / 8. if self.octant_only else 1.
         order = lambda i, j: (max(i, j), min(i, j))
 
@@ -655,10 +672,22 @@ class MapBuilder:
                 if add_noise and i == j:
                     cl[i, j] += self._noise_cls(i)
             else:
-                cl_raw = angular_cl(self.cosmo, tracers_[i], tracers_[j], range(3 * self.nside))
-                cl[i, j] = np.dot(bpws, hp.pixwin(self.nside)**2 * cl_raw)
+                cl_raw = angular_cl(self.cosmo, tracers_[i], tracers_[j], range(b.lmax + 1))
+                if self.f_ell is not None:
+                    if self.f_ell == 'pixwin':
+                        _f_ell = hp.pixwin(self.nside)[:b.lmax + 1]
+                    else:
+                        _f_ell = np.ones(b.lmax + 1)
+                        _f_ell[b.get_ell_list(0)[0]:] = self.f_ell
+                    cl_raw *= _f_ell**2
+                cl[i, j] = np.dot(bpws, cl_raw)
+                
                 if add_noise and i == j:
-                    cl[i, j] += np.dot(bpws, hp.pixwin(self.nside)**2 * self._noise_cls(i))
+                    nl_raw = self._noise_cls(i)
+                    if self.f_ell is not None:
+                        nl_raw *= _f_ell**2
+                    cl[i, j] += np.dot(bpws, nl_raw)
+
 
 #         if error_bars:
 #             dcl = {}
@@ -732,7 +761,7 @@ class MapBuilder:
                     Dl[j, i] = np.copy(cl[i, j])
                     if i == j:
                         Dl[i, j] += self._noise_cls(i)
-                
+
                 if auto_only:
                     for i, j in pairs:
                         dcl_full[i, j, i, j] = (Dl[i, j] * Dl[j, i] + Dl[i, i] * Dl[j, j]) / ((2 * ell + 1.) * fsky * nell)
@@ -896,132 +925,136 @@ class MapBuilder:
 
         # plt.show()
 
-        
-        
-    def compute_kappa_moments(self):
+    def compute_kappa_moments(self, theta_range=np.geomspace(2.5, 250, 8), nside_small=512):
         """Compute the second, third and fourth moments of convergence maps
         
         Returns
         -------
             theta, kappa_2, kappa_3, kappa_4
         """
-        
+
         fname = self.get_fname(what='2nd_3rd_4th_moments', format='npy')
-        
-        if not os.path.exists(fname):
-        
-            kappa = {}
 
-            theta_range = np.geomspace(2.5, 250, 8)
-            
-            nside_small = 512
-            lmax_out = 2*nside_small
-            
-            # Mask
-
-            mask_octant = make_mask_radec_cuts(nside_small, 0, 90, 0, 90, nest=True).astype(bool)
-            ipix_octant = np.where(mask_octant)[0]
-
-            for bin_z in range(len(self.nmaps)):
-
-                kappa[bin_z] = {}
-
-                alm = self.compute_alms(imaps=bin_z)[bin_z]
-                lmax = hp.Alm.getlmax(len(alm))
-                alm = hp.sphtfunc.resize_alm(alm, lmax=lmax, mmax=lmax, lmax_out=lmax_out, mmax_out=lmax_out)
-
-                # Let's measure kappa from the alms
-
-                for theta in theta_range:
-
-                    kappa_map = hp.alm2map(alm, nside_small, sigma=theta*1/60*np.pi/180, lmax=lmax_out)
-                    kappa_map = hp.pixelfunc.reorder(kappa_map, r2n=True)
-                    kappa_map[~mask_octant] = hp.UNSEEN
-                    kappa[bin_z][theta] = kappa_map
-
-            # 2nd moment
-
-            second_moment = {}
-
-            for theta in theta_range:
-
-                second_moment[theta] = np.cov(np.stack([kappa[bin_z][theta][ipix_octant] for bin_z in range(len(self.nmaps))], axis=0))
-
-            # 3rd moment
-
-            from itertools import product
-
-            third_moment = {}
-
-            for theta in theta_range:
-                # Stack data for all bins at the given theta
-                data = np.stack([kappa[bin_z][theta][ipix_octant] for bin_z in range(len(self.nmaps))], axis=0)
-
-                # Calculate the means for each bin
-                means = np.mean(data, axis=1)  # Shape: (n_bins,)
-
-                # Center the data
-                centered_data = data - means[:, np.newaxis]  # Shape: (n_bins, n_realizations)
-
-                # Compute third moments across all bin combinations
-                n_bins = centered_data.shape[0]
-                n_realizations = centered_data.shape[1]
-                third_moment_theta = np.zeros((n_bins, n_bins, n_bins))
-
-                for i, j, k in product(range(n_bins), repeat=3):
-                    third_moment_theta[i, j, k] = np.mean(
-                        centered_data[i] * centered_data[j] * centered_data[k]
-                    )
-
-                # Store the third moment tensor for this theta
-                third_moment[theta] = third_moment_theta
-
-            # 4th moment
-
-            fourth_moment = {}
-
-            for theta in theta_range:
-                # Stack data for all bins at the given theta
-                data = np.stack([kappa[bin_z][theta][ipix_octant] for bin_z in range(len(self.nmaps))], axis=0)
-
-                # Calculate the means for each bin
-                means = np.mean(data, axis=1)  # Shape: (n_bins,)
-
-                # Center the data
-                centered_data = data - means[:, np.newaxis]  # Shape: (n_bins, n_realizations)
-
-                # Compute 4th moments across all bin combinations
-                n_bins = centered_data.shape[0]
-                n_realizations = centered_data.shape[1]
-                fourth_moment_theta = np.zeros((n_bins, n_bins, n_bins, n_bins))
-
-                for i, j, k, l in product(range(n_bins), repeat=4):
-                    fourth_moment_theta[i, j, k, l] = np.mean(
-                        centered_data[i] * centered_data[j] * centered_data[k] * centered_data[l]
-                    )
-
-                # Store the 4th moment tensor for this theta
-                fourth_moment[theta] = fourth_moment_theta
-                
-            # Let's save them all
-            
-            moments = {}
-            
-            moments['theta_range'] = theta_range
-            moments['second_moment'] = second_moment
-            moments['third_moment'] = third_moment
-            moments['fourth_moment'] = fourth_moment
-
-            print('Saving output as: ' +fname)
-            
-            np.save(fname, moments)
-            
-        else:
-            
-            print('Loading pre-existing file: ' +fname)
-            
+        if os.path.exists(fname):
+            print('Loading pre-existing file: ' + fname)
             moments = np.load(fname, allow_pickle=True).item()
+            return moments['theta_range'], moments['second_moment'], moments['third_moment'], moments[
+                'fourth_moment']
 
-            theta_range, second_moment, third_moment, fourth_moment = moments['theta_range'], moments['second_moment'], moments['third_moment'], moments['fourth_moment']
-            
+        kappa = {}
+        lmax_out = 2 * nside_small
+
+        # Mask
+        _, ipix = self.get_mask(nest=False, return_ipix=True)
+
+        # Compute smooth kappa maps at resolution nside_small
+        for bin_z in range(len(self.nmaps)):
+            kappa[bin_z] = {}
+
+            alm = self.compute_alms(imaps=bin_z)[bin_z]
+            lmax = hp.Alm.getlmax(len(alm))
+            alm = hp.sphtfunc.resize_alm(alm, lmax=lmax, mmax=lmax, lmax_out=lmax_out, mmax_out=lmax_out)
+
+            # Let's measure kappa from the alms
+            for theta in theta_range:
+                kappa_map = hp.alm2map(alm, nside_small, sigma=theta / 60. * np.pi / 180., lmax=lmax_out)
+                kappa[bin_z][theta] = kappa_map[ipix]
+
+        # 2nd moment
+        second_moment = {}
+        for theta in theta_range:
+            second_moment[theta] = np.cov(np.stack([kappa[bin_z][theta] for bin_z in range(len(self.nmaps))], axis=0))
+
+        # 3rd moment
+        third_moment = {}
+        for theta in theta_range:
+            # Stack data for all bins at the given theta
+            data = np.stack([kappa[bin_z][theta] for bin_z in range(len(self.nmaps))], axis=0)
+
+            # Calculate the means for each bin
+            means = np.mean(data, axis=1)  # Shape: (n_bins,)
+
+            # Center the data
+            centered_data = data - means[:, np.newaxis]  # Shape: (n_bins, n_realizations)
+
+            # Compute third moments across all bin combinations
+            n_bins = centered_data.shape[0]
+            n_realizations = centered_data.shape[1]
+            third_moment_theta = np.zeros((n_bins, n_bins, n_bins))
+
+            for i, j, k in product(range(n_bins), repeat=3):
+                third_moment_theta[i, j, k] = np.mean(centered_data[i] * centered_data[j] * centered_data[k])
+
+            # Store the third moment tensor for this theta
+            third_moment[theta] = third_moment_theta
+
+        # 4th moment
+        fourth_moment = {}
+        for theta in theta_range:
+            # Stack data for all bins at the given theta
+            data = np.stack([kappa[bin_z][theta] for bin_z in range(len(self.nmaps))], axis=0)
+
+            # Calculate the means for each bin
+            means = np.mean(data, axis=1)  # Shape: (n_bins,)
+
+            # Center the data
+            centered_data = data - means[:, np.newaxis]  # Shape: (n_bins, n_realizations)
+
+            # Compute 4th moments across all bin combinations
+            n_bins = centered_data.shape[0]
+            n_realizations = centered_data.shape[1]
+            fourth_moment_theta = np.zeros((n_bins, n_bins, n_bins, n_bins))
+
+            for i, j, k, l in product(range(n_bins), repeat=4):
+                fourth_moment_theta[i, j, k, l] = np.mean(centered_data[i] * centered_data[j] * centered_data[k] * centered_data[l])
+
+            # Store the 4th moment tensor for this theta
+            fourth_moment[theta] = fourth_moment_theta
+
+        # Let's save them all
+        moments = {}
+        moments['theta_range'] = theta_range
+        moments['second_moment'] = second_moment
+        moments['third_moment'] = third_moment
+        moments['fourth_moment'] = fourth_moment
+
+        print('Saving output as: ' + fname)
+        np.save(fname, moments)
+
         return theta_range, second_moment, third_moment, fourth_moment
+
+    def generate_gaussian_maps(self, imaps=None, auto_only=False, seed=-1):
+        if imaps is None:
+            imaps = range(self.nmaps)
+
+        # Compute theory Cl's
+        _, cls = self.predict_cls(approximate=True, auto_only=auto_only, ell=np.arange(3 * self.nside))
+
+        _, ipix = self.get_mask(nest=False, return_ipix=True)
+
+        if auto_only:
+            for imap in self.tqdm(imaps, desc="[generate_gaussian_maps]"):
+                # Generate full-sky Gaussian map
+                out = nmt.utils.synfast_spherical(self.nside, [cls[imap, imap]], spin_arr=[0], seed=seed)[0]
+
+                # Store in healsparse map
+                hsp = healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
+                hsp.update_values_pix(ipix, out[ipix].astype(self.dtype), nest=False)
+
+                # Save map
+                fname = self.get_fname(imap)
+                hsp.write(fname, clobber=True, format=self.save_format)
+
+        else:
+            # Generate full-sky Gaussian map
+            pairs = [(i1, i2) for i, i2 in enumerate(imaps) for i1 in imaps[i:]]
+            outs = nmt.utils.synfast_spherical(self.nside, [cls[p] for p in pairs], spin_arr=[0] * self.nmaps, seed=seed)
+
+            for imap, out in zip(imaps, outs):
+                # Store in healsparse map
+                hsp = healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
+                hsp.update_values_pix(ipix, out[ipix].astype(self.dtype), nest=False)
+
+                # Save map
+                fname = self.get_fname(imap)
+                hsp.write(fname, clobber=True, format=self.save_format)

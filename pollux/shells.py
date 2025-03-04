@@ -32,6 +32,7 @@ class ShellBuilder(MapBuilder):
             kind='snapshot',
             seed=12345,
             dtype=np.uint64,
+            save_density=False,
             apply_grid_isometry=False,
             group_isometries=None,
             apply_replicate_rotflip=False,
@@ -49,6 +50,8 @@ class ShellBuilder(MapBuilder):
             Path of folder to save shells and other products.
         seed, optional
             Random number generator seed for isometries (ensures results are reproducible), by default 12345
+        save_density, optional
+            Whether the density (instead of count map) is saved, by default False
         dtype, optional
             Dtype of the particle shells, by default np.int64
         apply_grid_isometry, optional
@@ -64,9 +67,9 @@ class ShellBuilder(MapBuilder):
         self.cosmo = reader.cosmo
         self.kind = kind
         self.seed = seed
+        self.save_density = save_density
         self.apply_grid_isometry = apply_grid_isometry
         self.apply_replicate_rotflip = apply_replicate_rotflip
-        self.nocompress = True
         assert (not apply_grid_isometry) or (
             not apply_replicate_rotflip
         )  # they do not commute and grid isometry is slow and can be applied once, whereas replicate_rotflip is fast but must be applied to each replicate
@@ -128,18 +131,16 @@ class ShellBuilder(MapBuilder):
             self.replicate_rotflip = {}
             # self.replicate_rotflip[0, 0, 0] = 0
             self.apply_replicate_rotflip = False
-            
-        if len(self.replicate_rotflip)>0:
-            replicate_rotflip = np.empty((len(self.replicate_rotflip),4), dtype=np.int64)
-            for i,(k,v) in enumerate(self.replicate_rotflip.items()):
-                replicate_rotflip[i,:3] = k
-                replicate_rotflip[i,3] = v
+
+        if len(self.replicate_rotflip) > 0:
+            replicate_rotflip = np.empty((len(self.replicate_rotflip), 4), dtype=np.int64)
+            for i, (k, v) in enumerate(self.replicate_rotflip.items()):
+                replicate_rotflip[i, :3] = k
+                replicate_rotflip[i, 3] = v
             self.replicate_rotflip = replicate_rotflip
         else:
-            self.replicate_rotflip = np.zeros((1,4), dtype=np.int64)
-        
-            
-        
+            self.replicate_rotflip = np.zeros((1, 4), dtype=np.int64)
+
         # Try getting shell information from reader, if not dummy.
         try:
             # Make sure snapshots are larger than the shells
@@ -210,7 +211,11 @@ class ShellBuilder(MapBuilder):
         names = ['ishell', 'zsnapshot', 'zmin', 'zmax', 'chisnapshot', 'chimin', 'chimax', 'snapshot_id']
         dtypes = ['int', 'float', 'float', 'float', 'float', 'float', 'float', 'int']
         out = np.array(
-            list(zip(np.arange(self.nshells), self.reader.zsnapshots, z_shell_bins[:-1], z_shell_bins[1:], self.cosmo.comoving_radial_distance(1/(1+self.reader.zsnapshots)), self.cosmo.comoving_radial_distance(1/(1+z_shell_bins[:-1])), self.cosmo.comoving_radial_distance(1/(1+z_shell_bins[1:])), self.reader.snapshots)),
+            list(
+                zip(
+                    np.arange(self.nshells), self.reader.zsnapshots, z_shell_bins[:-1], z_shell_bins[1:],
+                    self.cosmo.comoving_radial_distance(1 / (1 + self.reader.zsnapshots)), self.cosmo.comoving_radial_distance(1 / (1 + z_shell_bins[:-1])),
+                    self.cosmo.comoving_radial_distance(1 / (1 + z_shell_bins[1:])), self.reader.snapshots)),
             dtype=list(zip(names, dtypes)))
         if fname is not None:
             if '.txt' in fname:
@@ -236,7 +241,9 @@ class ShellBuilder(MapBuilder):
             shell_info = np.array(
                 list(
                     zip(
-                        np.arange(self.nshells), self.reader.zsnapshots, z_shell_bins[:-1], z_shell_bins[1:], self.cosmo.comoving_radial_distance(1/(1+self.reader.zsnapshots)), self.cosmo.comoving_radial_distance(1/(1+z_shell_bins[:-1])), self.cosmo.comoving_radial_distance(1/(1+z_shell_bins[1:])), self.reader.snapshots, pixel_density, sky_density)),
+                        np.arange(self.nshells), self.reader.zsnapshots, z_shell_bins[:-1], z_shell_bins[1:],
+                        self.cosmo.comoving_radial_distance(1 / (1 + self.reader.zsnapshots)), self.cosmo.comoving_radial_distance(1 / (1 + z_shell_bins[:-1])),
+                        self.cosmo.comoving_radial_distance(1 / (1 + z_shell_bins[1:])), self.reader.snapshots, pixel_density, sky_density)),
                 dtype=list(zip(names, dtypes)))
             fmt = '%8i %16.8f %16.8f %16.8f %16.8f %16.8f %16.8f %8i %16.8f %16.8f'
         elif self.kind == 'lightcone':
@@ -265,7 +272,7 @@ class ShellBuilder(MapBuilder):
             self.reader.cosmo.write_yaml(os.path.join(self.save_dir, "cosmo_ccl.yaml"))
         except ValueError:
             warnings.warn("Cannot write cosmo yaml file, likely due to using non-serializable options (eg P(k)).")
-            
+
         # Save simulation and maps info
         data = {
             "nparticles": self.reader.nparticles,
@@ -372,7 +379,7 @@ class ShellBuilder(MapBuilder):
             print(f"  - Using {n_isometries} isometries grouped within {dchi_iso_max:.2f} Mpc.")
         else:
             print(f"  - Using {n_isometries} isometries.")
-        
+
         if get_shell_identifier:
             return Abs, shell_identifier
         else:
@@ -397,7 +404,7 @@ class ShellBuilder(MapBuilder):
         """
         replicates = []
         for isub in trange(self.reader.nsubs, desc='[get_replicates]'):
-            replicates.append((isub, self.construct_shell_sub(isub, get_replicates_only=True, **kwargs)))
+            replicates.append((isub, self.construct_maps_sub(isub, get_replicates_only=True, **kwargs)))
         return replicates
 
     def get_subsample_ratio(self, ishell):
@@ -504,15 +511,19 @@ class ShellBuilder(MapBuilder):
         # then combine into final shells
         return self.combine_maps_subs(imaps)
 
-    def _field_map(self, ishell):
+    def _field_map(self, ishell, nest=True):
         """
         Overrides the _field_map method to generate density maps from count maps.
         """
         shell = self.load_maps(ishell)
-        spix = shell.valid_pixels
-        density = np.zeros(self.npix)
-        density[spix] = shell[spix] / self.get_pixel_density(ishell) - 1.
-        return density
+        
+        if self.save_density:
+            return shell.generate_healpix_map(nest=nest)
+        else:
+            spix = shell.valid_pixels
+            density = np.zeros(self.npix)
+            density[spix] = shell[spix] / self.get_pixel_density(ishell) - 1.
+            return density
 
     def _noise_cls(self, ishell):
         return 1. / self.get_sky_density(ishell)
@@ -534,7 +545,7 @@ class ShellBuilder(MapBuilder):
         if lmax is None:
             lmax = 3 * self.nside - 1
 
-        _, ipix = self.get_mask(return_ipix=True)
+        _, ipix = self.get_mask(nest=False, return_ipix=True)
 
         for ishell in self.tqdm(ishells, desc="[compute_tidal_tensor]"):
             alm_E = self.compute_alms(ishell, save=not (replicate_octant), replicate_octant=replicate_octant, pol=False, lmax=lmax)[ishell]
@@ -552,10 +563,10 @@ class ShellBuilder(MapBuilder):
 
             Q, U = hp.alm2map_spin((alm_E, np.zeros_like(alm_E)), self.nside, spin=2, lmax=lmax)
 
-            Q = hp.reorder(Q, r2n=True)[ipix]
-            U = hp.reorder(U, r2n=True)[ipix]
+            # Q = hp.reorder(Q, r2n=True)[ipix]
+            # U = hp.reorder(U, r2n=True)[ipix]
 
-            density = self.get_field_map(ishell)[ipix]
+            density = self.get_field_map(ishell, nest=False)[ipix]
 
             # In 2D cartesian, s11(k)+s22(k)=delta(k)
             # In the spherical polarization framework, we have:
@@ -571,7 +582,7 @@ class ShellBuilder(MapBuilder):
 
             for what, val in zip(['t11', 't22', 't12'], [density / 6. + Q / 2., density / 6. - Q / 2., U]):
                 hsp = healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
-                hsp.update_values_pix(ipix, val.astype(self.dtype))
+                hsp.update_values_pix(ipix, val.astype(self.dtype), nest=False)
                 hsp.write(self.get_fname(ishell, what=what), clobber=True, format=self.save_format)
 
 
@@ -651,7 +662,7 @@ class SnapshotShellBuilder(ShellBuilder):
         order = hp.nside2order(self.nside)
         ncap = (nside * nside - nside) << 1
         npix = self.npix
-        
+
         # print(self.apply_grid_isometry)
         # print(self.Abs[ishell][0], self.Abs[ishell][1])
         # print(self.apply_replicate_rotflip)
@@ -659,8 +670,8 @@ class SnapshotShellBuilder(ShellBuilder):
         # print(self.octant_only)
 
         uipix, c = _construct_maps_sub_helper(
-            True, xyz, box_edges_original, boxsize, rmin2, rmax2, self.apply_grid_isometry, self.Abs[ishell][0], self.Abs[ishell][1], self.apply_replicate_rotflip,
-            self.replicate_rotflip, self.octant_only, nside, order, ncap, npix)
+            True, xyz, box_edges_original, boxsize, rmin2, rmax2, self.apply_grid_isometry, self.Abs[ishell][0], self.Abs[ishell][1],
+            self.apply_replicate_rotflip, self.replicate_rotflip, self.octant_only, nside, order, ncap, npix)
         if len(uipix) > 0:
             if verbose:
                 print(f"Found {np.sum(c)} particles in the shell.")
@@ -1125,23 +1136,22 @@ class SnapshotShellBuilderHeitmann(ShellBuilder):
 
             chi_shell_bins = self.shell_edges_comoving_distance()
             rmin2, rmax2 = chi_shell_bins[ishell]**2, chi_shell_bins[ishell + 1]**2
-            
+
             z_shell_bins = self.shell_edges_redshift()
             zmin, zmax = z_shell_bins[ishell], z_shell_bins[ishell + 1]
 
             Abs = [(np.zeros((3, 3), dtype=self.dtype), np.zeros(3, dtype=self.dtype)) for _ in range(self.nshells)]
 
             boxsize = self.dtype(self.reader.boxsize())
-            
-            
+
             # 1
-            
-            zsnapshot_fulllist = 1/self.reader.get_asnapshots(self.reader.snapshots_fulllist) - 1
-            
+
+            zsnapshot_fulllist = 1 / self.reader.get_asnapshots(self.reader.snapshots_fulllist) - 1
+
             xyz = []
-            
+
             try:
-            
+
                 for isnapshot in range(len(zsnapshot_fulllist) - 1):
                     if zmin > zsnapshot_fulllist[isnapshot + 1]:
                         continue
@@ -1149,14 +1159,14 @@ class SnapshotShellBuilderHeitmann(ShellBuilder):
                         continue
                     xyz.append(self.reader.read_sub(isnapshot, isub))
                 xyz = np.vstack(xyz)
-                
+
                 if ishell == 0:
-                    print(['Edges', rmin2, (xyz[:,0]**2+xyz[:,1]**2+xyz[:,2]**2).min(), rmax2, (xyz[:,0]**2+xyz[:,1]**2+xyz[:,2]**2).max()])
+                    print(['Edges', rmin2, (xyz[:, 0]**2 + xyz[:, 1]**2 + xyz[:, 2]**2).min(), rmax2, (xyz[:, 0]**2 + xyz[:, 1]**2 + xyz[:, 2]**2).max()])
                 else:
-                    print(['Edges', (xyz[:,0]**2+xyz[:,1]**2+xyz[:,2]**2).min(), rmin2, rmax2, (xyz[:,0]**2+xyz[:,1]**2+xyz[:,2]**2).max()])
+                    print(['Edges', (xyz[:, 0]**2 + xyz[:, 1]**2 + xyz[:, 2]**2).min(), rmin2, rmax2, (xyz[:, 0]**2 + xyz[:, 1]**2 + xyz[:, 2]**2).max()])
             except:
                 pass
-            
+
             # 2
 
             # if self.reader.snap_sub_every_n is None and self.reader.snap_sub_every_n_downsample is None:
@@ -1196,7 +1206,6 @@ class SnapshotShellBuilderHeitmann(ShellBuilder):
             #             print(['Edges',(xyz[:,0]**2+xyz[:,1]**2+xyz[:,2]**2).min(),rmin2,rmax2,(xyz[:,0]**2+xyz[:,1]**2+xyz[:,2]**2).max()])
             #         except:
             #             pass
-                    
 
             try:
                 box_lims = np.stack([np.min(xyz, axis=0), np.max(xyz, axis=0)])
@@ -1215,7 +1224,7 @@ class SnapshotShellBuilderHeitmann(ShellBuilder):
             order = hp.nside2order(self.nside)
             ncap = (nside * nside - nside) << 1
             npix = self.npix
-            
+
             # print(xyz)
             # print(box_edges_original)
             # print(boxsize)
@@ -1223,8 +1232,7 @@ class SnapshotShellBuilderHeitmann(ShellBuilder):
             # print(rmax2)
             # print(self.apply_grid_isometry)
             # print(self.apply_replicate_rotflip, self.replicate_rotflip, self.octant_only, nside, order, ncap, npix)
-            
-            
+
             uipix, c = _construct_maps_sub_helper(
                 False, xyz, box_edges_original, boxsize, rmin2, rmax2, self.apply_grid_isometry, self.Abs[ishell][0], self.Abs[ishell][1],
                 self.apply_replicate_rotflip, self.replicate_rotflip, self.octant_only, nside, order, ncap, npix)
@@ -1392,7 +1400,7 @@ class LightconeShellBuilder(ShellBuilder):
 
             if verbose:
                 print(f"Found {len(idx_i_in)} particles in both boxes, {len(idx_i_out)}/{len(idx_f_out)} orphans in initial/final boxes saved.")
-        
+
         # particle sub-sampling
         if self.subsample_box is not None:
             ratio = self.get_subsample_ratio(isnap)
@@ -1822,17 +1830,17 @@ def _unique_pix_pos(ipix, npix):
 
 @numba.njit
 def _construct_maps_sub_helper(
-        do_replicate, xyz_original, box_edges_original, boxsize, rmin2, rmax2, apply_grid_isometry, A, b, apply_replicate_rotflip, rep2rot, octant_only, nside, order, ncap,
-        npix):
+        do_replicate, xyz_original, box_edges_original, boxsize, rmin2, rmax2, apply_grid_isometry, A, b, apply_replicate_rotflip, rep2rot, octant_only, nside,
+        order, ncap, npix):
     """
     Parallelized helper function for ShellBuilder.construct_shell_sub
     """
-    
+
     rot_dict = numba.typed.Dict()
     for i in range(len(rep2rot)):
-        ix, iy, iz = rep2rot[i,:3]
-        rot_dict[ix, iy, iz] = rep2rot[i,3]
-        
+        ix, iy, iz = rep2rot[i, :3]
+        rot_dict[ix, iy, iz] = rep2rot[i, 3]
+
     # precompute isometry on particles (since replicates are then only a shift away)
     if apply_grid_isometry:
         xyz = Axpb(A, b, xyz_original)
@@ -1849,7 +1857,7 @@ def _construct_maps_sub_helper(
         nreplicate = int(np.ceil(np.sqrt(rmax2) / boxsize)) + 2
     else:
         nreplicate = 0
-        
+
     # replicate the box
     for ix in range(-nreplicate, nreplicate + 1):
         for iy in range(-nreplicate, nreplicate + 1):
@@ -1860,27 +1868,27 @@ def _construct_maps_sub_helper(
                     shift = Ax(A, shift_original)
                 else:
                     shift = shift_original
-                
+
                 if apply_replicate_rotflip:
-                    if (ix,iy,iz) not in rot_dict:
+                    if (ix, iy, iz) not in rot_dict:
                         continue
                     else:
                         box_edges = rotflip(rot_dict[ix, iy, iz], box_edges_original, boxsize).astype(dtype)
-                
+
                 # apply shift to box edges
                 box_edges_shifted = shift + box_edges
-                
+
                 ## check if box intersects octant, otherwise skip
                 # (to do so, we check if the box is fully contained in the x<0 or y<0 or z<0 half spaces)
                 if octant_only:
                     if np.any(np.array([np.all(box_edges_shifted[:, i] <= 0.) for i in range(3)])):
                         continue
-                        
+
                 ## check if box intersects with shell, otherwise skip
                 # first, check if box fully inside inner sphere
                 if np.all(xyz2r2(box_edges_shifted) < rmin2):
                     continue
-                    
+
                 # second, check if box intersects with outer sphere
                 if apply_grid_isometry:
                     if not _AABB_sphere_intersect(box_edges_original + shift_original, -b, rmax2):
@@ -1888,15 +1896,15 @@ def _construct_maps_sub_helper(
                 else:
                     if not _AABB_sphere_intersect(box_edges_shifted, np.zeros(3, dtype=dtype), rmax2):
                         continue
-                        
+
                 ## add particles to shell
                 # rotate/flip replicate
                 if apply_replicate_rotflip:
                     xyz = rotflip(rot_dict[ix, iy, iz], xyz_original, boxsize).astype(dtype)
-                    
+
                 # compute corresponding healpy pixels of all particles (particles out of shell/octant quickly set to -1) with vec2pix and loc2pix (translated into python from Healpix code)
                 ipix = _vec2pix(nside, order, ncap, npix, xyz[:, 0], xyz[:, 1], xyz[:, 2], shift[0, 0], shift[0, 1], shift[0, 2], rmin2, rmax2, octant_only)
-                
+
                 for i in range(n):
                     pos = ipix[i]
                     if pos >= 0:

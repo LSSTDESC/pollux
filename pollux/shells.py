@@ -521,8 +521,17 @@ class ShellBuilder(MapBuilder):
             return shell.generate_healpix_map(nest=nest)
         else:
             spix = shell.valid_pixels
+            s = shell[spix]
+            
+            if not nest:
+                spix = hp.nest2ring(self.nside, spix)
+                
+            _, ipix = self.get_mask(nest=nest, return_ipix=True)
+            
             density = np.zeros(self.npix)
-            density[spix] = shell[spix] / self.get_pixel_density(ishell) - 1.
+            density[ipix] = -1.
+            density[spix] = s / self.get_pixel_density(ishell) - 1.
+            
             return density
 
     def _noise_cls(self, ishell):

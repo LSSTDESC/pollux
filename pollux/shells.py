@@ -480,11 +480,13 @@ class ShellBuilder(MapBuilder):
         """
         shells = []
 
+        mask, ipix = self.get_mask(nest=True, return_ipix=True)
         for ishell in self.tqdm(ishells, desc="[combine_maps_subs]"):
             fname = self.get_fname(ishell)
             if self.check_maps(read=True, fname=fname):
                 continue
             shell = healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
+            shell.update_values_pix(ipix, dtype(0), nest=True)
             isubs = self.reader.get_isubs_for_snapshot(ishell)
             for isub in tqdm(isubs, desc=f"[combine_maps_subs: shell {ishell}]", leave=False):
                 tmp_shell = self.load_maps(ishell, sub=isub)

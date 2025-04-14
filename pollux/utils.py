@@ -210,7 +210,7 @@ def make_healpix_map(
     return res
 
 
-def make_mask_radec_cuts(nside, ramin, ramax, decmin, decmax, dtype=float, nest=True):
+def make_mask_radec_cuts(nside, ramin, ramax, decmin, decmax, eps=0., dtype=float, nest=True):
     """Generate a square mask limited by RA/DEC
 
     Parameters
@@ -236,7 +236,7 @@ def make_mask_radec_cuts(nside, ramin, ramax, decmin, decmax, dtype=float, nest=
     ths, phs = radec2thetaphi([ramin, ramax], [decmin, decmax])
     thmin, thmax = min(ths), max(ths)
     phmin, phmax = min(phs), max(phs)
-    mask[np.where((th <= thmax) & (th > thmin) & (ph >= phmin) & (ph < phmax))[0]] = dtype(1)
+    mask[np.where((th < thmax-eps) & (th > thmin+eps) & (ph > phmin+eps) & (ph < phmax-eps))[0]] = dtype(1)
     return mask
 
 

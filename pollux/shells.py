@@ -1271,7 +1271,6 @@ class SnapshotShellBuilderHeitmann(ShellBuilder):
         mask, ipix = self.get_mask(nest=True, return_ipix=True)
         for ishell in self.tqdm(ishells, desc="[combine_maps_subs]"):
             fname = self.get_fname(ishell)
-            # fname = os.path.join(self.save_dir, 'shell_hacc_nside' + str(self.nside) + '_imap' + str(ishell) + '.fits')
             if self.check_maps(read=True, fname=fname):
                 continue
             shell = healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)

@@ -574,8 +574,8 @@ class ShellBuilder(MapBuilder):
 
             Q, U = hp.alm2map_spin((alm_E, np.zeros_like(alm_E)), self.nside, spin=2, lmax=lmax)
 
-            # Q = hp.reorder(Q, r2n=True)[ipix]
-            # U = hp.reorder(U, r2n=True)[ipix]
+            Q = Q[ipix]
+            U = U[ipix]
 
             density = self.get_field_map(ishell, nest=False)[ipix]
 

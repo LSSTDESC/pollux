@@ -222,7 +222,7 @@ class CatalogSourceClusteredMultinomial(CatalogSourceUniform):
     def _generate_pos(self, catalog, ishell, ikappas=None):
         # Load density map
         _, ipix_mask = self.snap_lensing.shell_builder.get_mask(return_ipix=True)
-        density_masked = self.snap_lensing.shell_builder.get_field_map(ishell, reorder_n2r=False)[ipix_mask]
+        density_masked = self.snap_lensing.shell_builder.get_field_map(ishell, nest=True)[ipix_mask]
 
         # Loop over tomographic bins
         for ikappa in self.lensing.tqdm(ikappas, leave=False):
@@ -295,7 +295,7 @@ class CatalogSourceClusteredPoisson(CatalogSourceGenerator):
     def _generate_pos(self, catalog, ishell, ikappas=None):
         # Load density map
         _, ipix_mask = self.snap_lensing.shell_builder.get_mask(return_ipix=True)
-        density_masked = self.snap_lensing.shell_builder.get_field_map(ishell, reorder_n2r=False)[ipix_mask]
+        density_masked = self.snap_lensing.shell_builder.get_field_map(ishell, nest=True)[ipix_mask]
 
         # Loop over tomographic bins
         for ikappa in self.lensing.tqdm(ikappas, leave=False):

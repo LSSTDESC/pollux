@@ -161,7 +161,10 @@ class ShellBuilder(MapBuilder):
 
         # Dump useful metadata
         if self.save_dir is not None:
-            self.save_info()
+            try:
+                self.save_info()
+            except:
+                print("Could not save the metadata info.")
 
     def shell_edges_comoving_distance(self):
         """

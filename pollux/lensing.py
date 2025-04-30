@@ -196,7 +196,7 @@ class BornLensingBuilder(LensingBuilder):
             self.mpart_over_area = mpart / area
 
             zmax = self.shell_builder.shell_edges_redshift()[-1]
-            self.dndz_norm = [quad(lambda z: t.get_dndz(z), 0., zmax) if isinstance(t, pyccl.tracers.WeakLensingTracer) else np.nan for t in self.get_tracers()]
+            self.dndz_norm = [quad(lambda z: t.get_dndz(z), 0., zmax) if isinstance(t, pyccl.tracers.NzTracer) else np.nan for t in self.get_tracers()]
             self.zlens = [self.shell_builder.get_mean_z(ishell) for ishell in range(self.nshells)]
 
     def compute_weight(self, ishell, ikappa):
@@ -220,10 +220,10 @@ class BornLensingBuilder(LensingBuilder):
 
             d_A_lens = pyccl.angular_diameter_distance(self.cosmo, 1. / (1. + zlens))  # needed to obtain surface mass density in 1/Mpc^2
 
-            if isinstance(tracer, pyccl.tracers.WeakLensingTracer):
+            if isinstance(tracer, pyccl.tracers.NzTracer):
 
                 def integrand(zsource, zlens, tracer):
-                    sigma_critical = pyccl.background.sigma_critical(self.cosmo, 1. / (1. + zlens), 1. / (1. + zsource))  # in Msun / Mpc^2
+                    sigma_critical = pyccl.background.sigma_critical(self.cosmo, a_lens=1. / (1. + zlens), a_source=1. / (1. + zsource))  # in Msun / Mpc^2
                     return tracer.get_dndz(zsource) / sigma_critical
 
                 w = quad(integrand, zlens, zmax, args=(zlens, tracer)) / self.dndz_norm[ikappa]

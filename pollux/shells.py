@@ -1105,7 +1105,7 @@ class SnapshotShellBuilderLarsen(ShellBuilder):
 
 class SnapshotShellBuilderHeitmann(ShellBuilder):
 
-    # this one's for processing Katrin's files
+    # this one's for processing HACC Lightcone Mode files
 
     def __init__(self, reader, nside, save_dir, shell_edges_match='center_scale_factor', **kwargs):
         """`ShellBuilder` is a class to handle the computation of particle shells from snapshots of an N-body simulation.
@@ -1140,7 +1140,6 @@ class SnapshotShellBuilderHeitmann(ShellBuilder):
         if not os.path.exists(os.path.join(self.save_dir, 'subs')):
             os.makedirs(os.path.join(self.save_dir, 'subs'))
 
-        # fname = os.path.join(self.save_dir, 'subs/shell_hacc_nside' + str(self.nside) + '_imap' + str(ishell) + '_sub' + str(isub) + '.fits')
         fname = self.get_fname(ishell, sub=isub)
 
         if self.check_maps(read=True, fname=fname):
@@ -1157,8 +1156,6 @@ class SnapshotShellBuilderHeitmann(ShellBuilder):
             Abs = [(np.zeros((3, 3), dtype=self.dtype), np.zeros(3, dtype=self.dtype)) for _ in range(self.nshells)]
 
             boxsize = self.dtype(self.reader.boxsize())
-
-            # 1
 
             zsnapshot_fulllist = 1 / self.reader.get_asnapshots(self.reader.snapshots_fulllist) - 1
 
@@ -1181,46 +1178,6 @@ class SnapshotShellBuilderHeitmann(ShellBuilder):
             except:
                 pass
 
-            # 2
-
-            # if self.reader.snap_sub_every_n is None and self.reader.snap_sub_every_n_downsample is None:
-            #     if ishell == 0:
-            #         xyz = self.reader.read_sub(0, isub)
-            #     else:
-            #         xyz_i = self.reader.read_sub(ishell - 1, isub)
-            #         xyz_f = self.reader.read_sub(ishell, isub)
-            #         xyz = np.vstack((xyz_i, xyz_f))
-            # else:
-            #     # read box
-            #     if ishell == 0:
-            #         i = np.argwhere(self.reader.snapshots[ishell] == self.reader.snapshots_fulllist)[0][0]
-            #         f = np.argwhere(self.reader.snapshots[ishell + 1] == self.reader.snapshots_fulllist)[0][0]
-            #         f = int(f / 2 + 1)+1
-            #         for k in np.arange(i, f):
-            #             try:
-            #                 xyz = np.vstack((xyz, self.reader.read_sub(k, isub)))
-            #             except:
-            #                 xyz = self.reader.read_sub(k, isub)
-            #         try:
-            #             print(['Edges',rmin2,(xyz[:,0]**2+xyz[:,1]**2+xyz[:,2]**2).min(),rmax2,(xyz[:,0]**2+xyz[:,1]**2+xyz[:,2]**2).max()])
-            #         except:
-            #             pass
-            #     else:
-            #         i = np.argwhere(self.reader.snapshots[ishell - 1] == self.reader.snapshots_fulllist)[0][0]
-            #         f = np.argwhere(self.reader.snapshots[ishell] == self.reader.snapshots_fulllist)[0][0]
-            #         delta = int((f - i) / 2)
-            #         i += delta-1
-            #         f += delta+1
-            #         for k in np.arange(i, f):
-            #             try:
-            #                 xyz = np.vstack((xyz, self.reader.read_sub(k, isub)))
-            #             except:
-            #                 xyz = self.reader.read_sub(k, isub)
-            #         try:
-            #             print(['Edges',(xyz[:,0]**2+xyz[:,1]**2+xyz[:,2]**2).min(),rmin2,rmax2,(xyz[:,0]**2+xyz[:,1]**2+xyz[:,2]**2).max()])
-            #         except:
-            #             pass
-
             try:
                 box_lims = np.stack([np.min(xyz, axis=0), np.max(xyz, axis=0)])
                 cube_nodes = ((np.arange(8)[:, None] & (1 << np.arange(3))) > 0).astype(int)  #[(0,0,0),(0,0,1),...,(1,1,1)]
@@ -1238,14 +1195,6 @@ class SnapshotShellBuilderHeitmann(ShellBuilder):
             order = hp.nside2order(self.nside)
             ncap = (nside * nside - nside) << 1
             npix = self.npix
-
-            # print(xyz)
-            # print(box_edges_original)
-            # print(boxsize)
-            # print(rmin2)
-            # print(rmax2)
-            # print(self.apply_grid_isometry)
-            # print(self.apply_replicate_rotflip, self.replicate_rotflip, self.octant_only, nside, order, ncap, npix)
 
             uipix, c = _construct_maps_sub_helper(
                 False, xyz, box_edges_original, boxsize, rmin2, rmax2, self.apply_grid_isometry, self.Abs[ishell][0], self.Abs[ishell][1],

@@ -73,19 +73,23 @@ class CatalogSourceGenerator(CatalogGenerator):
 
         # Interpolate shear values, looping over shells for speed
         for k in self.interp_list:
+            map_high = None
             for ishell in self.lensing.shell_builder.tqdm(None, desc=f"[generate] interpolating maps {k}"):
                 # Load maps
-                if ishell == 0:
-                    if k in ['t11', 't22', 't12']:
-                        map_high = self.lensing.shell_builder.load_maps(0, what=k)
-                    else:
-                        map_high = self.snap_lensing.load_maps(0, what=None if k == 'kappa' else k)
+                map_low = map_high
+                if any(s in k for s in ['t11', 't12', 't22']):
+                    map_high = self.lensing.shell_builder.load_maps(ishell, what=k)
+                elif k == 'delta':
+                    # map_high = self.snap_lensing.shell_builder.get_field_map(ishell, nest=True) # this one did not work because it's not a Healsparse map
+                    # map_high = self.snap_lensing.shell_builder.load_maps(ishell) # this one did not work
+                    import healsparse
+                    _, ipix_mask = self.snap_lensing.shell_builder.get_mask(return_ipix=True)
+                    density_masked = self.snap_lensing.shell_builder.get_field_map(ishell, nest=True)[ipix_mask]
+                    map_high = healsparse.HealSparseMap.make_empty(self.lensing.nside_c, self.nside, self.lensing.dtype)
+                    map_high.update_values_pix(ipix_mask, density_masked.astype(self.lensing.dtype))
+                    print([density_masked.min(), density_masked.max()])
                 else:
-                    map_low = map_high
-                    if k in ['t11', 't22', 't12']:
-                        map_high = self.lensing.shell_builder.load_maps(ishell, what=k)
-                    else:
-                        map_high = self.snap_lensing.load_maps(ishell, what=None if k == 'kappa' else k)
+                    map_high = self.snap_lensing.load_maps(ishell, what=None if k == 'kappa' else k)
 
                 chi_low, chi_high = chi_bins_edges[[ishell, ishell + 1]]
 
@@ -95,24 +99,32 @@ class CatalogSourceGenerator(CatalogGenerator):
                     w = (catalog[ikappa]['idx_shell'] == ishell)
 
                     if np.any(w):
-                        # prepare for interpolation
-                        dchi = (catalog[ikappa]['chi'][w] - chi_low)  # distance
-
-                        # interpolation between shells and (optionnally) accross pixels
-                        if self.interp_pixels:
-                            if ishell == 0:
-                                catalog[ikappa][k][w] = dchi * map_high.interpolate_pos(
-                                    catalog[ikappa]['ra'][w], catalog[ikappa]['dec'][w], allow_partial=True) / (chi_high - chi_low)
+                        if k == 'delta':
+                            if self.interp_pixels:
+                                catalog[ikappa][k][w] = map_high.interpolate_pos(
+                                        catalog[ikappa]['ra'][w], catalog[ikappa]['dec'][w], allow_partial=True)
                             else:
-                                map_low_interp = map_low.interpolate_pos(catalog[ikappa]['ra'][w], catalog[ikappa]['dec'][w], allow_partial=True)
-                                map_high_interp = map_high.interpolate_pos(catalog[ikappa]['ra'][w], catalog[ikappa]['dec'][w], allow_partial=True)
-                                catalog[ikappa][k][w] = map_low_interp + dchi * (map_high_interp - map_low_interp) / (chi_high - chi_low)
+                                idx = hp.ang2pix(self.nside, *radec2thetaphi(catalog[ikappa]['ra'][w], catalog[ikappa]['dec'][w]), nest=True)  # pixels
+                                catalog[ikappa][k][w] =  map_high[idx]
                         else:
-                            idx = hp.ang2pix(self.nside, *radec2thetaphi(catalog[ikappa]['ra'][w], catalog[ikappa]['dec'][w]), nest=True)  # pixels
-                            if ishell == 0:
-                                catalog[ikappa][k][w] = dchi * map_high[idx] / (chi_high - chi_low)
+                            # prepare for interpolation
+                            dchi = (catalog[ikappa]['chi'][w] - chi_low)  # distance
+    
+                            # interpolation between shells and (optionnally) accross pixels
+                            if self.interp_pixels:
+                                if ishell == 0:
+                                    catalog[ikappa][k][w] = dchi * map_high.interpolate_pos(
+                                        catalog[ikappa]['ra'][w], catalog[ikappa]['dec'][w], allow_partial=True) / (chi_high - chi_low)
+                                else:
+                                    map_low_interp = map_low.interpolate_pos(catalog[ikappa]['ra'][w], catalog[ikappa]['dec'][w], allow_partial=True)
+                                    map_high_interp = map_high.interpolate_pos(catalog[ikappa]['ra'][w], catalog[ikappa]['dec'][w], allow_partial=True)
+                                    catalog[ikappa][k][w] = map_low_interp + dchi * (map_high_interp - map_low_interp) / (chi_high - chi_low)
                             else:
-                                catalog[ikappa][k][w] = map_low[idx] + dchi * (map_high[idx] - map_low[idx]) / (chi_high - chi_low)
+                                idx = hp.ang2pix(self.nside, *radec2thetaphi(catalog[ikappa]['ra'][w], catalog[ikappa]['dec'][w]), nest=True)  # pixels
+                                if ishell == 0:
+                                    catalog[ikappa][k][w] = dchi * map_high[idx] / (chi_high - chi_low)
+                                else:
+                                    catalog[ikappa][k][w] = map_low[idx] + dchi * (map_high[idx] - map_low[idx]) / (chi_high - chi_low)
 
     def _save_catalogs(self, catalog, ikappas=None):
         for ikappa in self.lensing.tqdm(ikappas, desc="[generate] saving", leave=False):

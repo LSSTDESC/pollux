@@ -575,6 +575,10 @@ class ShellBuilder(MapBuilder):
                     inplace=True,
                 )
 
+                var = [f't11_{smooth_Mpc}Mpc', f't12_{smooth_Mpc}Mpc', f't22_{smooth_Mpc}Mpc']
+            else:
+                var = ['t11', 't12', 't22']
+
             Q, U = hp.alm2map_spin((alm_E, np.zeros_like(alm_E)), self.nside, spin=2, lmax=lmax)
 
             Q = Q[ipix]
@@ -594,7 +598,7 @@ class ShellBuilder(MapBuilder):
             # t22 = (delta-Q)/2 - density/3
             # t12 = U
 
-            for what, val in zip(['t11', 't22', 't12'], [density / 6. + Q / 2., density / 6. - Q / 2., U]):
+            for what, val in zip(var, [density / 6. + Q / 2., density / 6. - Q / 2., U]):
                 hsp = healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
                 hsp.update_values_pix(ipix, val.astype(self.dtype), nest=False)
                 hsp.write(self.get_fname(ishell, what=what), clobber=True, format=self.save_format)

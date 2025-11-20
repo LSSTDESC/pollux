@@ -575,9 +575,9 @@ class ShellBuilder(MapBuilder):
                     inplace=True,
                 )
 
-                var = [f't11_{smooth_Mpc}Mpc', f't12_{smooth_Mpc}Mpc', f't22_{smooth_Mpc}Mpc']
+                var = [f't11_{smooth_Mpc}Mpc', f't22_{smooth_Mpc}Mpc', f't12_{smooth_Mpc}Mpc']
             else:
-                var = ['t11', 't12', 't22']
+                var = ['t11', 't22', 't12']
 
             Q, U = hp.alm2map_spin((alm_E, np.zeros_like(alm_E)), self.nside, spin=2, lmax=lmax)
 

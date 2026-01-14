@@ -63,7 +63,9 @@ class LensingBuilder(MapBuilder):
         else:
             self.nkappas = len(nzs)
             os.makedirs(save_dir, exist_ok=True)
-            np.save(os.path.join(save_dir, 'nzs.npy'), nzs)
+            fname = os.path.join(save_dir, 'nzs.npy')
+            if not os.path.exists(fname):
+                np.save(fname, nzs)
 
         base_fname = f'kappa_{shell_builder.reader.kind}_seed{shell_builder.seed}'
 

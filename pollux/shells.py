@@ -259,7 +259,11 @@ class ShellBuilder(MapBuilder):
             if os.path.exists(fname):
                 shell_info_existing = np.load(fname)
                 try:
-                    np.testing.assert_array_equal(shell_info, shell_info_existing)
+                    for name, dtype in zip(names, dtypes):
+                        if dtype == 'int':
+                            np.testing.assert_array_equal(shell_info[name], shell_info_existing[name], err_msg=f"Shell info {name} does not match existing file {fname}.")
+                        elif dtype == 'float':
+                            np.testing.assert_allclose(shell_info[name], shell_info_existing[name], rtol=1e-5, err_msg=f"Shell info {name} does not match existing file {fname}.")
                 except TypeError:
                     warnings.warn('Shell info file exists, different type!')
             else:
@@ -268,10 +272,12 @@ class ShellBuilder(MapBuilder):
             np.savetxt(fname, shell_info, header=' '.join(names), fmt=fmt)
 
         # Save cosmology
-        try:
-            self.reader.cosmo.write_yaml(os.path.join(self.save_dir, "cosmo_ccl.yaml"))
-        except ValueError:
-            warnings.warn("Cannot write cosmo yaml file, likely due to using non-serializable options (eg P(k)).")
+        fname = os.path.join(self.save_dir, "cosmo_ccl.yaml")
+        if not os.path.exists(fname):
+            try:
+                self.reader.cosmo.write_yaml(os.path.join(self.save_dir, "cosmo_ccl.yaml"))
+            except ValueError:
+                warnings.warn("Cannot write cosmo yaml file, likely due to using non-serializable options (eg P(k)).")
 
         # Save simulation and maps info
         data = {
@@ -289,7 +295,8 @@ class ShellBuilder(MapBuilder):
             "npix": self.npix,
         }
         fname = os.path.join(self.save_dir, 'sim_info.yaml')
-        yaml.dump(data, open(fname, "w"))
+        if not os.path.exists(fname):
+            yaml.dump(data, open(fname, "w"))
 
     def get_snapshot_lensing_builder(self, kappa_dir='kappa_zsnapshots'):
         return BornLensingBuilder(self, nzs='zsnapshots', kappa_dir=kappa_dir, wsp_dir=self.wsp_dir)

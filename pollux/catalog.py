@@ -1,5 +1,6 @@
 import numpy as np
 import healpy as hp
+import healsparse
 from astropy.io import fits
 
 from .utils import radec2thetaphi, quad, sample_pdf
@@ -80,9 +81,6 @@ class CatalogSourceGenerator(CatalogGenerator):
                 if any(s in k for s in ['t11', 't12', 't22']):
                     map_high = self.lensing.shell_builder.load_maps(ishell, what=k)
                 elif k == 'delta':
-                    # map_high = self.snap_lensing.shell_builder.get_field_map(ishell, nest=True) # this one did not work because it's not a Healsparse map
-                    # map_high = self.snap_lensing.shell_builder.load_maps(ishell) # this one did not work
-                    import healsparse
                     _, ipix_mask = self.snap_lensing.shell_builder.get_mask(return_ipix=True)
                     density_masked = self.snap_lensing.shell_builder.get_field_map(ishell, nest=True)[ipix_mask]
                     map_high = healsparse.HealSparseMap.make_empty(self.lensing.nside_c, self.nside, self.lensing.dtype)
@@ -101,15 +99,14 @@ class CatalogSourceGenerator(CatalogGenerator):
                     if np.any(w):
                         if k == 'delta':
                             if self.interp_pixels:
-                                catalog[ikappa][k][w] = map_high.interpolate_pos(
-                                        catalog[ikappa]['ra'][w], catalog[ikappa]['dec'][w], allow_partial=True)
+                                catalog[ikappa][k][w] = map_high.interpolate_pos(catalog[ikappa]['ra'][w], catalog[ikappa]['dec'][w], allow_partial=True)
                             else:
                                 idx = hp.ang2pix(self.nside, *radec2thetaphi(catalog[ikappa]['ra'][w], catalog[ikappa]['dec'][w]), nest=True)  # pixels
-                                catalog[ikappa][k][w] =  map_high[idx]
+                                catalog[ikappa][k][w] = map_high[idx]
                         else:
                             # prepare for interpolation
                             dchi = (catalog[ikappa]['chi'][w] - chi_low)  # distance
-    
+
                             # interpolation between shells and (optionnally) accross pixels
                             if self.interp_pixels:
                                 if ishell == 0:

@@ -73,7 +73,7 @@ class PolluxIO:
             f"shell_{self.kind}_seed{self.seed}_nside{self.nside}_haloes_props_imap{i}.fits",
         )
         return fits.open(fname)
-    
+
     def load_IA(self, i):
         fname = os.path.join(
             self.sim_path,
@@ -86,7 +86,7 @@ class PolluxIO:
             f"shell_{self.kind}_seed{self.seed}_nside{self.nside}_t12_imap{i}.fits",
         )
         t12 = healsparse.HealSparseMap.read(fname)
-        
+
         fname = os.path.join(
             self.sim_path,
             f"shell_{self.kind}_seed{self.seed}_nside{self.nside}_t22_imap{i}.fits",
@@ -121,7 +121,7 @@ class PolluxIO:
         return g1, g2
 
     def load_catalog(self, i):
-        interp_pixels_dict = {True: 'interppixels',False: 'nointerppixels'}
+        interp_pixels_dict = {True: 'interppixels', False: 'nointerppixels'}
         if self.catalog == 'poisson':
             fname = os.path.join(
                 self.sim_path,

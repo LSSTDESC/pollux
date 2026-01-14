@@ -10,6 +10,7 @@ import pymaster as nmt
 import sacc
 from itertools import product
 from tqdm.auto import tqdm, trange
+from itertools import product
 
 from .utils import *
 
@@ -64,7 +65,7 @@ class MapBuilder:
         remove_monopole, optional
             Whether the monopole should be removed when computing alm's and Cl's
         nocompress, optional
-            Whether to use compression to save HealSparse maps (bug makes it slow)
+            Whether to use compression to save HealSparse maps (bug makes it slow), by default True
         """
         self.nside = nside
         self.npix = hp.nside2npix(nside)
@@ -81,7 +82,7 @@ class MapBuilder:
         self.wsp_dir = wsp_dir
         self.remove_monopole = remove_monopole
         self.nocompress = nocompress
-        self.f_ell = f_ell            
+        self.f_ell = f_ell
 
         if b is not None:
             self.b = b
@@ -340,23 +341,32 @@ class MapBuilder:
             fname = self.get_fname(format='png')
             plt.savefig(fname, bbox_inches='tight', dpi=150, transparent=False)
 
-    def _create_mask(self):
-        if self.octant_only:
-            self.mask = make_mask_radec_cuts(self.nside, 0, 90, 0, 90, eps=1e-10, nest=True) # mask fully within the octant
-            self.ipix = np.where(self.mask)[0]
+    def _create_mask(self, nside=None):
+        if nside is not None:
+            npix = hp.nside2npix(nside)
         else:
-            self.mask = np.ones(self.npix)
-            self.ipix = np.arange(self.npix)
+            nside = self.nside
+            npix = self.npix
+            
+        if self.octant_only:
+            mask = make_mask_radec_cuts(nside, 0, 90, 0, 90, eps=1e-10, nest=True)  # mask fully within the octant
+            ipix = np.where(mask)[0]
+        else:
+            mask = np.ones(npix)
+            ipix = np.arange(npix)
+            
+        return mask, ipix
 
-        self.mask_ring = hp.reorder(self.mask, n2r=True)
-        self.ipix_ring = hp.nest2ring(self.nside, self.ipix)
-
-    def get_mask(self, nest=True, return_ipix=False):
+    def get_mask(self, nest=True, return_ipix=False, nside=None):
         """
         Helper function to compute the mask
         """
         if not hasattr(self, 'mask'):
-            self._create_mask()
+            mask, ipix = self._create_mask()
+            self.mask = mask
+            self.ipix = ipix
+            self.mask_ring = hp.reorder(self.mask, n2r=True)
+            self.ipix_ring = hp.nest2ring(self.nside, self.ipix)
         if nest:
             if return_ipix:
                 return self.mask, self.ipix
@@ -681,65 +691,12 @@ class MapBuilder:
                         _f_ell[b.get_ell_list(0)[0]:] = self.f_ell
                     cl_raw *= _f_ell**2
                 cl[i, j] = np.dot(bpws, cl_raw)
-                
+
                 if add_noise and i == j:
                     nl_raw = self._noise_cls(i)
                     if self.f_ell is not None:
                         nl_raw *= _f_ell**2
                     cl[i, j] += np.dot(bpws, nl_raw)
-
-
-#         if error_bars:
-#             dcl = {}
-#             # Diagonal error bars
-#             for i, j in pairs:
-#                 if i == j:
-#                     dcl2_num = 2 * (cl[i, i] + self._noise_cls(i))**2
-#                 else:
-#                     dcl2_num = (cl[i, i] + self._noise_cls(i)) * (cl[j, j] + self._noise_cls(j)) + cl[order(i, j)]**2
-#                 dcl[i, j] = np.sqrt(dcl2_num / ((2 * ell + 1.) * fsky * nell))
-
-#             if stacked:
-#                 dcl_full = {}
-#                 Dl = {}
-
-#                 # Compute covariance blocks
-#                 for i, j in pairs:
-#                     Dl[i, j] = np.copy(cl[i, j])
-#                     Dl[j, i] = np.copy(cl[i, j])
-#                     if i == j:
-#                         Dl[i, j] += self._noise_cls(i)
-#                 for i, j in pairs:
-#                     for k, l in pairs:
-#                         dcl_full[i, j, k, l] = (Dl[i, l] * Dl[j, k] + Dl[i, k] * Dl[j, l]) / ((2 * ell + 1.) * fsky * nell)
-
-#                 # Stack Cl's and covariance blocks
-#                 cl_stacked = np.zeros(len(pairs) * len(ell))
-#                 cov = np.zeros([len(pairs) * len(ell), len(pairs) * len(ell)])
-#                 for nrow, (i, j) in enumerate(pairs):
-#                     cl_stacked[nrow * len(ell):(nrow + 1) * len(ell)] = np.copy(cl[i, j])
-#                     for ncol, (k, l) in enumerate(pairs):
-#                         cov[nrow * len(ell):(nrow + 1) * len(ell), ncol * len(ell):(ncol + 1) * len(ell)] = np.diag(dcl_full[i, j, k, l])
-
-#                 if keep_cls:
-#                     self.predicted_cls = ell, cl, dcl, cl_stacked, cov
-#                 return ell, cl, dcl, cl_stacked, cov
-#             else:
-#                 if keep_cls:
-#                     self.predicted_cls = ell, cl, dcl
-#                 return ell, cl, dcl
-#         else:
-#             if stacked:
-#                 cl_stacked = np.zeros(len(pairs) * len(ell))
-#                 for nrow, (i, j) in enumerate(pairs):
-#                     cl_stacked[nrow * len(ell):(nrow + 1) * len(ell)] = np.copy(cl[i, j])
-#                 if keep_cls:
-#                     self.predicted_cls = ell, cl, cl_stacked
-#                 return ell, cl, cl_stacked
-#             else:
-#                 if keep_cls:
-#                     self.predicted_cls = ell, cl
-#                 return ell, cl
 
         if error_bars:
             dcl = {}
@@ -762,11 +719,11 @@ class MapBuilder:
                     if i == j:
                         Dl[i, j] += self._noise_cls(i)
 
+                # Stack Cl's and covariance blocks
                 if auto_only:
                     for i, j in pairs:
                         dcl_full[i, j, i, j] = (Dl[i, j] * Dl[j, i] + Dl[i, i] * Dl[j, j]) / ((2 * ell + 1.) * fsky * nell)
 
-                    # Stack Cl's and covariance blocks
                     cl_stacked = np.zeros(len(pairs) * len(ell))
                     cov = np.zeros([len(pairs) * len(ell), len(pairs) * len(ell)])
                     for nrow, (i, j) in enumerate(pairs):
@@ -777,7 +734,6 @@ class MapBuilder:
                         for k, l in pairs:
                             dcl_full[i, j, k, l] = (Dl[i, l] * Dl[j, k] + Dl[i, k] * Dl[j, l]) / ((2 * ell + 1.) * fsky * nell)
 
-                    # Stack Cl's and covariance blocks
                     cl_stacked = np.zeros(len(pairs) * len(ell))
                     cov = np.zeros([len(pairs) * len(ell), len(pairs) * len(ell)])
                     for nrow, (i, j) in enumerate(pairs):
@@ -925,132 +881,92 @@ class MapBuilder:
 
         # plt.show()
 
-    def compute_kappa_moments(self, theta_range=np.geomspace(2.5, 250, 8), nside_small=512):
-         """Compute the second, third and fourth moments of convergence maps
-         
+    def compute_map_moments(self, theta_smooth=np.geomspace(2.5, 250, 8), nside_small=512):
+        """Compute the second, third and fourth moments of maps
+        
+        Parameters
+        ----------
+            theta_smooth : array-like, optional
+                Smoothing scales in arcmin, by default np.geomspace(2.5, 250, 8)
+            nside_small : int, optional
+                Nside of the smoothed maps, by default 512         
          Returns
          -------
-             theta, kappa_2, kappa_3, kappa_4
+             theta, map_2, map_3, map_4
          """
-         
-         fname = self.get_fname(what='2nd_3rd_4th_moments', format='npy')
-         
-         if not os.path.exists(fname):
-         
-             kappa = {}
- 
-             lmax_out = 2*nside_small
-             
-             # Mask
-             
-             mask_octant = make_mask_radec_cuts(nside_small, 0, 90, 0, 90, eps=1e-10, nest=True).astype(bool) # mask fully within the octant
-             ipix_octant = np.where(mask_octant)[0]
- 
-             for bin_z in range(self.nmaps):
- 
-                 kappa[bin_z] = {}
- 
-                 alm = self.compute_alms(imaps=bin_z)[bin_z]
-                 lmax = hp.Alm.getlmax(len(alm))
-                 alm = hp.sphtfunc.resize_alm(alm, lmax=lmax, mmax=lmax, lmax_out=lmax_out, mmax_out=lmax_out)
- 
-                 # Let's measure kappa from the alms
- 
-                 for theta in theta_range:
- 
-                     kappa_map = hp.alm2map(alm, nside_small, sigma=theta*1/60*np.pi/180, lmax=lmax_out)
-                     kappa_map = hp.pixelfunc.reorder(kappa_map, r2n=True)
-                     kappa_map[~mask_octant] = hp.UNSEEN
-                     kappa[bin_z][theta] = kappa_map
- 
-             # 2nd moment
- 
-             second_moment = {}
- 
-             for theta in theta_range:
- 
-                 second_moment[theta] = np.cov(np.stack([kappa[bin_z][theta][ipix_octant] for bin_z in range(self.nmaps)], axis=0))
- 
-             # 3rd moment
- 
-             from itertools import product
- 
-             third_moment = {}
- 
-             for theta in theta_range:
-                 # Stack data for all bins at the given theta
-                 data = np.stack([kappa[bin_z][theta][ipix_octant] for bin_z in range(self.nmaps)], axis=0)
- 
-                 # Calculate the means for each bin
-                 means = np.mean(data, axis=1)  # Shape: (n_bins,)
- 
-                 # Center the data
-                 centered_data = data - means[:, np.newaxis]  # Shape: (n_bins, n_realizations)
- 
-                 # Compute third moments across all bin combinations
-                 n_bins = centered_data.shape[0]
-                 n_realizations = centered_data.shape[1]
-                 third_moment_theta = np.zeros((n_bins, n_bins, n_bins))
- 
-                 for i, j, k in product(range(n_bins), repeat=3):
-                     third_moment_theta[i, j, k] = np.mean(
-                         centered_data[i] * centered_data[j] * centered_data[k]
-                     )
- 
-                 # Store the third moment tensor for this theta
-                 third_moment[theta] = third_moment_theta
- 
-             # 4th moment
- 
-             fourth_moment = {}
- 
-             for theta in theta_range:
-                 # Stack data for all bins at the given theta
-                 data = np.stack([kappa[bin_z][theta][ipix_octant] for bin_z in range(self.nmaps)], axis=0)
- 
-                 # Calculate the means for each bin
-                 means = np.mean(data, axis=1)  # Shape: (n_bins,)
- 
-                 # Center the data
-                 centered_data = data - means[:, np.newaxis]  # Shape: (n_bins, n_realizations)
- 
-                 # Compute 4th moments across all bin combinations
-                 n_bins = centered_data.shape[0]
-                 n_realizations = centered_data.shape[1]
-                 fourth_moment_theta = np.zeros((n_bins, n_bins, n_bins, n_bins))
- 
-                 for i, j, k, l in product(range(n_bins), repeat=4):
-                     fourth_moment_theta[i, j, k, l] = np.mean(
-                         centered_data[i] * centered_data[j] * centered_data[k] * centered_data[l]
-                     )
- 
-                 # Store the 4th moment tensor for this theta
-                 fourth_moment[theta] = fourth_moment_theta
-                 
-             # Let's save them all
-             
-             moments = {}
-             
-             moments['theta_range'] = theta_range
-             moments['second_moment'] = second_moment
-             moments['third_moment'] = third_moment
-             moments['fourth_moment'] = fourth_moment
- 
-             print('Saving output as: ' +fname)
-             
-             np.save(fname, moments)
-             
-         else:
-             
-             print('Loading pre-existing file: ' +fname)
-             
-             moments = np.load(fname, allow_pickle=True).item()
- 
-             theta_range, second_moment, third_moment, fourth_moment = moments['theta_range'], moments['second_moment'], moments['third_moment'], moments['fourth_moment']
-             
-         return theta_range, second_moment, third_moment, fourth_moment
+
+        fname = self.get_fname(what='2nd_3rd_4th_moments', format='npy')
+        
+        if os.path.exists(fname):
+            print('Loading pre-existing file: ' + fname)
+            moments = np.load(fname, allow_pickle=True).item()
+            return moments['theta_smooth'], moments['second_moment'], moments['third_moment'], moments['fourth_moment']
+
+        kappa = {}
+        lmax_out = 2 * nside_small
+
+        # Mask
+        mask, ipix = self._create_mask(nside=nside_small)
+
+        # First, let's compute kappa maps for all bins and all theta (smoothing scales)
+        for imap in range(self.nmaps):
+            kappa[imap] = {}
+
+            # read the alm's
+            alm = self.compute_alms(imaps=imap)[imap]
+            lmax = hp.Alm.getlmax(len(alm))
+            alm = hp.sphtfunc.resize_alm(alm, lmax=lmax, mmax=lmax, lmax_out=lmax_out, mmax_out=lmax_out)
+
+            # smooth maps for all theta
+            for theta in theta_smooth:
+                kappa_map = hp.alm2map(alm, nside_small, sigma=theta * np.pi / (180. * 60), lmax=lmax_out)
+                kappa_map = hp.pixelfunc.reorder(kappa_map, r2n=True)
+                kappa_map[~mask] = hp.UNSEEN
+                kappa_map[mask] -= np.mean(kappa_map[mask])  # Remove mean for moments calculation
+                kappa[imap][theta] = kappa_map
+
+        moments = {}
+        moments['theta_smooth'] = theta_smooth
+        moments['second_moment'] = {}
+        moments['third_moment'] = {}
+        moments['fourth_moment'] = {}
+
+        # Now compute moments
+        for theta in theta_smooth:
+            # Stack data for all maps at given theta
+            data = np.stack([kappa[imap][theta][ipix] for imap in range(self.nmaps)], axis=0)
+            
+            # 2nd moment
+            moments['second_moment'][theta] = np.cov(data)
+
+            # 3rd moment
+            moments['third_moment'][theta] = np.zeros((self.nmaps, self.nmaps, self.nmaps))
+            for i, j, k in product(range(self.nmaps), repeat=3):
+                moments['third_moment'][theta][i, j, k] = np.mean(data[i] * data[j] * data[k])
+
+            # 4th moment
+            moments['fourth_moment'][theta] = np.zeros((self.nmaps, self.nmaps, self.nmaps, self.nmaps))
+            for i, j, k, l in product(range(self.nmaps), repeat=4):
+                moments['fourth_moment'][theta][i, j, k, l] = np.mean(data[i] * data[j] * data[k] * data[l])
+
+        # Let's save them all
+        print('Saving output as:' + fname)
+        np.save(fname, moments)
+
+        return theta_smooth, moments['second_moment'], moments['third_moment'], moments['fourth_moment']
 
     def generate_gaussian_maps(self, imaps=None, auto_only=False, seed=-1):
+        """Generate Gaussian random maps based on theory angular power spectra
+        
+        Parameters
+        ----------
+        imaps, optional
+            Map indices, by default None
+        auto_only, optional
+            Whether to only generate auto-correlated maps, by default False
+        seed, optional
+            Random seed, by default -1
+        """
         if imaps is None:
             imaps = range(self.nmaps)
 

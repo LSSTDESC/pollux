@@ -142,10 +142,10 @@ class MapBuilder:
                 os.makedirs(subs_save_dir, exist_ok=True)
             return os.path.join(subs_save_dir, fname)
 
-    def _create_tracers(self):
+    def _create_tracers_ccl(self):
         raise NotImplementedError
 
-    def get_tracers(self):
+    def get_tracers_ccl(self):
         """Create CCL Tracer object for theory computations
 
         Parameters
@@ -154,7 +154,7 @@ class MapBuilder:
             Number of points to define splines, by default 1000
         """
         if not hasattr(self, 'tracers'):
-            self.tracers = self._create_tracers()
+            self.tracers = self._create_tracers_ccl()
         return self.tracers
 
     def _create_tracers_sacc(self):
@@ -633,7 +633,7 @@ class MapBuilder:
             # pairs = [(i1, i2) for i, i1 in enumerate(imaps) for i2 in imaps[:i + 1]]
             pairs = [(i1, i2) for i, i2 in enumerate(imaps) for i1 in imaps[i:]]
 
-        tracers = self.get_tracers()
+        tracers = self.get_tracers_ccl()
         tracers_ = {imap: tracers[imap] for imap in imaps}
 
         b = self.get_cls_b()

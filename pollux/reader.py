@@ -60,34 +60,36 @@ class Reader:
         self.nsnapshots = len(zsnapshots)
         self.nsubs = nsubs
 
-        # independent jobs
-        self._sub_args = list(itertools.product(range(self.nsnapshots), range(nsubs)))
-        self.njobs = len(self._sub_args)
+        # independent jobs (snapshot, sub-volume)
+        self._job_args = list(itertools.product(range(self.nsnapshots), range(nsubs)))
+        self.njobs = len(self._job_args)
 
         self.dtype = dtype
 
-    def get_isnapshot(self, isub):
+    def get_job_args(self, ijob):
         """
         Get snapshot index from overall sub-volume/snapshot index
         """
-        return self._sub_args[isub][0]
+        return self._job_args[ijob]
 
     def get_isubs_for_snapshot(self, isnapshot):
         """
         Get sub-volume/snapshot indices for a given snapshot index
         """
-        return np.argwhere([x[0] == isnapshot for x in self._sub_args])[:, 0]
+        return np.argwhere([x[0] == isnapshot for x in self._job_args])[:, 0]
 
     def boxsize(self):
         raise NotImplementedError
 
-    def read_sub(self, isub, assert_xyz_in_box=False, read_box_edges_only=False, extra_variables=[], verbose=False):
+    def read_sub(self, isnapshot, isub, assert_xyz_in_box=False, read_box_edges_only=False, extra_variables=[], verbose=False):
         """Reads a sub volume of a simulation snapshot.
 
         Parameters
         ----------
+        isnapshot
+            Index of the snapshot.
         isub
-            Index of the sub-volume/snapshot element. This should be computed automatically.
+            Index of the sub-volume.
         assert_xyz_in_box, optional
             Check whether particle , by default False
         read_box_edges_only, optional
@@ -101,13 +103,15 @@ class Reader:
         """
         raise NotImplementedError
 
-    def read_props(self, isub, props_variables, ihaloes=slice(-1), verbose=False):
+    def read_props(self, isnapshot, isub, props_variables, ihaloes=slice(-1), verbose=False):
         """Reads extra properties for a sub volume of a simulation snapshot.
 
         Parameters
         ----------
+        isnapshot
+            Index of the snapshot.
         isub
-            Index of the sub-volume/snapshot element. This should be computed automatically.
+            Index of the sub-volume.
         props_variables
             Name of the variables to read
         ihaloes, optional
@@ -129,16 +133,7 @@ class Reader:
 
 class SLICSReader(Reader):
 
-    def __init__(
-            self,
-            path,
-            cosmo,
-            boxsize=505. / 0.6898,
-            nparticles=1536**3,
-            nodes_dim=4,
-            ncc=768,
-            rnc=3072.0,
-            zmax=None):
+    def __init__(self, path, cosmo, boxsize=505. / 0.6898, nparticles=1536**3, nodes_dim=4, ncc=768, rnc=3072.0, zmax=None):
         """Reader for SLICS simulations by Joachim Harnois-Deraps.
 
         Parameters
@@ -177,15 +172,14 @@ class SLICSReader(Reader):
     def boxsize(self):
         return self.boxsize
 
-    def read_sub(self, isub, assert_xyz_in_box=False, read_box_edges_only=False, extra_variables=[], verbose=False):
-        isnapshot, i = self._sub_args[isub]
+    def read_sub(self, isnapshot, isub, assert_xyz_in_box=False, read_box_edges_only=False, extra_variables=[], verbose=False):
         z = self.zsnapshots[isnapshot]
-        filename = os.path.join(self.path, f'{z:.3f}xv{i}.dat')
+        filename = os.path.join(self.path, f'{z:.3f}xv{isub}.dat')
 
         for k1 in range(self.nodes_dim):
             for j1 in range(self.nodes_dim):
                 for i1 in range(self.nodes_dim):
-                    if (i == i1 + j1 * self.nodes_dim + k1 * self.nodes_dim**2):
+                    if (isub == i1 + j1 * self.nodes_dim + k1 * self.nodes_dim**2):
                         node_coords = np.array([[i1, j1, k1]])
                         break
 
@@ -216,17 +210,17 @@ class SLICSReader(Reader):
 class HACCReader(Reader):
 
     def __init__(
-            self,
-            path,
-            run_params='run/run000/indat.params',
-            snap_sub_zmax=None,
-            snap_sub_aminstep=0.,
-            snap_sub_match_dist_n=False,
-            snap_sub_every_n=1,
-            group_along_x=False,
-            matter_power_spectrum=None,
+        self,
+        path,
+        run_params='run/run000/indat.params',
+        snap_sub_zmax=None,
+        snap_sub_aminstep=0.,
+        snap_sub_match_dist_n=False,
+        snap_sub_every_n=1,
+        group_along_x=False,
+        matter_power_spectrum=None,
     ):
-        """Reader for HACC simulations
+        """Reader for HACC simulations snapshots.
 
         Parameters
         ----------
@@ -262,7 +256,7 @@ class HACCReader(Reader):
         print(f"  - Reading parameter file at", fname)
         params = read_params(fname)
 
-        # create cosmo object that can be used by builder  
+        # create cosmo object that can be used by builder
         cosmo_dict = dict(
             Omega_c=float(params['OMEGA_CDM']),
             Omega_b=float(params['DEUT']) / float(params['HUBBLE'])**2,
@@ -277,7 +271,7 @@ class HACCReader(Reader):
             T_CMB=2.726,
             Omega_k=0.)
         if matter_power_spectrum is not None:
-            cosmo_dict['matter_power_spectrum']=matter_power_spectrum
+            cosmo_dict['matter_power_spectrum'] = matter_power_spectrum
         cosmo = pyccl.Cosmology(**cosmo_dict)
         print(f"  - Cosmology", cosmo)
 
@@ -336,7 +330,6 @@ class HACCReader(Reader):
 
         # subsample snapshots : every n'ths snapshots
         self.snapshots = snapshots[::-snap_sub_every_n]  # snapshots ordered by redshift
-
         if snap_sub_every_n > 1:
             print(f"  - Subsampling : keeping every {snap_sub_every_n} snapshots, returns {len(self.snapshots)} snapshots")
 
@@ -356,8 +349,8 @@ class HACCReader(Reader):
             dtype = np.float32
 
         # simulation box limits
-        self.lims = np.array([[[np.floor(ibox / (16)) * 0.5, np.floor(ibox / (16)) * 0.5 + 2.5], [np.floor(ibox / 4) % 4, (np.floor(ibox / 4) % 4) + 1],
-                               [ibox % 4, (ibox % 4) + 1]] for ibox in range(64)])
+        self.lims = np.array([[[np.floor(isub / (16)) * 0.5, np.floor(isub / (16)) * 0.5 + 2.5], [np.floor(isub / 4) % 4, (np.floor(isub / 4) % 4) + 1],
+                               [isub % 4, (isub % 4) + 1]] for isub in range(64)])
 
         nsub = 16 if self.group_along_x else 64
         super().__init__(cosmo, 'hacc', 'Mpc_over_h', nparticles, zsnapshots, snap_sub_zmax, nsub, dtype=dtype)
@@ -365,16 +358,14 @@ class HACCReader(Reader):
     def boxsize(self):
         return self.boxsize_h / self.cosmo["h"]
 
-    def _read_sub_helper(self, isub):
-        istep, ibox = self._sub_args[isub]
-        step = self.snapshots[istep]
-
+    def _read_sub_helper(self, isnapshot, isub):
+        snapshot = self.snapshots[isnapshot]
         boxsize = self.boxsize_h / self.cosmo["h"]
 
         if self.group_along_x:
-            box_lims = np.array([[0, 4], self.lims[ibox][1], self.lims[ibox][2]]) * boxsize / 4.
+            box_lims = np.array([[0, 4], self.lims[isub][1], self.lims[isub][2]]) * boxsize / 4.
         else:
-            box_lims = np.array([self.lims[ibox][i] for i in range(3)]) * boxsize / 4. # this is not always how sub-volumes are saved...
+            box_lims = np.array([self.lims[isub][i] for i in range(3)]) * boxsize / 4.  # this is not always how sub-volumes are saved...
 
         cube_nodes = ((np.arange(8)[:, None] & (1 << np.arange(3))) > 0).astype(int)  #[(0,0,0),(0,0,1),...,(1,1,1)]
         box_edges = np.zeros(cube_nodes.shape)
@@ -382,34 +373,36 @@ class HACCReader(Reader):
         for i in range(3):
             box_edges[:, i] = box_lims[i, cube_nodes[:, i]]  #there's propbably a fancy numpy way to do this...
 
-        return box_edges.astype(self.dtype), ibox, step
+        return box_edges.astype(self.dtype), snapshot
 
-    def _get_name(self, step, ifile):
-        return os.path.join(self.path, 'output', f'STEP{step}/m000.full.mpicosmo.{step}#{ifile}')
+    def _get_name(self, step, isub):
+        return os.path.join(self.path, 'output', f'STEP{step}/m000.full.mpicosmo.{step}#{isub}')
 
-    def read_sub(self, isub, assert_xyz_in_box=False, read_box_edges_only=False, extra_variables=[], verbose=False):
-        box_edges, ibox, step = self._read_sub_helper(isub)
-        
+    def read_sub(self, isnapshot, isub, assert_xyz_in_box=False, read_box_edges_only=False, extra_variables=[], verbose=False):
+        box_edges, snapshot = self._read_sub_helper(isnapshot, isub)
+
         assert not (assert_xyz_in_box and read_box_edges_only)
 
         if read_box_edges_only:
             return np.zeros((17, 3), dtype=self.dtype), box_edges
 
-        out = {k: [] for k in self.variables+extra_variables}
-        
+        # read files (that may be grouped along x)
+        out = {k: [] for k in self.variables + extra_variables}
         nx = 4 if self.group_along_x else 1
         for ix in range(nx):
-            ifile = ix * 16 + ibox
-            name = self._get_name(step, ifile)
+            ifile = ix * 16 + isub
+            name = self._get_name(snapshot, ifile)
             if verbose:
                 print("Reading", name)
-            data = pygio.read_genericio(name, variables=self.variables+extra_variables)
-            for k in self.variables+extra_variables:
+            data = pygio.read_genericio(name, variables=self.variables + extra_variables)
+            for k in self.variables + extra_variables:
                 out[k].append(data[k])
-        
+
+        # concatenate results
         xyz = np.array([np.concatenate(out[k]) for k in self.variables]).T
         xyz /= self.cosmo["h"]
 
+        # check positions are in box edges or compute box edges from positions
         if assert_xyz_in_box:
             for i in range(3):
                 assert np.all(np.min(box_edges[:, i]) <= xyz[:, i]) and np.all(xyz[:, i] <= np.max(box_edges[:, i]))
@@ -418,159 +411,16 @@ class HACCReader(Reader):
             cube_nodes = ((np.arange(8)[:, None] & (1 << np.arange(3))) > 0).astype(int)  #[(0,0,0),(0,0,1),...,(1,1,1)]
             box_edges = box_lims[0] + (box_lims[1] - box_lims[0]) * cube_nodes
 
-        if len(extra_variables)>0:
-            return xyz, box_edges.astype(self.dtype), {k:np.concatenate(out[k]) for k in extra_variables}
+        if len(extra_variables) > 0:
+            return xyz, box_edges.astype(self.dtype), {k: np.concatenate(out[k]) for k in extra_variables}
         else:
             return xyz, box_edges.astype(self.dtype)
-        
-        
-        
-class HACCReaderLarsen(Reader):
 
-    def __init__(
-            self,
-            path,
-            run_params='run/run000/indat.params',
-            snap_sub_every_n=1,
-    ):
-        """Reader for HACC simulations
 
-        Parameters
-        ----------
-        path
-            Root folder where particle data is located
-        cosmo, optional
-            CCL cosmology object, by default None
-        read_cosmo_params, optional
-            Whether to read cosmology from HACC run files, by default False
-        nsteps, optional
-            Number of steps in simulation, by default 500
-        sim_zmin, optional
-            Minimum redshift in simulation, by default 0.
-        sim_zmax, optional
-            Maximum redshift in simulation, by default 200.
-        zmax, optional
-            Maximum redshift considered, by default None
-        aminstep, optional
-            Minimum step in scale factor to downsample snapshots, by default 0.
-        sampling_match_n, optional
-            Number of snapshots to try to keep while matching roughly optimal distribution, by default False
-        group_along_x, optional
-            Whether to group sub-boxes along x to define contiguous box volumes, by default False
-        """
-        self.path = path
-        self.variables = ['x', 'y', 'z']
-
-        print("*** HACC reader ***")
-
-        # read run parameters
-        fname = os.path.join(path, run_params)
-        print(f"  - Reading parameter file at", fname)
-        params = read_params(fname)
-
-        # create cosmo object that can be used by builder  
-        cosmo_dict = dict(
-            Omega_c=float(params['OMEGA_CDM']),
-            Omega_b=float(params['DEUT']) / float(params['HUBBLE'])**2,
-            h=float(params['HUBBLE']),
-            n_s=float(params['NS']),
-            sigma8=float(params['SS8']),
-            # Neff=float(params['N_EFF_MASSLESS']),
-            Neff=3.046,
-            w0=float(params['W_DE']),
-            wa=float(params['WA_DE']),
-            # T_CMB=float(params['T_CMB']),
-            T_CMB=2.726,
-            Omega_k=0.)
-        cosmo = pyccl.Cosmology(**cosmo_dict)
-        print(f"  - Cosmology", cosmo)
-
-        # read parameters to determine redshifts of snapshots
-        nsteps = int(params['N_STEPS'])
-        sim_zmax = float(params['Z_IN'])
-        sim_zmin = float(params['Z_FIN'])
-
-        # simulation snapshot redshifts : step are constant in scale factor, but only a fraction of steps are saved
-        snapshots = np.array(list(map(int, params['ALIVE_DUMP'].split())))
-        snapshot_dir = os.path.join(path, 'output')
-        if os.path.exists(snapshot_dir):
-            try:
-                snapshot_dirs = os.listdir(snapshot_dir)
-                snapshots_output = np.array([i for i in range(nsteps) if f'STEP{i}' in snapshot_dirs])
-                np.testing.assert_array_equal(snapshots, snapshots_output)
-            except AssertionError:
-                snapshots = snapshots_output
-                warnings.warn("We are using the snapshots found in the `output` folder, which do not match those in the parameter file.")
-        print(f"  - Found {len(snapshots)} snapshots :", snapshots)
-
-        # helper function : we only work on the list of snapshots to avoid mistakes in book-keeping
-        def get_asnapshots(idx):
-            asnapshots_all = np.linspace(1. / (1. + sim_zmax), 1. / (1. + sim_zmin), nsteps + 1)[1:]
-            return asnapshots_all[idx]
-        
-        # subsample snapshots : every n'ths snapshots
-        self.snapshots = snapshots[::-snap_sub_every_n]  # snapshots ordered by redshift
-
-        if snap_sub_every_n > 1:
-            print(f"  - Subsampling : keeping every {snap_sub_every_n} snapshots, returns {len(self.snapshots)} snapshots")
-
-        # done with subsampling !
-        zsnapshots = 1. / get_asnapshots(self.snapshots) - 1.
-
-        # simulation properties
-        if False:
-            step = self.snapshots[0]
-            name = os.path.join(self.path, 'output', f'STEP{step}/m000.full.mpicosmo.{step}')
-            self.boxsize_h = pygio.read_phys_scale(name)[0]
-            nparticles = pygio.read_num_elems(name)
-            dtype = pygio.read_variable_dtypes(name)['x']
-        else:
-            self.boxsize_h = float(params['RL'])
-            nparticles = int(params['NP'])**3
-            dtype = np.float32
-
-        # simulation box limits
-        self.lims = np.array([[[np.floor(ibox / (16)) * 0.5, np.floor(ibox / (16)) * 0.5 + 2.5], [np.floor(ibox / 4) % 4, (np.floor(ibox / 4) % 4) + 1],
-                               [ibox % 4, (ibox % 4) + 1]] for ibox in range(64)])
-
-        nsub = 8
-        super().__init__(cosmo, 'hacc', 'Mpc_over_h', nparticles, zsnapshots, None, nsub, dtype=dtype)
-        
-    def boxsize(self):
-        return self.boxsize_h / self.cosmo["h"]
-
-    def read_sub(self, isnapshot, isub):
-        
-        snapshot = self.snapshots[isnapshot]
-        
-        import re
-        # isim = re.search(r'HACC\d+_\d+', self.path).group()
-        isim = re.search(r'HACC\d+', self.path).group()
-        
-        path_subs = '/pscratch/sd/p/plarsen/LC_HOS/'+isim+'/'+str(self.nsnapshots)+'_steps/lc{lc}'
-        
-        file = path_subs.replace('{lc}',str(snapshot))+'/lc.'+str(snapshot)+'#'+str(isub)
-        
-        out = pygio.read_genericio(file, variables = ['x', 'y', 'z'])
-        
-        out = {key: value / self.cosmo["h"] for key, value in out.items()}
-        
-        return np.column_stack([out['x'],out['y'],out['z']])
-    
-    
-    
 class HACCLightconeReader(Reader):
 
-    def __init__(
-            self,
-            path,
-            run_params='run/run000/indat.params',
-            snapshots=None,
-            snap_sub_every_n=1,
-            snap_sub_zmax=None,
-            matter_power_spectrum=None,
-    ):
-        """Reader for HACC simulations
+    def __init__(self, path, run_params='run/run000/indat.params', snapshots=None, snap_sub_zmax=None, snap_sub_every_n=1, matter_power_spectrum=None, nsub=32):
+        """Reader for HACC simulations lightcones.
 
         Parameters
         ----------
@@ -598,14 +448,14 @@ class HACCLightconeReader(Reader):
         self.path = path
         self.variables = ['x', 'y', 'z']
 
-        print("*** HACC reader ***")
+        print("*** HACC lightcone reader ***")
 
         # read run parameters
         fname = os.path.join(path, run_params)
         print(f"  - Reading parameter file at", fname)
         params = read_params(fname)
 
-        # create cosmo object that can be used by builder  
+        # create cosmo object that can be used by builder
         cosmo_dict = dict(
             Omega_c=float(params['OMEGA_CDM']),
             Omega_b=float(params['DEUT']) / float(params['HUBBLE'])**2,
@@ -620,7 +470,7 @@ class HACCLightconeReader(Reader):
             T_CMB=2.726,
             Omega_k=0.)
         if matter_power_spectrum is not None:
-            cosmo_dict['matter_power_spectrum']=matter_power_spectrum
+            cosmo_dict['matter_power_spectrum'] = matter_power_spectrum
         cosmo = pyccl.Cosmology(**cosmo_dict)
         print(f"  - Cosmology", cosmo)
 
@@ -628,11 +478,11 @@ class HACCLightconeReader(Reader):
         nsteps = int(params['N_STEPS'])
         sim_zmax = float(params['Z_IN'])
         sim_zmin = float(params['Z_FIN'])
-        
+
         self.nsteps = nsteps
         self.sim_zmax = sim_zmax
         self.sim_zmin = sim_zmin
-        
+
         if snapshots is None:
             # simulation snapshot redshifts : step are constant in scale factor, but only a fraction of steps are saved
             snapshots = np.array(list(map(int, params['ALIVE_DUMP'].split())))
@@ -646,33 +496,23 @@ class HACCLightconeReader(Reader):
                     snapshots = snapshots_output
                     warnings.warn("We are using the snapshots found in the `output` folder, which do not match those in the parameter file.")
             print(f"  - Found {len(snapshots)} snapshots :", snapshots)
-            
+
+        # helper function : we only work on the list of snapshots to avoid mistakes in book-keeping
+        def get_asnapshots(idx):
+            asnapshots_all = np.linspace(1. / (1. + sim_zmax), 1. / (1. + sim_zmin), nsteps + 1)[1:]
+            return asnapshots_all[idx]
+
+        # save full list of snapshots for HACC lightcone files
         self.snapshots_fulllist = np.copy(snapshots[::-1])
+        self.zsnapshots_fulllist = 1. / get_asnapshots(self.snapshots_fulllist) - 1.
 
-        # # helper function : we only work on the list of snapshots to avoid mistakes in book-keeping
-        # def get_asnapshots(idx):
-        #     asnapshots_all = np.linspace(1. / (1. + sim_zmax), 1. / (1. + sim_zmin), nsteps + 1)[1:]
-        #     return asnapshots_all[idx]
-        
-        # subsample snapshots : maximum redshift
-        if snap_sub_zmax is not None:
-            w = np.argwhere(self.get_asnapshots(snapshots) > 1. / (1. + snap_sub_zmax))
-            if len(w) > 0:
-                snapshots = snapshots[w[0, 0]:]
-                print(f"  - Subsampling : max redshift {snap_sub_zmax}, returns {len(snapshots)} snapshots")
-
-        if snap_sub_every_n is None:
-            self.snapshots = snapshots[::-1]
-        else:
-            # subsample snapshots : every n'ths snapshots
-            self.snapshots = snapshots[::-snap_sub_every_n]  # snapshots ordered by redshift
-
-            if snap_sub_every_n > 1:
-                print(f"  - Subsampling : keeping every {snap_sub_every_n} snapshots, returns {len(self.snapshots)} snapshots")
+        # subsample snapshots : every n'ths snapshots
+        self.snapshots = snapshots[::-snap_sub_every_n]  # snapshots ordered by redshift
+        if snap_sub_every_n > 1:
+            print(f"  - Subsampling : keeping every {snap_sub_every_n} snapshots, returns {len(self.snapshots)} snapshots")
 
         # done with subsampling !
         zsnapshots = 1. / self.get_asnapshots(self.snapshots) - 1.
-        
 
         # simulation properties
         if False:
@@ -690,44 +530,24 @@ class HACCLightconeReader(Reader):
         self.lims = np.array([[[np.floor(ibox / (16)) * 0.5, np.floor(ibox / (16)) * 0.5 + 2.5], [np.floor(ibox / 4) % 4, (np.floor(ibox / 4) % 4) + 1],
                                [ibox % 4, (ibox % 4) + 1]] for ibox in range(64)])
 
-        nsub = 8
         super().__init__(cosmo, 'hacc', 'Mpc_over_h', nparticles, zsnapshots, snap_sub_zmax, nsub, dtype=dtype)
-        
-        self.snap_sub_every_n = snap_sub_every_n
-        self.cosmo = cosmo
-        
+
     def boxsize(self):
         return self.boxsize_h / self.cosmo["h"]
 
+    def _get_name(self, step, isub):
+        return os.path.join(self.path, 'Lightcones', f'STEP{step}', f'm000.lc.mpicosmo.{step}#{isub}')
+
     def read_sub(self, isnapshot, isub):
-        
-        # snapshot = self.snapshots[isnapshot]
         snapshot = self.snapshots_fulllist[isnapshot]
-        
-        import re
-        isim = re.search(r'HACC\d+_\d+', self.path).group()
-        # isim = re.search(r'HACC\d+', self.path).group()
-        
-        path_subs = '/pscratch/sd/h/heitmann/'+isim+'/Lightcones'
-        
-        file = os.path.join(path_subs, 'm000.lc.mpicosmo.'+str(snapshot)+'#'+str(isub))
-        
-        out = pygio.read_genericio(file, variables = ['x', 'y', 'z'], print_stats=False)
-        
-        out = {key: value / self.cosmo["h"] for key, value in out.items()}
-        
-        return np.column_stack([out['x'],out['y'],out['z']])
 
-    # def get_r2snapshots(self, idx):
-    #     r2snapshots_all = self.cosmo.comoving_radial_distance(np.linspace(1. / (1. + self.sim_zmax), 1. / (1. + self.sim_zmin), self.nsteps + 1)[1:])**2
-    #     return r2snapshots_all[idx]
-    
-    def get_asnapshots(self, idx):
-        asnapshots_all = np.linspace(1. / (1. + self.sim_zmax), 1. / (1. + self.sim_zmin), self.nsteps + 1)[1:]
-        return asnapshots_all[idx]
+        file = self._get_name(snapshot, isub)
 
+        out = pygio.read_genericio(file, variables=['x', 'y', 'z'], print_stats=False)
 
+        xyz = {k: data / self.cosmo["h"] for k, data in out.items()}
 
+        return np.column_stack([xyz['x'], xyz['y'], xyz['z']])
 
 
 class HACCHaloReader(HACCReader):
@@ -738,19 +558,13 @@ class HACCHaloReader(HACCReader):
         self.halo_path = halo_path
         assert not self.group_along_x
 
-    def _get_name(self, step, ifile):
-        return os.path.join(self.path, self.halo_path, f'STEP{step}/m000-{step}.haloproperties#{ifile}')
+    def _get_name(self, step, isub):
+        return os.path.join(self.path, self.halo_path, f'STEP{step}/m000-{step}.haloproperties#{isub}')
 
-    def read_props(self, isub, props_variables, ihaloes=slice(-1), verbose=False):
+    def read_props(self, isnapshot, isub, props_variables, ihaloes=slice(-1), verbose=False):
+        snapshot = self.snapshots[isnapshot]
 
-        istep, ibox = self._sub_args[isub]
-        step = self.snapshots[istep]
-
-        # nx = 4 if self.group_along_x else 1
-        # for ix in range(nx):
-        ix = 0
-        ifile = ix * 16 + ibox
-        name = self._get_name(step, ifile)
+        name = self._get_name(snapshot, isub)
         if verbose:
             print("Reading", name)
         data = pygio.read_genericio(name, variables=props_variables)
@@ -760,7 +574,16 @@ class HACCHaloReader(HACCReader):
 
 class SkySimReader(HACCReader):
 
-    def __init__(self, path, cosmo, nsteps=500, sim_zmin=0., sim_zmax=200., aminstep=0., zmax=None,):
+    def __init__(
+        self,
+        path,
+        cosmo,
+        nsteps=500,
+        sim_zmin=0.,
+        sim_zmax=200.,
+        aminstep=0.,
+        zmax=None,
+    ):
         self.path = path
         self.aminstep = aminstep
 
@@ -811,7 +634,7 @@ class MockReader(Reader):
         return self.boxsize
 
     def read_sub(self, isub, verbose=False, assert_xyz_in_box=False, read_box_edges_only=False):
-        cube_nodes = ((np.arange(8)[:, None] & (1 << np.arange(3))) > 0).astype(int) #[(0,0,0),(0,0,1),...,(1,1,1)]
+        cube_nodes = ((np.arange(8)[:, None] & (1 << np.arange(3))) > 0).astype(int)  #[(0,0,0),(0,0,1),...,(1,1,1)]
         box_edges = cube_nodes * self.boxsize
         xyz = self.xyzs[isub]
         return xyz, box_edges
@@ -823,5 +646,4 @@ class MockReader(Reader):
 class DummyReader(Reader):
 
     def __init__(self, cosmo, kind, unit, nsnapshots):
-        super().__init__(
-            cosmo, kind, unit, nparticles=0., zsnapshots=np.zeros(nsnapshots), zmax=None, nsubs=0, dtype=np.float64)
+        super().__init__(cosmo, kind, unit, nparticles=0., zsnapshots=np.zeros(nsnapshots), zmax=None, nsubs=0, dtype=np.float64)

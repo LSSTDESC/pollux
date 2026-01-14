@@ -72,7 +72,7 @@ class LensingBuilder(MapBuilder):
         super().__init__(
             nside=shell_builder.nside, dtype=dtype, save_dir=save_dir, base_fname=base_fname, nmaps=self.nkappas, sacc_type="galaxy_convergence_cl", **kwargs)
 
-    def _create_tracers(self, Nz=1000):
+    def _create_tracers_ccl(self, Nz=1000):
         z_shell_bins = self.shell_builder.shell_edges_redshift()
 
         tracers = []
@@ -198,8 +198,8 @@ class BornLensingBuilder(LensingBuilder):
             self.mpart_over_area = mpart / area
 
             zmax = self.shell_builder.shell_edges_redshift()[-1]
-            self.dndz_norm = [quad(lambda z: t.get_dndz(z), 0., zmax) if isinstance(t, pyccl.tracers.NzTracer) else np.nan for t in self.get_tracers()]
-            self.zlens = [self.shell_builder.get_mean_z(ishell) for ishell in range(self.nshells)]
+            self.dndz_norm = [quad(lambda z: t.get_dndz(z), 0., zmax) if isinstance(t, pyccl.tracers.NzTracer) else np.nan for t in self.get_tracers_ccl()]
+            self.zlens = [self.shell_builder.mean_z(ishell) for ishell in range(self.nshells)]
 
     def compute_weight(self, ishell, ikappa):
         """Compute lensing weights to form convergence maps from particle shells
@@ -211,14 +211,14 @@ class BornLensingBuilder(LensingBuilder):
         ikappa
             Convergence map index
         """
-        tracer = self.get_tracers()[ikappa]
+        tracer = self.get_tracers_ccl()[ikappa]
 
         if self.multiple_planes:
             zmax = self.shell_builder.shell_edges_redshift()[-1]
             zlens = self.zlens[ishell]
 
             if zlens is None:
-                zlens = self.shell_builder.get_mean_z(ishell)
+                zlens = self.shell_builder.mean_z(ishell)
 
             d_A_lens = pyccl.angular_diameter_distance(self.cosmo, 1. / (1. + zlens))  # needed to obtain surface mass density in 1/Mpc^2
 
@@ -273,7 +273,7 @@ class BornLensingBuilder(LensingBuilder):
                     s = shell[:]
                     nbar = np.mean(s[s > 0.])
                 else:
-                    nbar = self.shell_builder.get_pixel_density(ishell)
+                    nbar = self.shell_builder.pixel_density(ishell)
                 nbar = self.dtype(nbar)
                 if self.multiple_planes:
                      density = shell - nbar 

@@ -195,7 +195,7 @@ class CatalogSourceUniform(CatalogSourceGenerator):
         rng = np.random.default_rng(self.lensing.shell_builder.seed + ikappa * self.nshells)
 
         # Generate redshifts according to lensing object redshift distributions (using cdf sampling)
-        t = self.lensing.get_tracers()[ikappa]
+        t = self.lensing.get_tracers_ccl()[ikappa]
         zz = np.linspace(0, z_bins_edges[-1], 1000)
         nz = t.get_dndz(zz)
 
@@ -278,7 +278,7 @@ class CatalogSourceClusteredPoisson(CatalogSourceGenerator):
 
         # First, we compute the mean density per shell for each tracer's n(z)
         nbar_per_pix_per_bin = []
-        for ikappa, t in enumerate(self.lensing.get_tracers()):
+        for ikappa, t in enumerate(self.lensing.get_tracers_ccl()):
             nz_int = np.array([quad(lambda z: t.get_dndz(z), z_bins_edges[ishell], z_bins_edges[ishell + 1]) for ishell in range(self.snap_lensing.nmaps)])
             nbar_per_pix_per_bin.append(nz_int / np.sum(nz_int) * self.nbar_per_pix[ikappa])
             catalog[ikappa]['ra'] = []
@@ -329,7 +329,7 @@ class CatalogSourceClusteredPoisson(CatalogSourceGenerator):
         builder = self.lensing.shell_builder
         z_bins_edges = builder.shell_edges_redshift()
 
-        t = self.lensing.get_tracers()[ikappa]
+        t = self.lensing.get_tracers_ccl()[ikappa]
         for ishell in self.lensing.shell_builder.tqdm(None, disable=True):
             rng = np.random.default_rng(self.lensing.shell_builder.seed + ishell + ikappa * self.nshells)
 

@@ -8,25 +8,30 @@ from astropy.io import fits
 
 
 class PolluxIO:
+    """Convenience loader for Pollux simulation data products.
+
+    This class provides lightweight accessors to load shells, lensing maps,
+    shear maps, intrinsic-alignment products, and mock catalogs from a Pollux
+    output directory.
+
+    Parameters
+    ----------
+    sim_path : str
+        Path to the simulation output directory containing ``sim_info.yaml``.
+    seed : int
+        Seed identifier used in filenames.
+    tomo : str or None, optional
+        Tomography directory name (e.g. 'SRDv1_nz'). If None, tomography-related
+        products are not loaded.
+    catalog : {'poisson', 'uniform', 'multinomial'}, optional
+        Catalog sampling method used in filenames.
+    interp_pixels : bool, optional
+        Whether catalog creation used pixel interpolation (affects filenames).
+    bias : float, optional
+        Galaxy bias used for the Poisson catalogs (affects filenames).
+    """
 
     def __init__(self, sim_path, seed, tomo="SRDv1_nz", catalog="poisson", interp_pixels=True, bias=1):
-        """`PolluxIO` creates an interface to Pollux/HACC simulations data products.
-
-        Parameters
-        ----------
-        sim_path
-            Path to simulation files.
-        seed
-            Seed used for pseudo-independent realizations.
-        tomo, optional
-            Name of the tomographic redshift distributions used for lensing products, by default "SRDv1_nz" (the other option is "kappa_zsnapshots" for individual shells).
-        catalog, optional
-            Source catalog sampling method, by default "poisson" (other options are "uniform" and "multinomial").
-        interp_pixels, optional
-            Whether to interpolate between adjacent pixels when creating the mock catalogs, by default True.
-        bias, optional
-            Value for the galaxy bias used for the Poisson mock catalogs.
-        """
         self.sim_path = sim_path
         self.seed = seed
         if tomo is not None:
@@ -56,6 +61,21 @@ class PolluxIO:
             self.nzs = np.load(os.path.join(self.sim_path, tomo, f"nzs.npy"))
 
     def load_shell(self, i, density=False):
+        """Load a shell map.
+
+        Parameters
+        ----------
+        i : int
+            Shell index.
+        density : bool, optional
+            If True, return density contrast delta = shell/pixel_density - 1.
+
+        Returns
+        -------
+        healsparse.HealSparseMap or ndarray
+            Shell count map (HealSparse) or density contrast (dense array-like
+            expression, depending on implementation).
+        """
         fname = os.path.join(
             self.sim_path,
             f"shell_{self.kind}_seed{self.seed}_nside{self.nside}_imap{i}.fits",
@@ -68,6 +88,7 @@ class PolluxIO:
             return shell
 
     def load_haloes(self, i):
+        """Load the halo catalog FITS file for one shell."""
         fname = os.path.join(
             self.sim_path,
             f"shell_{self.kind}_seed{self.seed}_nside{self.nside}_haloes_props_imap{i}.fits",
@@ -75,6 +96,7 @@ class PolluxIO:
         return fits.open(fname)
 
     def load_IA(self, i):
+        """Load intrinsic-alignment tidal tensor components (t11, t12, t22)."""
         fname = os.path.join(
             self.sim_path,
             f"shell_{self.kind}_seed{self.seed}_nside{self.nside}_t11_imap{i}.fits",
@@ -96,6 +118,7 @@ class PolluxIO:
         return t11, t12, t22
 
     def load_kappa(self, i):
+        """Load convergence map for one tomographic bin."""
         fname = os.path.join(
             self.sim_path,
             self.tomo,
@@ -104,6 +127,7 @@ class PolluxIO:
         return healsparse.HealSparseMap.read(fname)
 
     def load_shear(self, i):
+        """Load shear maps (gamma1, gamma2) for one tomographic bin."""
         fname = os.path.join(
             self.sim_path,
             self.tomo,
@@ -121,6 +145,7 @@ class PolluxIO:
         return g1, g2
 
     def load_catalog(self, i):
+        """Load a source catalog FITS file for one tomographic bin."""
         interp_pixels_dict = {True: 'interppixels', False: 'nointerppixels'}
         if self.catalog == 'poisson':
             fname = os.path.join(

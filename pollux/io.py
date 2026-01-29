@@ -28,7 +28,7 @@ class PolluxIO:
     interp_pixels : bool, optional
         Whether catalog creation used pixel interpolation (affects filenames).
     bias : float, optional
-        Galaxy bias used for the Poisson catalogs (affects filenames).
+        Galaxy bias used for the Poisson catalogs (affects filenames). Default is 1.
     """
 
     def __init__(self, sim_path, seed, tomo="SRDv1_nz", catalog="poisson", interp_pixels=True, bias=1):

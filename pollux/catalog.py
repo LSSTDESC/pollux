@@ -48,7 +48,7 @@ class CatalogSourceGenerator(object):
 
     def __init__(self, lensing, name, nbar=None, interp_list=['kappa', 'gamma1', 'gamma2'], interp_pixels=True):
         self.lensing = lensing
-        self.snap_lensing = self.lensing.shell_builder.get_snapshot_lensing_builder()
+        self.snap_lensing = self.lensing.shell_builder.snapshot_lensing_builder()
         self.nside = self.lensing.nside
         self.ncats = self.lensing.nmaps
         self.nshells = self.lensing.shell_builder.nshells
@@ -296,10 +296,10 @@ class CatalogSourceUniform(CatalogSourceGenerator):
         # Generate random positions with a uniform distribution over the footprint
         if self.lensing.octant_only:
             ra = rng.uniform(0., 90., self.Ngal[ikappa])
-            dec = np.rad2deg(np.arcsin(np.random.uniform(0., 1., self.Ngal[ikappa])))
+            dec = np.rad2deg(np.arcsin(rng.uniform(0., 1., self.Ngal[ikappa])))
         else:
             ra = rng.uniform(0., 360., self.Ngal[ikappa])
-            dec = np.rad2deg(np.arcsin(np.random.uniform(-1., 1., self.Ngal[ikappa])))
+            dec = np.rad2deg(np.arcsin(rng.uniform(-1., 1., self.Ngal[ikappa])))
 
         catalog[ikappa]['ra'] = ra
         catalog[ikappa]['dec'] = dec
@@ -346,18 +346,27 @@ class CatalogSourceClusteredMultinomial(CatalogSourceUniform):
 
     Parameters
     ----------
-    biases : array_like
-        Linear galaxy bias per tomographic bin (length ``lensing.nmaps``).
+    bias : float or array_like
+        Linear galaxy bias per tomographic bin. If a float, the same bias is used
+        for all tomographic bins; if an array_like, it must have length
+        ``lensing.nmaps`` and provide a per-bin value.
     """
 
-    def __init__(self, lensing, name='catmultinom', nbar=None, *, biases, interp_list=['kappa', 'gamma1', 'gamma2'], interp_pixels=True):
+    def __init__(self, lensing, name='catmultinom', nbar=None, *, bias, interp_list=['kappa', 'gamma1', 'gamma2'], interp_pixels=True):
         super().__init__(lensing, name, nbar, interp_list=interp_list, interp_pixels=interp_pixels)
 
-        if biases is None:
-            raise ValueError('biases must be provided for CatalogSourceClusteredMultinomial')
-        assert len(biases) == self.lensing.nmaps
-        self.biases = biases
-        for i, b in enumerate(self.biases):
+        if bias is None:
+            raise ValueError('bias must be provided for CatalogSourceClusteredMultinomial')
+        
+        # Normalize bias: accept scalar or per-bin array
+        bias_arr = np.atleast_1d(bias).astype(float)
+        if bias_arr.size == 1:
+            bias_arr = np.full(self.lensing.nmaps, float(bias_arr[0]))
+        elif bias_arr.size != self.lensing.nmaps:
+            raise ValueError(f"bias must be a scalar or array of length {self.lensing.nmaps}, got {bias_arr.size}")
+        self.bias = bias_arr
+        
+        for i, b in enumerate(self.bias):
             self.header_dict[f'BIAS_{i}'] = b
 
     def _generate_galaxies(self, catalog, ikappas=None):
@@ -397,19 +406,21 @@ class CatalogSourceClusteredMultinomial(CatalogSourceUniform):
 
         # Loop over tomographic bins
         for ikappa in self.lensing.tqdm(ikappas, leave=False):
+            rng = np.random.default_rng(self.lensing.shell_builder.seed + ishell + ikappa * self.nshells)
+            
             # select galaxies in current shell
             w = (catalog[ikappa]['idx_shell'] == ishell)
 
             if np.any(w):
                 # Multinomial sampling of number of galaxies per pixels
                 n = np.sum(w)
-                p = np.clip(1. + self.biases[ikappa] * density_masked, 0., None)
+                p = np.clip(1. + self.bias[ikappa] * density_masked, 0., None)
                 p /= np.sum(p)
 
-                ipix = np.random.choice(ipix_mask, size=n, replace=True, p=p)
+                ipix = rng.choice(ipix_mask, size=n, replace=True, p=p)
 
                 # Sampling ra, dec within pixel
-                ra, dec = generate_radec_in_pix(self.nside, ipix)
+                ra, dec = generate_radec_in_pix(self.nside, ipix, rng)
                 catalog[ikappa]['ra'][w] = ra
                 catalog[ikappa]['dec'][w] = dec
 
@@ -424,18 +435,27 @@ class CatalogSourceClusteredPoisson(CatalogSourceGenerator):
 
     Parameters
     ----------
-    biases : array_like
-        Linear galaxy bias per tomographic bin (length ``lensing.nmaps``).
+    bias : float or array_like
+        Linear galaxy bias per tomographic bin. If a float, the same bias is used
+        for all tomographic bins; if an array_like, it must have length
+        ``lensing.nmaps`` and provide a per-bin value.
     """
 
-    def __init__(self, lensing, name='catpoisson', nbar=None, *, biases, interp_list=['kappa', 'gamma1', 'gamma2'], interp_pixels=True):
+    def __init__(self, lensing, name='catpoisson', nbar=None, *, bias, interp_list=['kappa', 'gamma1', 'gamma2'], interp_pixels=True):
         super().__init__(lensing, name, nbar, interp_list=interp_list, interp_pixels=interp_pixels)
 
-        if biases is None:
-            raise ValueError('biases must be provided for CatalogSourceClusteredPoisson')
-        assert len(biases) == self.lensing.nmaps
-        self.biases = biases
-        for i, b in enumerate(self.biases):
+        if bias is None:
+            raise ValueError('bias must be provided for CatalogSourceClusteredPoisson')
+        
+        # Normalize bias: accept scalar or per-bin array
+        bias_arr = np.atleast_1d(bias).astype(float)
+        if bias_arr.size == 1:
+            bias_arr = np.full(self.lensing.nmaps, float(bias_arr[0]))
+        elif bias_arr.size != self.lensing.nmaps:
+            raise ValueError(f"bias must be a scalar or array of length {self.lensing.nmaps}, got {bias_arr.size}")
+        self.bias = bias_arr
+        
+        for i, b in enumerate(self.bias):
             self.header_dict[f'BIAS_{i}'] = b
 
     def _generate_galaxies(self, catalog, ikappas=None):
@@ -507,7 +527,7 @@ class CatalogSourceClusteredPoisson(CatalogSourceGenerator):
             rng = np.random.default_rng(self.lensing.shell_builder.seed + ishell + ikappa * self.nshells)
 
             # Poisson sampling
-            p = np.clip(1. + self.biases[ikappa] * density_masked, 0., None)
+            p = np.clip(1. + self.bias[ikappa] * density_masked, 0., None)
             lam = p * self.nbar_per_pix_per_bin[ikappa][ishell]
             n_per_pix = rng.poisson(lam=lam)
             ipix = np.repeat(ipix_mask, n_per_pix)

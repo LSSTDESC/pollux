@@ -300,8 +300,10 @@ class MapBuilder:
 
         Returns
         -------
-        list
-            List of :class:`healsparse.HealSparseMap`.
+        healsparse.HealSparseMap or dict
+            - If ``imaps`` is a single int: returns a single ``HealSparseMap``.
+            - If ``imaps`` is ``None`` or an iterable: returns a dict keyed by
+              map index with ``HealSparseMap`` values.
 
         Raises
         ------
@@ -318,21 +320,34 @@ class MapBuilder:
         imaps : int or array_like of int or None, optional
             Map indices to check (ignored if ``fname`` is provided).
         read : bool, optional
-            If True, also try reading the file with HealSparse.
+            If True, attempt to read the file(s) with HealSparse. When
+            ``read=True`` the function returns loaded maps (or ``None`` for
+            missing/unreadable files) rather than boolean existence flags.
         fname : str or None, optional
             If provided, check this single filename instead of using indices.
         check_finite : bool, optional
             If True, validates that values on valid pixels are finite and not
-            identically zero.
+            identically zero (only used when ``read=True``).
 
         Returns
         -------
-        bool or list of bool
-            Check result(s). If a single map is checked, returns a single bool.
+        dict or bool or healsparse.HealSparseMap or None
+            - If ``fname`` is provided: returns a single value:
+                - when ``read=False``: ``True`` if file exists else ``False``;
+                - when ``read=True``: loaded ``HealSparseMap`` on success or
+                  ``None`` on failure.
+            - If ``imaps`` is a single integer: same single-value behavior as
+              above (based on ``read``).
+            - If ``imaps`` is ``None`` or an iterable: returns a **dict**
+              keyed by map index. Values are either booleans (when
+              ``read=False``) or loaded ``HealSparseMap`` objects / ``None``
+              (when ``read=True``).
 
         Notes
         -----
-        If ``read=False`` this only checks file existence.
+        Use the dict-returning form to obtain loaded maps for further
+        processing; this makes it straightforward to build a unified mapping
+        of loaded/computed maps keyed by index.
         """
         assert (imaps is None) or (fname is None)
 
@@ -343,30 +358,28 @@ class MapBuilder:
                         m = healsparse.HealSparseMap.read(filename, nside_coverage=self.nside_c)
                         if check_finite:
                             a = m[m.valid_pixels]
-                            return np.all(np.isfinite(a)) and np.any(a)
-                        else:
-                            return True
-                    except:
-                        print(f"Cannot read map at {fname}.")
-                        return False
+                            if not (np.all(np.isfinite(a)) and np.any(a)):
+                                return None
+                        return m
+                    except Exception as e:
+                        print(f"Cannot read map at {filename}: {e}")
+                        return None
                 else:
                     return True
             else:
-                print(f"Cannot find map at {fname}.")
-                return False
+                if not read:
+                    print(f"Cannot find map at {filename}.")
+                return None if read else False
 
         if fname is not None:
             return check_one(fname)
-        else:
-            out = []
-            for imap in self.tqdm(imaps, desc="[check_maps]"):
-                fname = self.get_fname(imap)
-                out.append(check_one(fname))
 
-        if len(out) == 1:
-            return out[0]
-        else:
-            return out
+        out = {}
+        for imap in self.tqdm(imaps, desc="[check_maps]"):
+            fname = self.get_fname(imap)
+            out[imap] = check_one(fname)
+            
+        return out[imaps] if type(imaps) is int else out
 
     def load_maps(self, imaps=None, **fname_kwargs):
         """Load one or multiple HealSparse maps from disk.
@@ -374,25 +387,23 @@ class MapBuilder:
         Parameters
         ----------
         imaps : int or array_like of int or None, optional
-            Map indices to load. If an int (or a single-element iterable), a
-            single map is returned.
+            Map indices to load. If None, loads all maps.
         **fname_kwargs
             Extra keywords forwarded to :meth:`get_fname` (e.g. ``what='kappa'``).
 
         Returns
         -------
-        healsparse.HealSparseMap or list of healsparse.HealSparseMap
-            Loaded map(s).
+        healsparse.HealSparseMap or dict
+            - If ``imaps`` is a single int: returns a single ``HealSparseMap``.
+            - If ``imaps`` is ``None`` or an iterable: returns a dict keyed by
+              map index with ``HealSparseMap`` values.
         """
-        maps = []
+        maps = {}
         for imap in self.tqdm(imaps, desc="[load_maps]"):
             fname = self.get_fname(imap, **fname_kwargs)
-            maps.append(healsparse.HealSparseMap.read(fname, nside_coverage=self.nside_c))
+            maps[imap] = healsparse.HealSparseMap.read(fname, nside_coverage=self.nside_c)
 
-        if len(maps) == 1:
-            return maps[0]
-        else:
-            return maps
+        return maps[imaps] if type(imaps) is int else maps
 
     def plot_maps(self, maps_or_imaps=None, nx=None, log=False, title_prefix=None, cbar=True, save=True, **hpview_kwargs):
         """Plot one or multiple maps.
@@ -711,9 +722,9 @@ class MapBuilder:
                 if os.path.exists(fname):
                     try:
                         alms[imap] = hp.read_alm(fname)
-                        print('They already exist!')
                         continue
-                    except:
+                    except Exception as e:
+                        print(f"Cannot read alm at {fname}: {e}")
                         pass
 
             mask = self.get_mask(nest=False)
@@ -724,7 +735,7 @@ class MapBuilder:
             if save:
                 hp.write_alm(fname, alms[imap], overwrite=True)
 
-        return alms
+        return alms[imaps] if type(imaps) is int else alms
 
     def compute_maps_from_alms(self, imaps=None, save=True):
         """Reconstruct HealSparse maps from saved a_lm coefficients.
@@ -748,7 +759,7 @@ class MapBuilder:
         """
         _, ipix = self.get_mask(nest=False, return_ipix=True)
 
-        maps = []
+        maps = {}
         for imap in self.tqdm(imaps, desc="[compute_maps_from_alms]"):
             alm = hp.read_alm(self.get_fname(imap, what='alms', format='fits'))
             values = hp.alm2map(alm, nside=self.nside, pol=False)
@@ -757,9 +768,9 @@ class MapBuilder:
             if save:
                 fname = self.get_fname(imap)
                 tmp.write(fname, clobber=True)
-            maps.append(tmp)
+            maps[imap] = tmp
 
-        return maps
+        return maps[imaps] if type(imaps) is int else maps
 
     def _save_cls(self, ell, cl):
         """Save angular power spectra to a SACC FITS file.
@@ -845,7 +856,7 @@ class MapBuilder:
         else:
             mask = self.get_mask(nest=False)
             fields = {i: None for i in imaps}
-            for i, j in tqdm(pairs, desc="[compute_cls]"):
+            for i, j in self.tqdm(pairs, desc="[compute_cls]"):
                 if fields[i] is None:
                     fields[i] = nmt.NmtField(mask, [self.get_field_map(i, nest=False)])
                 if fields[j] is None:
@@ -1009,7 +1020,7 @@ class MapBuilder:
         self.cosmo.compute_growth()
 
         cl = {}
-        for i, j in tqdm(pairs, desc="[predict_cls]"):
+        for i, j in self.tqdm(pairs, desc="[predict_cls]"):
             if approximate:
                 cl[i, j] = angular_cl(self.cosmo, tracers_[i], tracers_[j], ell)
                 if add_noise and i == j:

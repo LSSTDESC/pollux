@@ -91,6 +91,7 @@ class ShellBuilder(MapBuilder):
       only one should be used at a time.
     - For octant-only footprints, particles outside x>0, y>0, z>0 are discarded.
     """
+    
     def __init__(
             self,
             nshells,
@@ -717,18 +718,24 @@ class ShellBuilder(MapBuilder):
 
         Returns
         -------
-        list of healsparse.HealSparseMap
-            Combined shell maps (one per requested shell index).
+        healsparse.HealSparseMap or dict
+            - If ``ishells`` is a single int: returns a single combined
+              ``HealSparseMap``.
+            - If ``ishells`` is ``None`` or an iterable: returns a dict keyed
+              by shell index with combined ``HealSparseMap`` values.
         """
-        shells = []
+        shells = {}
 
         _, ipix = self.get_mask(nest=True, return_ipix=True)
         for ishell in self.tqdm(ishells, desc="[combine_maps_subs]"):
             fname = self.get_fname(ishell)
-            if self.check_maps(read=True, fname=fname):
+            shell = self.check_maps(read=True, fname=fname)
+            if shell is not None:
+                shells[ishell] = shell
                 continue
+
             shell = healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
-            shell.update_values_pix(ipix, self.dtype(0), nest=True)
+            shell.update_values_pix(ipix, self.dtype(0), nest=True)  # initialize to zero on valid pixels
             isubs = self.reader.get_isubs_for_snapshot(ishell)
             for isub in tqdm(isubs, desc=f"[combine_maps_subs: shell {ishell}]", leave=False):
                 tmp_shell = self.load_maps(ishell, sub=isub)
@@ -741,9 +748,9 @@ class ShellBuilder(MapBuilder):
 
             shell.write(fname, clobber=True, format=self.save_format, nocompress=self.nocompress)
 
-            shells.append(shell)
+            shells[ishell] = shell
 
-        return shells
+        return shells[ishells] if type(ishells) is int else shells
 
     def construct_maps(self, imaps=None, **kwargs):
         """Construct all requested shell maps.
@@ -760,8 +767,11 @@ class ShellBuilder(MapBuilder):
 
         Returns
         -------
-        list of healsparse.HealSparseMap
-            Final, combined shell maps.
+        healsparse.HealSparseMap or dict
+            - If ``imaps`` is a single int: returns a single combined
+              ``HealSparseMap``.
+            - If ``imaps`` is ``None`` or an iterable: returns a dict keyed
+              by shell index with combined ``HealSparseMap`` values.
         """
         # first construct shells on simulation subs
         for ishell in self.tqdm(imaps, desc="[construct_maps]"):
@@ -849,32 +859,35 @@ class ShellBuilder(MapBuilder):
 
         Returns
         -------
-        None
-            Writes HealSparse maps to disk as ``what='t11'/'t22'/'t12'`` or with
-            a ``_{smooth_Mpc}Mpc`` suffix.
+        list or dict
+            - If ``ishells`` is a single int: returns a list ``[t11, t22, t12]`` as HealSparse maps.
+            - If ``ishells`` is ``None`` or an iterable: returns a dict keyed by shell index
+              with list values ``[t11, t22, t12]``. Also writes maps to disk as
+              ``what='t11'/'t22'/'t12'`` or with ``_{smooth_Mpc}Mpc`` suffix if smoothing is applied.
         """
         if lmax is None:
             lmax = 3 * self.nside - 1
 
         _, ipix = self.get_mask(nest=False, return_ipix=True)
 
+        if smooth_Mpc is not None:
+            assert smooth_Mpc > 0.
+            whats = [f't11_{smooth_Mpc}Mpc', f't22_{smooth_Mpc}Mpc', f't12_{smooth_Mpc}Mpc']
+        else:
+            whats = ['t11', 't22', 't12']
+
+        ts = {}
         for ishell in self.tqdm(ishells, desc="[compute_tidal_tensor]"):
-            alm_E = self.compute_alms(ishell, save=not (replicate_octant), replicate_octant=replicate_octant, pol=False, lmax=lmax)[ishell]
+            alm_E = self.compute_alms(ishell, save=not (replicate_octant), replicate_octant=replicate_octant, pol=False, lmax=lmax)
 
             if smooth_Mpc is not None:
-                assert smooth_Mpc > 0.
                 sigma = smooth_Mpc / self.shell_edges_comoving_distance()[ishell]
-
                 hp.sphtfunc.smoothalm(
                     alm_E,
                     sigma=sigma,
                     pol=False,
                     inplace=True,
                 )
-
-                var = [f't11_{smooth_Mpc}Mpc', f't22_{smooth_Mpc}Mpc', f't12_{smooth_Mpc}Mpc']
-            else:
-                var = ['t11', 't22', 't12']
 
             Q, U = hp.alm2map_spin((alm_E, np.zeros_like(alm_E)), self.nside, spin=2, lmax=lmax)
 
@@ -894,11 +907,16 @@ class ShellBuilder(MapBuilder):
             # t11 = (delta+Q)/2 - density/3
             # t22 = (delta-Q)/2 - density/3
             # t12 = U
-
-            for what, val in zip(var, [density / 6. + Q / 2., density / 6. - Q / 2., U]):
+            vals = [density / 6. + Q / 2., density / 6. - Q / 2., U] # t11, t22, t12
+            
+            ts[ishell] = []
+            for what, val in zip(whats, vals):
                 hsp = healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
                 hsp.update_values_pix(ipix, val.astype(self.dtype), nest=False)
                 hsp.write(self.get_fname(ishell, what=what), clobber=True, format=self.save_format)
+                ts[ishell].append(hsp)
+
+        return ts[ishells] if type(ishells) is int else ts
 
 
 class SnapshotShellBuilder(ShellBuilder):
@@ -969,10 +987,11 @@ class SnapshotShellBuilder(ShellBuilder):
         fname = self.get_fname(ishell, sub=isub)
 
         # check if shell has already been created
-        if self.check_maps(read=True, fname=fname):
+        shell = self.check_maps(read=True, fname=fname)
+        if shell is not None:
             if verbose:
-                print(f"Found and checked map at {fname}.")
-            return
+                print(f"Found and loaded map at {fname}.")
+            return shell
 
         # get shell radii
         boxsize = self.dtype(self.reader.boxsize())
@@ -1221,10 +1240,11 @@ class LightconeSlicingBuilder(ShellBuilder):
         fname = self.get_fname(ishell, sub=isub)
 
         # check if shell has already been created
-        if self.check_maps(read=True, fname=fname):
+        shell = self.check_maps(read=True, fname=fname)
+        if shell is not None:
             if verbose:
-                print(f"Found and checked map at {fname}.")
-            return
+                print(f"Found and loaded map at {fname}.")
+            return shell
 
         # get shell radii and redshifts
         boxsize = self.dtype(self.reader.boxsize())
@@ -1295,22 +1315,28 @@ class LightconeSlicingBuilder(ShellBuilder):
         Parameters
         ----------
         ishells : int or array_like of int or None, optional
-            Shell indices to combine. If None, combines all.
+            Shell indices to combine. If None, combines all shells.
 
         Returns
         -------
-        list of healsparse.HealSparseMap
-            Final combined shell maps.
+        healsparse.HealSparseMap or dict
+            - If ``ishells`` is a single int: returns a single combined
+              ``HealSparseMap``.
+            - If ``ishells`` is ``None`` or an iterable: returns a dict keyed
+              by shell index with combined ``HealSparseMap`` values.
         """
-        shells = []
+        shells = {}
 
         _, ipix = self.get_mask(nest=True, return_ipix=True)
         for ishell in self.tqdm(ishells, desc="[combine_maps_subs]"):
             fname = self.get_fname(ishell)
-            if self.check_maps(read=True, fname=fname):
+            shell = self.check_maps(read=True, fname=fname)
+            if shell is not None:
+                shells[ishell] = shell
                 continue
+            
             shell = healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
-            shell.update_values_pix(ipix, self.dtype(0), nest=True)
+            shell.update_values_pix(ipix, self.dtype(0), nest=True) # initialize to zero on valid pixels
             isubs = range(1000)
             n_subs_added = 0
             for isub in tqdm(isubs, desc=f"[combine_maps_subs: shell {ishell}]", leave=False):
@@ -1322,11 +1348,12 @@ class LightconeSlicingBuilder(ShellBuilder):
                     continue
             if n_subs_added != 0:
                 shell.write(fname, clobber=True, format=self.save_format, nocompress=self.nocompress)
-                shells.append(shell)
             else:
                 print('Zero sub files found for shell number ' + str(ishell) + '!')
 
-        return shells
+            shells[ishell] = shell
+            
+        return shells[ishells] if type(ishells) is int else shells
 
 
 class SnapshotInterpBuilder(ShellBuilder):
@@ -1407,10 +1434,11 @@ class SnapshotInterpBuilder(ShellBuilder):
             fname = self.get_fname(isnap, sub=isub)
 
         # check if shell has already been created
-        if self.check_maps(read=True, fname=fname):
+        shell = self.check_maps(read=True, fname=fname)
+        if shell is not None:
             if verbose:
-                print(f"Found and checked map at {fname}.")
-            return
+                print(f"Found and loaded map at {fname}.")
+            return shell
 
         # get lightcone line
         z_shell_bins = self.shell_edges_redshift()

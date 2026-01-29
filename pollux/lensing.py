@@ -183,8 +183,10 @@ class LensingBuilder(MapBuilder):
 
         Returns
         -------
-        list
-            List of pairs ``[gamma1_map, gamma2_map]`` as HealSparse maps.
+        list or dict
+            - If ``ikappas`` is a single int: returns a list ``[gamma1_map, gamma2_map]`` as HealSparse maps.
+            - If ``ikappas`` is ``None`` or an iterable: returns a dict keyed by kappa index
+              with list values ``[gamma1_map, gamma2_map]``. Also writes maps to disk.
         """
         if lmax is None:
             lmax = 3 * self.shell_builder.nside - 1
@@ -195,8 +197,7 @@ class LensingBuilder(MapBuilder):
 
         _, ipix = self.get_mask(nest=False, return_ipix=True)
 
-        gammas = []
-        alms = []
+        gammas = {}
         for ikappa in self.tqdm(ikappas, desc="[compute_shear_maps]"):
             if self.check_maps(read=True, fname=self.get_fname(ikappa, what='gamma1')) and self.check_maps(read=True, fname=self.get_fname(ikappa,
                                                                                                                                            what='gamma2')):
@@ -220,9 +221,9 @@ class LensingBuilder(MapBuilder):
             gamma1.write(self.get_fname(ikappa, what='gamma1'), clobber=True)
             gamma2.write(self.get_fname(ikappa, what='gamma2'), clobber=True)
 
-            gammas.append([gamma1, gamma2])
+            gammas[ikappa] = [gamma1, gamma2]
 
-        return gammas
+        return gammas[ikappas] if type(ikappas) is int else gammas
 
     def _noise_cls(self, imap):
         """Return the (white) shape-noise power spectrum.
@@ -330,29 +331,22 @@ class BornLensingBuilder(LensingBuilder):
 
         Returns
         -------
-        dict
-            Mapping ``ikappa -> healsparse.HealSparseMap`` for constructed maps.
-        """
-        if ikappas is None:
-            ikappas = range(self.nkappas)
-        elif type(ikappas) is int:
-            ikappas = [ikappas]
-        else:
-            pass
-
-        _ikappas = []
-        for ikappa in ikappas:
-            fname = self.get_fname(ikappa, what='alms', format='fits')
-            if not self.check_maps(ikappa, read=True):
-                _ikappas.append(ikappa)
-        if len(_ikappas) == 0:
-            return
-        else:
-            _ikappas = ikappas
-
-        kappas = {ikappa: healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype) for ikappa in _ikappas}
-
-        for ishell in trange(self.nshells, desc="[construct_maps]"):
+        healsparse.HealSparseMap or dict
+            - If ``ikappas`` is a single int: returns a single ``HealSparseMap``.
+            - If ``ikappas`` is ``None`` or an iterable: returns a dict keyed
+              by kappa index with ``HealSparseMap`` values.
+        """        
+        
+        # First check if requested kappas are already present, otherwise rebuild all
+        kappas = self.check_maps(ikappas, read=True)
+        if type(ikappas) is int: # make sure kappas is a dict
+            kappas = {ikappas: kappas}
+        if None not in kappas.values():
+            return kappas[ikappas] if type(ikappas) is int else kappas
+        
+        # Loop over shells and accumulate weighted contributions
+        kappas = {ikappa: healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype) for ikappa in (ikappas if ikappas is not None else range(self.nkappas))}
+        for ishell in self.tqdm(range(self.nshells), desc="[construct_maps]"):
             shell = (self.shell_builder.load_maps(ishell)).astype(self.dtype)
             if self.shell_builder.save_density:
                 density = shell
@@ -382,4 +376,4 @@ class BornLensingBuilder(LensingBuilder):
             fname = self.get_fname(ikappa)
             kappa.write(fname, clobber=True)
 
-        return kappas
+        return kappas[ikappas] if type(ikappas) is int else kappas

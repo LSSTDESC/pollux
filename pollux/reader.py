@@ -123,8 +123,8 @@ class Reader:
         ndarray of int
             Job indices whose snapshot component equals ``isnapshot``.
         """
-        return np.array([x[1] for x in self._job_args if x[0] == isnapshot]) # in case self._jobs_args is overwritten in subclasses
-    
+        return np.array([x[1] for x in self._job_args if x[0] == isnapshot])  # in case self._jobs_args is overwritten in subclasses
+
     def get_ijobs_for_snapshot(self, isnapshot):
         """Return global job indices for all sub-volumes of one snapshot.
 
@@ -138,8 +138,8 @@ class Reader:
         ndarray of int
             Job indices whose snapshot component equals ``isnapshot``.
         """
-        return np.array([i for i, x in enumerate(self._job_args) if x[0] == isnapshot]) # in case self._jobs_args is overwritten in subclasses
-    
+        return np.array([i for i, x in enumerate(self._job_args) if x[0] == isnapshot])  # in case self._jobs_args is overwritten in subclasses
+
     def boxsize(self):
         """Return the (comoving) box side length in Mpc.
 

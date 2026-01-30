@@ -72,20 +72,20 @@ class LensingBuilder(MapBuilder):
         self.reader = shell_builder.reader
         self.cosmo = shell_builder.cosmo
         self.nshells = shell_builder.nshells
-        
+
         # initialize nzs and number of kappa maps
         self.nzs = nzs
         if nzs == 'zsnapshots':
             self.nkappas = self.shell_builder.nshells
         else:
             self.nkappas = len(nzs)
-            
+
         # save n(z) info
         fname = os.path.join(save_dir, 'nzs.npy')
         os.makedirs(save_dir, exist_ok=True)
         if not os.path.exists(fname):
             np.save(fname, nzs)
-            
+
         # normalize sigma_e: accept scalar or per-bin array
         sigma_arr = np.atleast_1d(sigma_e).astype(float)
         if sigma_arr.size == 1:
@@ -93,7 +93,7 @@ class LensingBuilder(MapBuilder):
         elif sigma_arr.size != self.nkappas:
             raise ValueError(f"sigma_e must be a scalar or array of length {self.nkappas}, got {sigma_arr.size}")
         self.sigma_e = sigma_arr
-            
+
         # normalize nbar: accept scalar or per-bin array (API units: gal/arcmin^2)
         nbar_arr = np.atleast_1d(nbar).astype(float)
         if nbar_arr.size == 1:
@@ -335,17 +335,20 @@ class BornLensingBuilder(LensingBuilder):
             - If ``ikappas`` is a single int: returns a single ``HealSparseMap``.
             - If ``ikappas`` is ``None`` or an iterable: returns a dict keyed
               by kappa index with ``HealSparseMap`` values.
-        """        
-        
+        """
+
         # First check if requested kappas are already present, otherwise rebuild all
         kappas = self.check_maps(ikappas, read=True)
         if type(ikappas) is int: # make sure kappas is a dict
             kappas = {ikappas: kappas}
         if None not in kappas.values():
             return kappas[ikappas] if type(ikappas) is int else kappas
-        
+
         # Loop over shells and accumulate weighted contributions
-        kappas = {ikappa: healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype) for ikappa in (ikappas if ikappas is not None else range(self.nkappas))}
+        kappas = {
+            ikappa: healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
+            for ikappa in (ikappas if ikappas is not None else range(self.nkappas))
+        }
         for ishell in self.tqdm(range(self.nshells), desc="[construct_maps]"):
             shell = (self.shell_builder.load_maps(ishell)).astype(self.dtype)
             if self.shell_builder.save_density:
@@ -364,12 +367,6 @@ class BornLensingBuilder(LensingBuilder):
 
             for ikappa, kappa in kappas.items():
                 w = self.compute_weight(ishell, ikappa)
-                # # only one multiplication and one addition
-                # if self.multiple_planes:
-                #     tmp = (shell - self.dtype(nbar)) * self.dtype(w)
-                # else:
-                #     tmp = (shell * self.dtype(w / nbar)) - self.dtype(w)
-                # kappas[ikappa] = healsparse.operations.sum_union([tmp, kappa])
                 kappas[ikappa] = healsparse.operations.sum_union([density * w, kappa])
 
         for ikappa, kappa in kappas.items():

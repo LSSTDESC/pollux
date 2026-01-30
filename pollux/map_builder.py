@@ -378,7 +378,7 @@ class MapBuilder:
         for imap in self.tqdm(imaps, desc="[check_maps]"):
             fname = self.get_fname(imap)
             out[imap] = check_one(fname)
-            
+
         return out[imaps] if type(imaps) is int else out
 
     def load_maps(self, imaps=None, **fname_kwargs):
@@ -433,8 +433,6 @@ class MapBuilder:
         -------
         None
         """
-        # assert (imaps is None) or (maps is None)
-
         if maps_or_imaps is None:
             nmaps = self.nmaps
             imaps = range(nmaps)
@@ -1006,12 +1004,6 @@ class MapBuilder:
             bpws = wsp.get_bandpower_windows()[0, :, 0, :]
 
         def angular_cl(*args):
-            # return pyccl.angular_cl(*args)
-            # c, t1, t2, ells = args
-            # for ell in ells:
-            #     print(ell, t1.chi_min, t1.chi_max, t2.chi_min, t2.chi_max)
-            #     pyccl.angular_cl(c, t1, t2, ell)
-            #     pass
             try:
                 return pyccl.angular_cl(*args)
             except pyccl.CCLError:
@@ -1244,8 +1236,6 @@ class MapBuilder:
         if save:
             fname = self.get_fname(what='cls', format='png')
             fig.savefig(fname, bbox_inches='tight')
-
-        # plt.show()
 
     def compute_map_moments(self, theta_smooth=np.geomspace(2.5, 250, 8), nside_small=512):
         """Compute 2nd/3rd/4th moments of smoothed maps.

@@ -91,7 +91,7 @@ class ShellBuilder(MapBuilder):
       only one should be used at a time.
     - For octant-only footprints, particles outside x>0, y>0, z>0 are discarded.
     """
-    
+
     def __init__(
             self,
             nshells,
@@ -907,8 +907,8 @@ class ShellBuilder(MapBuilder):
             # t11 = (delta+Q)/2 - density/3
             # t22 = (delta-Q)/2 - density/3
             # t12 = U
-            vals = [density / 6. + Q / 2., density / 6. - Q / 2., U] # t11, t22, t12
-            
+            vals = [density / 6. + Q / 2., density / 6. - Q / 2., U]  # t11, t22, t12
+
             ts[ishell] = []
             for what, val in zip(whats, vals):
                 hsp = healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
@@ -1334,9 +1334,9 @@ class LightconeSlicingBuilder(ShellBuilder):
             if shell is not None:
                 shells[ishell] = shell
                 continue
-            
+
             shell = healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
-            shell.update_values_pix(ipix, self.dtype(0), nest=True) # initialize to zero on valid pixels
+            shell.update_values_pix(ipix, self.dtype(0), nest=True)  # initialize to zero on valid pixels
             isubs = range(1000)
             n_subs_added = 0
             for isub in tqdm(isubs, desc=f"[combine_maps_subs: shell {ishell}]", leave=False):
@@ -1352,7 +1352,7 @@ class LightconeSlicingBuilder(ShellBuilder):
                 print('Zero sub files found for shell number ' + str(ishell) + '!')
 
             shells[ishell] = shell
-            
+
         return shells[ishells] if type(ishells) is int else shells
 
 

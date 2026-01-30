@@ -357,7 +357,7 @@ class CatalogSourceClusteredMultinomial(CatalogSourceUniform):
 
         if bias is None:
             raise ValueError('bias must be provided for CatalogSourceClusteredMultinomial')
-        
+
         # Normalize bias: accept scalar or per-bin array
         bias_arr = np.atleast_1d(bias).astype(float)
         if bias_arr.size == 1:
@@ -365,7 +365,7 @@ class CatalogSourceClusteredMultinomial(CatalogSourceUniform):
         elif bias_arr.size != self.lensing.nmaps:
             raise ValueError(f"bias must be a scalar or array of length {self.lensing.nmaps}, got {bias_arr.size}")
         self.bias = bias_arr
-        
+
         for i, b in enumerate(self.bias):
             self.header_dict[f'BIAS_{i}'] = b
 
@@ -407,7 +407,7 @@ class CatalogSourceClusteredMultinomial(CatalogSourceUniform):
         # Loop over tomographic bins
         for ikappa in self.lensing.tqdm(ikappas, leave=False):
             rng = np.random.default_rng(self.lensing.shell_builder.seed + ishell + ikappa * self.nshells)
-            
+
             # select galaxies in current shell
             w = (catalog[ikappa]['idx_shell'] == ishell)
 
@@ -446,7 +446,7 @@ class CatalogSourceClusteredPoisson(CatalogSourceGenerator):
 
         if bias is None:
             raise ValueError('bias must be provided for CatalogSourceClusteredPoisson')
-        
+
         # Normalize bias: accept scalar or per-bin array
         bias_arr = np.atleast_1d(bias).astype(float)
         if bias_arr.size == 1:
@@ -454,7 +454,7 @@ class CatalogSourceClusteredPoisson(CatalogSourceGenerator):
         elif bias_arr.size != self.lensing.nmaps:
             raise ValueError(f"bias must be a scalar or array of length {self.lensing.nmaps}, got {bias_arr.size}")
         self.bias = bias_arr
-        
+
         for i, b in enumerate(self.bias):
             self.header_dict[f'BIAS_{i}'] = b
 

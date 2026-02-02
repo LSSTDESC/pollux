@@ -12,6 +12,17 @@ from .utils import quad
 
 
 class MyCMBLensingTracer(pyccl.Tracer):
+    """CCL tracer for CMB lensing convergence with configurable source redshift.
+
+    Parameters
+    ----------
+    cosmo : pyccl.Cosmology
+        Cosmology object.
+    z_source : float
+        Effective source redshift defining the CMB lensing kernel.
+    n_samples : int, optional
+        Number of samples used internally to tabulate the kernel.
+    """
 
     def __init__(self, cosmo, z_source, n_samples=100):
         super().__init__()
@@ -28,23 +39,31 @@ class MyCMBLensingTracer(pyccl.Tracer):
 
 
 class LensingBuilder(MapBuilder):
+    """Base class to build convergence and shear maps from matter shells.
+
+    Parameters
+    ----------
+    shell_builder : pollux.shells.ShellBuilder
+        Shell builder providing matter shells and geometry.
+    nzs : {'zsnapshots'} or sequence
+        If 'zsnapshots', produce one convergence map per shell edge (CMB-like).
+        Otherwise, a list describing source n(z) per tomographic bin. Each entry
+        can be a callable ``nz(z)`` or a tuple ``(z, n(z))``.
+    kappa_dir : str or None, optional
+        Output subdirectory under ``shell_builder.save_dir``.
+    dtype : data-type, optional
+        Output dtype for kappa and shear maps.
+    sigma_e : float, optional
+        Shape noise (ellipticity dispersion) used for noise spectra.
+    nbar : float or array_like, optional
+        Galaxy surface density in gal/arcmin^2 used for noise spectra. If a
+        float is provided it applies uniformly to all maps; if an array_like
+        is provided it must have length matching the number of maps and gives
+        per-map values. Values are converted to per-steradian internally
+        where needed.
+    """
 
     def __init__(self, shell_builder, nzs, kappa_dir=None, dtype=np.float32, sigma_e=0.3, nbar=5., **kwargs):
-        """`LensingBuilder` is a generic class to build convergence maps from particle shells.
-
-        Parameters
-        ----------
-        shell_builder
-            Shell builder object
-        nzs
-            List of callables or arrays (format (z, n(z))) representing redshift distributions.
-        kappa_dir, optional
-            Folder where to save maps, by default None
-        dtype, optional
-            dtype of maps, by default np.float32
-        sigma_e, optional
-            Ellipticity dispersion (for covariance calculation)
-        """
         self.shell_builder = shell_builder
         if kappa_dir is None:
             save_dir = shell_builder.save_dir
@@ -53,25 +72,57 @@ class LensingBuilder(MapBuilder):
         self.reader = shell_builder.reader
         self.cosmo = shell_builder.cosmo
         self.nshells = shell_builder.nshells
+
+        # initialize nzs and number of kappa maps
         self.nzs = nzs
-
-        self.sigma_e = sigma_e
-        self.nbar = nbar * (60 * 180 / np.pi)**2  # gal/arcmin2 to gal/str
-
         if nzs == 'zsnapshots':
             self.nkappas = self.shell_builder.nshells
         else:
             self.nkappas = len(nzs)
-            os.makedirs(save_dir, exist_ok=True)
-            np.save(os.path.join(save_dir, 'nzs.npy'), nzs)
+
+        # save n(z) info
+        fname = os.path.join(save_dir, 'nzs.npy')
+        os.makedirs(save_dir, exist_ok=True)
+        if not os.path.exists(fname):
+            np.save(fname, nzs)
+
+        # normalize sigma_e: accept scalar or per-bin array
+        sigma_arr = np.atleast_1d(sigma_e).astype(float)
+        if sigma_arr.size == 1:
+            sigma_arr = np.full(self.nkappas, float(sigma_arr[0]))
+        elif sigma_arr.size != self.nkappas:
+            raise ValueError(f"sigma_e must be a scalar or array of length {self.nkappas}, got {sigma_arr.size}")
+        self.sigma_e = sigma_arr
+
+        # normalize nbar: accept scalar or per-bin array (API units: gal/arcmin^2)
+        nbar_arr = np.atleast_1d(nbar).astype(float)
+        if nbar_arr.size == 1:
+            nbar_arr = np.full(self.nkappas, float(nbar_arr[0]))
+        elif nbar_arr.size != self.nkappas:
+            raise ValueError(f"nbar must be a scalar or array of length {self.nkappas}, got {nbar_arr.size}")
+        # store API-facing nbar in gal/arcmin^2 and an internal copy in gal/steradian
+        self.nbar = nbar_arr
+        self.nbar_sr = nbar_arr * (60.0 * 180.0 / np.pi)**2
 
         base_fname = f'kappa_{shell_builder.reader.kind}_seed{shell_builder.seed}'
 
         super().__init__(
             nside=shell_builder.nside, dtype=dtype, save_dir=save_dir, base_fname=base_fname, nmaps=self.nkappas, sacc_type="galaxy_convergence_cl", **kwargs)
 
-    def _create_tracers(self, Nz=1000):
-        z_shell_bins = self.reader.shell_edges_redshift()
+    def _create_tracers_ccl(self, Nz=1000):
+        """Create CCL lensing tracers.
+
+        Parameters
+        ----------
+        Nz : int, optional
+            Sampling used to tabulate n(z) when a callable is provided.
+
+        Returns
+        -------
+        list
+            List of CCL tracers (length ``self.nmaps``).
+        """
+        z_shell_bins = self.shell_builder.shell_edges_redshift()
 
         tracers = []
         if self.nzs == 'zsnapshots':
@@ -88,7 +139,19 @@ class LensingBuilder(MapBuilder):
         return tracers
 
     def _create_tracers_sacc(self, Nz=1000):
-        z_shell_bins = self.reader.shell_edges_redshift()
+        """Create SACC tracers matching the lensing maps.
+
+        Parameters
+        ----------
+        Nz : int, optional
+            Sampling used to tabulate n(z) when a callable is provided.
+
+        Returns
+        -------
+        list
+            List of SACC tracers (length ``self.nmaps``).
+        """
+        z_shell_bins = self.shell_builder.shell_edges_redshift()
 
         tracers = []
         if self.nzs == 'zsnapshots':
@@ -105,20 +168,25 @@ class LensingBuilder(MapBuilder):
         return tracers
 
     def compute_shear_maps(self, ikappas=None, lmax=None, replicate_octant=False):
-        """Compute shear maps from convergence maps
+        """Compute shear (gamma1, gamma2) maps from convergence maps.
 
         Parameters
         ----------
-        ikappas, optional
-            Map indices, by default None
-        lmax, optional
-            Maximum multipole, by default None
-        replicate_octant, optional
-            If True, alm's are recomputed from octant maps replicated to cover the full sky (irrelevant if `octant_only` is False), by default False  
+        ikappas : int or array_like of int or None, optional
+            Convergence map indices to process. If None, process all.
+        lmax : int or None, optional
+            Maximum multipole used in harmonic transforms. Defaults to
+            ``3*nside - 1``.
+        replicate_octant : bool, optional
+            If True, recompute a_lm from octant maps replicated to full sky
+            (only relevant when ``octant_only=True``).
 
         Returns
         -------
-            Shear maps and alm's if requested
+        list or dict
+            - If ``ikappas`` is a single int: returns a list ``[gamma1_map, gamma2_map]`` as HealSparse maps.
+            - If ``ikappas`` is ``None`` or an iterable: returns a dict keyed by kappa index
+              with list values ``[gamma1_map, gamma2_map]``. Also writes maps to disk.
         """
         if lmax is None:
             lmax = 3 * self.shell_builder.nside - 1
@@ -127,11 +195,9 @@ class LensingBuilder(MapBuilder):
         fl = np.zeros(len(ell))
         fl[1:] = -np.sqrt((ell[1:] + 2.) * (ell[1:] - 1.) / (ell[1:] * (ell[1:] + 1.)))
 
-        _, ipix_nest = self.get_mask(return_ipix=True)
-        ipix_ring = hp.nest2ring(self.nside, ipix_nest)
+        _, ipix = self.get_mask(nest=False, return_ipix=True)
 
-        gammas = []
-        alms = []
+        gammas = {}
         for ikappa in self.tqdm(ikappas, desc="[compute_shear_maps]"):
             if self.check_maps(read=True, fname=self.get_fname(ikappa, what='gamma1')) and self.check_maps(read=True, fname=self.get_fname(ikappa,
                                                                                                                                            what='gamma2')):
@@ -149,40 +215,46 @@ class LensingBuilder(MapBuilder):
             gamma1 = healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
             gamma2 = healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
 
-            gamma1.update_values_pix(ipix_nest, g1[ipix_ring].astype(self.dtype), nest=True)
-            gamma2.update_values_pix(ipix_nest, g2[ipix_ring].astype(self.dtype), nest=True)
+            gamma1.update_values_pix(ipix, g1[ipix].astype(self.dtype), nest=False)
+            gamma2.update_values_pix(ipix, g2[ipix].astype(self.dtype), nest=False)
 
             gamma1.write(self.get_fname(ikappa, what='gamma1'), clobber=True)
             gamma2.write(self.get_fname(ikappa, what='gamma2'), clobber=True)
 
-            gammas.append([gamma1, gamma2])
+            gammas[ikappa] = [gamma1, gamma2]
 
-        return gammas
+        return gammas[ikappas] if type(ikappas) is int else gammas
 
     def _noise_cls(self, imap):
-        nbar = self.nbar
-        return self.sigma_e**2 / nbar
-
-
-class BornLensingBuilder(LensingBuilder):
-
-    def __init__(self, shell_builder, nzs, kappa_dir=None, dtype=np.float32, multiple_planes=False, nbar_from_maps=False, **kwargs):
-        """Lensing builder object in the Born approximation
+        """Return the (white) shape-noise power spectrum.
 
         Parameters
         ----------
-        shell_builder
-            Light-cone builder object
-        nzs
-            List of callables representing redshift distributions.
-        kappa_dir, optional
-            Folder where to save maps, by default None
-        dtype, optional
-            dtype of maps, by default np.float32
-        multiple_planes, optional
-            Compute weights in the multiple lens planes approximation, instead of using Limber integrals, by default False
-        nbar_from_maps, optional
-            Compute the mean density from the maps themselves (less accurate as it removes the monopole), by default False
+        imap : int
+            Tomographic-bin index.
+
+        Returns
+        -------
+        float
+            Noise level N_ell (constant in ell).
+        """
+        return self.sigma_e[imap]**2 / self.nbar_sr[imap]
+
+
+class BornLensingBuilder(LensingBuilder):
+    """Convergence-map builder in the Born approximation."""
+
+    def __init__(self, shell_builder, nzs, kappa_dir=None, dtype=np.float32, multiple_planes=False, nbar_from_maps=False, **kwargs):
+        """Initialize a Born-approximation lensing builder.
+
+        Parameters
+        ----------
+        multiple_planes : bool, optional
+            If True, compute weights using a multiple-lens-planes approximation.
+            If False, use Limber-style integrals of tracer kernels per shell.
+        nbar_from_maps : bool, optional
+            If True, estimate the mean density from the shell maps themselves.
+            This can affect large-scale modes.
         """
         super().__init__(shell_builder, nzs, kappa_dir=kappa_dir, dtype=dtype, **kwargs)
 
@@ -196,35 +268,41 @@ class BornLensingBuilder(LensingBuilder):
 
             self.mpart_over_area = mpart / area
 
-            zmax = self.reader.shell_edges_redshift()[-1]
-            self.dndz_norm = [quad(lambda z: t.get_dndz(z), 0., zmax) if isinstance(t, pyccl.tracers.WeakLensingTracer) else np.nan for t in self.get_tracers()]
-            self.zlens = [self.shell_builder.get_mean_z(ishell) for ishell in range(self.nshells)]
+            zmax = self.shell_builder.shell_edges_redshift()[-1]
+            self.dndz_norm = [quad(lambda z: t.get_dndz(z), 0., zmax) if isinstance(t, pyccl.tracers.NzTracer) else np.nan for t in self.get_tracers_ccl()]
+            self.zlens = [self.shell_builder.mean_z(ishell) for ishell in range(self.nshells)]
 
     def compute_weight(self, ishell, ikappa):
-        """Compute lensing weights to form convergence maps from particle shells
+        """Compute the shell weight contributing to a given convergence map.
 
         Parameters
         ----------
-        ishell
-            Shell index
-        ikappa
-            Convergence map index
+        ishell : int
+            Shell index.
+        ikappa : int
+            Convergence map index.
+
+        Returns
+        -------
+        float
+            Scalar weight applied to the shell density/contrast when summing into
+            the convergence map.
         """
-        tracer = self.get_tracers()[ikappa]
+        tracer = self.get_tracers_ccl()[ikappa]
 
         if self.multiple_planes:
-            zmax = self.reader.shell_edges_redshift()[-1]
+            zmax = self.shell_builder.shell_edges_redshift()[-1]
             zlens = self.zlens[ishell]
 
             if zlens is None:
-                zlens = self.shell_builder.get_mean_z(ishell)
+                zlens = self.shell_builder.mean_z(ishell)
 
             d_A_lens = pyccl.angular_diameter_distance(self.cosmo, 1. / (1. + zlens))  # needed to obtain surface mass density in 1/Mpc^2
 
-            if isinstance(tracer, pyccl.tracers.WeakLensingTracer):
+            if isinstance(tracer, pyccl.tracers.NzTracer):
 
                 def integrand(zsource, zlens, tracer):
-                    sigma_critical = pyccl.background.sigma_critical(self.cosmo, 1. / (1. + zlens), 1. / (1. + zsource))  # in Msun / Mpc^2
+                    sigma_critical = pyccl.background.sigma_critical(self.cosmo, a_lens=1. / (1. + zlens), a_source=1. / (1. + zsource))  # in Msun / Mpc^2
                     return tracer.get_dndz(zsource) / sigma_critical
 
                 w = quad(integrand, zlens, zmax, args=(zlens, tracer)) / self.dndz_norm[ikappa]
@@ -240,50 +318,59 @@ class BornLensingBuilder(LensingBuilder):
 
             return w * self.mpart_over_area / d_A_lens**2
         else:
-            chi_min, chi_max = self.reader.shell_edges_comoving_distance()[ishell:ishell + 2]
+            chi_min, chi_max = self.shell_builder.shell_edges_comoving_distance()[ishell:ishell + 2]
             return quad(lambda chi: tracer.get_kernel(chi), chi_min, chi_max)
 
     def construct_maps(self, ikappas=None):
-        if ikappas is None:
-            ikappas = range(self.nkappas)
-        elif type(ikappas) is int:
-            ikappas = [ikappas]
-        else:
-            pass
+        """Construct and save convergence maps by summing weighted shells.
 
-        _ikappas = []
-        for ikappa in ikappas:
-            fname = self.get_fname(ikappa, what='alms', force_fits=True)
-            if not self.check_maps(ikappa, read=True):
-                _ikappas.append(ikappa)
-        if len(_ikappas) == 0:
-            return
-        else:
-            _ikappas = ikappas
+        Parameters
+        ----------
+        ikappas : int or array_like of int or None, optional
+            Indices of convergence maps to build. If None, build all.
 
-        kappas = {ikappa: healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype) for ikappa in _ikappas}
+        Returns
+        -------
+        healsparse.HealSparseMap or dict
+            - If ``ikappas`` is a single int: returns a single ``HealSparseMap``.
+            - If ``ikappas`` is ``None`` or an iterable: returns a dict keyed
+              by kappa index with ``HealSparseMap`` values.
+        """
 
-        for ishell in trange(self.nshells, desc="[construct_maps]"):
+        # First check if requested kappas are already present, otherwise rebuild all
+        kappas = self.check_maps(ikappas, read=True)
+        if type(ikappas) is int: # make sure kappas is a dict
+            kappas = {ikappas: kappas}
+        if None not in kappas.values():
+            return kappas[ikappas] if type(ikappas) is int else kappas
+
+        # Loop over shells and accumulate weighted contributions
+        kappas = {
+            ikappa: healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
+            for ikappa in (ikappas if ikappas is not None else range(self.nkappas))
+        }
+        for ishell in self.tqdm(range(self.nshells), desc="[construct_maps]"):
             shell = (self.shell_builder.load_maps(ishell)).astype(self.dtype)
-            if self.nbar_from_maps:
-                if self.octant_only:
-                    nbar = shell.get_values_pix(shell.valid_pixels,nest=True).sum()/(self.npix / 8.)
-                else:
-                    nbar = shell.get_values_pix(shell.valid_pixels,nest=True).sum()/self.npix
+            if self.shell_builder.save_density:
+                density = shell
             else:
-                nbar = self.shell_builder.get_pixel_density(ishell)
+                if self.nbar_from_maps:
+                    s = shell[:]
+                    nbar = np.mean(s[s > 0.])
+                else:
+                    nbar = self.shell_builder.pixel_density(ishell)
+                nbar = self.dtype(nbar)
+                if self.multiple_planes:
+                    density = shell - nbar
+                else:
+                    density = shell / nbar - 1.
 
             for ikappa, kappa in kappas.items():
                 w = self.compute_weight(ishell, ikappa)
-                # only one multiplication and one addition
-                if self.multiple_planes:
-                    tmp = (shell - self.dtype(nbar)) * self.dtype(w)
-                else:
-                    tmp = (shell * self.dtype(w / nbar)) - self.dtype(w)
-                kappas[ikappa] = healsparse.operations.sum_union([tmp, kappa])
+                kappas[ikappa] = healsparse.operations.sum_union([density * w, kappa])
 
         for ikappa, kappa in kappas.items():
             fname = self.get_fname(ikappa)
             kappa.write(fname, clobber=True)
 
-        return kappas
+        return kappas[ikappas] if type(ikappas) is int else kappas

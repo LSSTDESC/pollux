@@ -199,8 +199,10 @@ class LensingBuilder(MapBuilder):
 
         gammas = {}
         for ikappa in self.tqdm(ikappas, desc="[compute_shear_maps]"):
-            if self.check_maps(read=True, fname=self.get_fname(ikappa, what='gamma1')) and self.check_maps(read=True, fname=self.get_fname(ikappa,
-                                                                                                                                           what='gamma2')):
+            g1 = self.check_maps(read=True, fname=self.get_fname(ikappa, what='gamma1'))
+            g2 = self.check_maps(read=True, fname=self.get_fname(ikappa, what='gamma2'))
+            if g1 is not None and g2 is not None:
+                gammas[ikappa] = [g1, g2]
                 continue
 
             # Get harmonic coefficients of convergence map

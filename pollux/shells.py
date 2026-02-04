@@ -73,7 +73,8 @@ class ShellBuilder(MapBuilder):
         indices ``(ix, iy, iz)`` to a rotation code in ``[0, 48)``.
         This option is mutually exclusive with ``apply_grid_isometry``.
     subsample_box : float or dict or None, optional
-        Particle subsampling configuration.
+        Particle subsampling configuration:
+
         - If float in (0, 1], keep that fraction of particles per sub read.
         - If dict with key ``'densitymax_z'``: choose ratios per shell to keep
           per-pixel S/N comparable to the shell at that redshift.

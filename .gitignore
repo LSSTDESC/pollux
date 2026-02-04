@@ -4,3 +4,4 @@
 **/*.code-workspace
 **/*.egg-info
 **/__pycache__
+**/docs/_build

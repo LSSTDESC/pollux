@@ -341,16 +341,15 @@ class BornLensingBuilder(LensingBuilder):
 
         # First check if requested kappas are already present, otherwise rebuild all
         kappas = self.check_maps(ikappas, read=True)
-        if type(ikappas) is int: # make sure kappas is a dict
-            kappas = {ikappas: kappas}
-        if None not in kappas.values():
-            return kappas[ikappas] if type(ikappas) is int else kappas
+        if type(ikappas) is int:
+            if kappas is not None:
+                return kappas
+        else:
+            if None not in kappas.values():
+                return kappas
 
         # Loop over shells and accumulate weighted contributions
-        kappas = {
-            ikappa: healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
-            for ikappa in (ikappas if ikappas is not None else range(self.nkappas))
-        }
+        kappas = {ikappa: healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype) for ikappa in self.iter(ikappas)}
         for ishell in self.tqdm(range(self.nshells), desc="[construct_maps]"):
             shell = (self.shell_builder.load_maps(ishell)).astype(self.dtype)
             if self.shell_builder.save_density:

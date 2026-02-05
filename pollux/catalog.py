@@ -49,8 +49,9 @@ class CatalogSourceGenerator(object):
         FITS header keyword/value pairs stored in the output catalogs.
     """
 
-    def __init__(self, lensing, name, nbar=None, interp_list=['kappa', 'gamma1', 'gamma2'], interp_pixels=True, remove_mean_list=['kappa']):
+    def __init__(self, lensing, name, nbar=None, interp_list=['kappa', 'gamma1', 'gamma2'], interp_pixels=True, remove_mean_list=['kappa'], augmentors=[]):
         self.lensing = lensing
+        self.cosmo = lensing.cosmo
         self.snap_lensing = self.lensing.shell_builder.snapshot_lensing_builder()
         self.nside = self.lensing.nside
         self.ncats = self.lensing.nmaps
@@ -59,6 +60,13 @@ class CatalogSourceGenerator(object):
         self.interp_pixels = interp_pixels
         self.remove_mean_list = remove_mean_list
         self.name = name
+        self.augmentors = augmentors
+        # assert required fields for augmentors are in interp_list and add them if not (with a warning)
+        for augmentor in augmentors:
+            for field in augmentor.required_interp_fields:
+                if field not in self.interp_list:
+                    print(f"Warning: adding field '{field}' to interp_list for augmentor '{augmentor.name}'")
+                    self.interp_list.append(field)
 
         # Use lensing nbar by default, otherwise accept scalar or per-bin array
         if nbar is None:
@@ -95,13 +103,18 @@ class CatalogSourceGenerator(object):
         2) interpolate requested fields from maps,
         3) save one FITS file per tomographic bin.
         """
-        catalog = [{} for _ in range(self.lensing.nmaps)]
+        catalog = {ikappa:{} for ikappa in self.lensing.iter(ikappas)}
 
         # Generate ra, dec, z, etc.
         self._generate_galaxies(catalog, ikappas=ikappas)
 
         # Interpolate kappa/shear values
         self._interpolate_maps(catalog, ikappas=ikappas)
+        
+        # Augment catalogs if requested
+        for augmentor in self.augmentors:
+            for ikappa in self.lensing.tqdm(ikappas, desc=f"[generate] augmenting catalogs with {augmentor.name}", leave=False):
+                augmentor.augment_catalog(self.cosmo, catalog[ikappa])
 
         # Save it!
         self._save_catalogs(catalog, ikappas=ikappas)
@@ -111,8 +124,8 @@ class CatalogSourceGenerator(object):
 
         Parameters
         ----------
-        catalog : list of dict
-            List of per-bin dictionaries that will be filled in-place.
+        catalog : dict
+            Dictionary containing per-bin catalog data that will be filled in-place.
         ikappas : int or array_like of int or None, optional
             Tomographic-bin indices to generate.
 
@@ -157,10 +170,9 @@ class CatalogSourceGenerator(object):
                     density_masked = self.snap_lensing.shell_builder.get_field_map(ishell, nest=True)[ipix_mask]
                     map_high = healsparse.HealSparseMap.make_empty(self.lensing.nside_c, self.nside, self.lensing.dtype)
                     map_high.update_values_pix(ipix_mask, density_masked.astype(self.lensing.dtype))
-                    print([density_masked.min(), density_masked.max()])
                 else:
                     map_high = self.snap_lensing.load_maps(ishell, what=None if k == 'kappa' else k)
-                    
+
                 # Remove mean if requested
                 if k in self.remove_mean_list:
                     valid_pixels = map_high.valid_pixels
@@ -177,6 +189,7 @@ class CatalogSourceGenerator(object):
 
                     if np.any(w):
                         if k == 'delta':
+                            # no interpolation between shells for delta (integrated quantity)
                             if self.interp_pixels:
                                 catalog[ikappa][k][w] = map_high.interpolate_pos(
                                     catalog[ikappa]['ra'][w],
@@ -210,6 +223,27 @@ class CatalogSourceGenerator(object):
                                 else:
                                     catalog[ikappa][k][w] = map_low[idx] + dchi * (map_high[idx] - map_low[idx]) / (chi_high - chi_low)
 
+    def get_fname(self, ikappa, what=None, format='fits'):
+        """Get the filename for a saved catalog.
+
+        Parameters
+        ----------
+        ikappa : int
+            Tomographic-bin index.
+        what : str or None, optional
+            Catalog name. If None, use ``self.name``.
+        format : str, optional
+            File format. Default is ``'fits'``.
+
+        Returns
+        -------
+        str
+            Full path to the catalog file.
+        """
+        if what is None:
+            what = self.name
+        return self.lensing.get_fname(ikappa, what=what, format=format)
+
     def _save_catalogs(self, catalog, ikappas=None):
         """Write per-bin catalogs to FITS files.
 
@@ -220,12 +254,11 @@ class CatalogSourceGenerator(object):
             any fields listed in ``self.interp_list``.
         ikappas : int or array_like of int or None, optional
             Tomographic-bin indices to save.
-
-        Returns
-        -------
-        list of dict
-            The input ``catalog`` object (returned for convenience).
         """
+        columns = self.interp_list
+        for augmentor in self.augmentors:
+            columns += augmentor.new_columns
+            
         for ikappa in self.lensing.tqdm(ikappas, desc="[generate] saving", leave=False):
 
             ra = fits.Column(name='ra', format='E', array=catalog[ikappa]['ra'])
@@ -233,7 +266,7 @@ class CatalogSourceGenerator(object):
             z = fits.Column(name='z', format='E', array=catalog[ikappa]['z'])
             chi = fits.Column(name='chi', format='E', array=catalog[ikappa]['chi'])
 
-            interp_colums = [fits.Column(name=k, format='E', array=catalog[ikappa][k]) for k in self.interp_list]
+            interp_colums = [fits.Column(name=k, format='E', array=catalog[ikappa][k]) for k in columns]
 
             header = fits.Header()
             for k, v in self.header_dict.items():
@@ -241,12 +274,10 @@ class CatalogSourceGenerator(object):
 
             hdul = [fits.PrimaryHDU(), fits.BinTableHDU.from_columns([ra, dec, z, chi] + interp_colums, header)]
 
-            fname = self.lensing.get_fname(ikappa, what=self.name, format='fits')
+            fname = self.get_fname(ikappa, what=self.name, format='fits')
             fits.HDUList(hdul).writeto(fname, overwrite=True)
 
-        return catalog
-
-    def load_catalog(self, ikappa):
+    def load_catalog(self, ikappa, return_header=False):
         """Load a saved FITS catalog for one tomographic bin.
 
         Parameters
@@ -256,11 +287,22 @@ class CatalogSourceGenerator(object):
 
         Returns
         -------
-        astropy.io.fits.HDUList
-            Opened FITS HDU list. The caller is responsible for closing it.
+        header : astropy.io.fits.Header
+            FITS header from the binary table HDU.
+        table : numpy.ndarray
+            Table data from the binary table HDU.
         """
-        fname = self.lensing.get_fname(ikappa, what=self.name, format='fits')
-        return fits.open(fname)
+        fname = self.get_fname(ikappa, what=self.name, format='fits')
+        hdul = fits.open(fname)
+        try:
+            header = hdul[1].header
+            table = hdul[1].data
+        finally:
+            hdul.close()
+        if return_header:
+            return header, table
+        else:
+            return table
 
 
 class CatalogSourceUniform(CatalogSourceGenerator):
@@ -271,8 +313,8 @@ class CatalogSourceUniform(CatalogSourceGenerator):
     sky depending on ``lensing.octant_only``).
     """
 
-    def __init__(self, lensing, name='catuniform', nbar=None, interp_list=['kappa', 'gamma1', 'gamma2'], interp_pixels=True, remove_mean_list=['kappa']):
-        super().__init__(lensing, name, nbar, interp_list=interp_list, interp_pixels=interp_pixels, remove_mean_list=remove_mean_list)
+    def __init__(self, lensing, name='catuniform', nbar=None, interp_list=['kappa', 'gamma1', 'gamma2'], interp_pixels=True, remove_mean_list=['kappa'], augmentors=[]):
+        super().__init__(lensing, name, nbar, interp_list=interp_list, interp_pixels=interp_pixels, remove_mean_list=remove_mean_list, augmentors=augmentors)
 
     def _generate_galaxies(self, catalog, ikappas=None):
         """Generate redshifts and positions for all selected tomographic bins.
@@ -363,8 +405,9 @@ class CatalogSourceClusteredMultinomial(CatalogSourceUniform):
         ``lensing.nmaps`` and provide a per-bin value.
     """
 
-    def __init__(self, lensing, name='catmultinom', nbar=None, *, bias, interp_list=['kappa', 'gamma1', 'gamma2'], interp_pixels=True, remove_mean_list=['kappa']):
-        super().__init__(lensing, name, nbar, interp_list=interp_list, interp_pixels=interp_pixels, remove_mean_list=remove_mean_list)
+    def __init__(
+            self, lensing, name='catmultinom', nbar=None, *, bias, interp_list=['kappa', 'gamma1', 'gamma2'], interp_pixels=True, remove_mean_list=['kappa'], augmentors=[]):
+        super().__init__(lensing, name, nbar, interp_list=interp_list, interp_pixels=interp_pixels, remove_mean_list=remove_mean_list, augmentors=augmentors)
 
         if bias is None:
             raise ValueError('bias must be provided for CatalogSourceClusteredMultinomial')
@@ -452,8 +495,9 @@ class CatalogSourceClusteredPoisson(CatalogSourceGenerator):
         ``lensing.nmaps`` and provide a per-bin value.
     """
 
-    def __init__(self, lensing, name='catpoisson', nbar=None, *, bias, interp_list=['kappa', 'gamma1', 'gamma2'], interp_pixels=True, remove_mean_list=['kappa']):
-        super().__init__(lensing, name, nbar, interp_list=interp_list, interp_pixels=interp_pixels, remove_mean_list=remove_mean_list)
+    def __init__(
+            self, lensing, name='catpoisson', nbar=None, *, bias, interp_list=['kappa', 'gamma1', 'gamma2'], interp_pixels=True, remove_mean_list=['kappa'], augmentors=[]):
+        super().__init__(lensing, name, nbar, interp_list=interp_list, interp_pixels=interp_pixels, remove_mean_list=remove_mean_list, augmentors=augmentors)
 
         if bias is None:
             raise ValueError('bias must be provided for CatalogSourceClusteredPoisson')
@@ -610,3 +654,39 @@ def generate_radec_in_pix(nside, ipix, rng, log2nside_high=29):
     ipix_high += rng.integers(0, 4**n_up, size=np.size(ipix))
 
     return hp.pix2ang(nside_high, ipix_high, nest=True, lonlat=True)  # ra, dec
+
+
+class CatalogAugmentor(object):
+    """Base class for catalog augmentors that add fields to existing catalogs.
+
+    Subclasses must implement the ``augment_catalog`` method.
+
+    Parameters
+    ----------
+    required_interp_fields : list of str
+        Names of fields that must be present in the catalog for augmentation to
+        proceed.
+    """
+    
+    def __init__(self, name, required_interp_fields=[], new_columns=[]):
+        self.name = name
+        self.required_interp_fields = required_interp_fields
+        self.new_columns = new_columns
+        
+    def augment_catalog(self, cosmo, catalog):
+        """Augment a catalog in-place by adding new fields.
+
+        Parameters
+        ----------
+        cosmo : ccl.Cosmology
+            Cosmology instance.
+        catalog : dict
+            Catalog dictionary containing at least the fields listed in
+            ``self.required_fields``.
+
+        Raises
+        ------
+        NotImplementedError
+            Must be implemented by subclasses.
+        """
+        raise NotImplementedError

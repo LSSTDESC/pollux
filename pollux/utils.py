@@ -610,10 +610,6 @@ def save_dict_fits_file(fname, cat):
     cat : dict
         Dictionary mapping column name to 1D numpy array.
 
-    Returns
-    -------
-    None
-
     Notes
     -----
     Columns are written with FITS format='E' (32-bit float). If you need other

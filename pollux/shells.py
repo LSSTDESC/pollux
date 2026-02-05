@@ -314,10 +314,6 @@ class ShellBuilder(MapBuilder):
         ----------
         ext : {'npy', 'txt'}, optional
             Output format for shell summary.
-
-        Returns
-        -------
-        None
         """
         # Shell info for later reference and compare to existing as a safe check
         assert ext in ['npy', 'txt']
@@ -2580,10 +2576,9 @@ def part_boundary_fix(xyzi, xyzf, boxsize, fixed='i'):
     fixed : {'i', 'f'}, optional
         Which endpoint should remain fixed.
 
-    Returns
-    -------
-    None
-        Arrays are modified in-place.
+    Notes
+    -----
+    Arrays are modified in-place.
     """
     n = len(xyzi)
     for i in numba.prange(n):

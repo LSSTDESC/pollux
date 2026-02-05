@@ -151,6 +151,35 @@ class MapBuilder:
         print(f"  - Number of maps = {self.nmaps}")
         print(f"  - Maps saved to", self.save_dir)
 
+    def iter(self, it=None):
+        """Return an iterator over the input.
+
+        Parameters
+        ----------
+        it : iterable or int or None, optional
+            - If None: iterate over ``range(self.nmaps)``.
+            - If iterable: return the iterable as is.
+            - If int: return a singleton list ``[it]``.
+
+        Returns
+        -------
+        iterable
+            Iterable over the requested items.
+
+        Raises
+        ------
+        ValueError
+            If ``it`` is neither None, an int, nor an iterable.
+        """
+        if it is None:
+            return range(self.nmaps)
+        elif isinstance(it, Iterable):
+            return it
+        elif type(it) is int:
+            return [it]
+        else:
+            raise ValueError
+        
     def tqdm(self, it=None, **tqdm_kwargs):
         """Wrap an iterable (or default range) with tqdm progress bars.
 
@@ -428,10 +457,6 @@ class MapBuilder:
         **hpview_kwargs
             Forwarded to :func:`healpy.orthview` (octant mode) or
             :func:`healpy.mollview` (full sky).
-
-        Returns
-        -------
-        None
         """
         if maps_or_imaps is None:
             nmaps = self.nmaps
@@ -780,10 +805,6 @@ class MapBuilder:
         cl : dict
             Dictionary keyed by (i, j) containing spectra arrays evaluated at
             ``ell``.
-
-        Returns
-        -------
-        None
         """
         s = sacc.Sacc()
         tracers = self.get_tracers_sacc()
@@ -1149,10 +1170,6 @@ class MapBuilder:
             - 2: plot ``ell(ell+1)C_ell/2pi``
         error_bars : bool, optional
             If True, draw theory uncertainty bands from Gaussian errors.
-
-        Returns
-        -------
-        None
         """
         n = self.nmaps
         m = 1 if auto_only else n
@@ -1341,10 +1358,6 @@ class MapBuilder:
             If False, generate a correlated set of maps from all cross-spectra.
         seed : int, optional
             Random seed passed to NaMaster synfast routines. Default is -1.
-
-        Returns
-        -------
-        None
 
         Notes
         -----

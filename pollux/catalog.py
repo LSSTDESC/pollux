@@ -452,8 +452,9 @@ class CatalogSourceClusteredPoisson(CatalogSourceGenerator):
         ``lensing.nmaps`` and provide a per-bin value.
     """
 
-    def __init__(self, lensing, name='catpoisson', nbar=None, *, bias, interp_list=['kappa', 'gamma1', 'gamma2'], interp_pixels=True, remove_mean_list=['kappa']):
+    def __init__(self, lensing, name='catpoisson', nbar=None, *, bias interp_list=['kappa', 'gamma1', 'gamma2'], interp_pixels=True, remove_mean_list=['kappa'], smooth_Mpc=None):
         super().__init__(lensing, name, nbar, interp_list=interp_list, interp_pixels=interp_pixels, remove_mean_list=remove_mean_list)
+        self.smooth_Mpc = smooth_Mpc
 
         if bias is None:
             raise ValueError('bias must be provided for CatalogSourceClusteredPoisson')
@@ -468,6 +469,17 @@ class CatalogSourceClusteredPoisson(CatalogSourceGenerator):
 
         for i, b in enumerate(self.bias):
             self.header_dict[f'BIAS_{i}'] = b
+
+        _, self.ipix_mask = self.snap_lensing.shell_builder.get_mask(return_ipix=True)
+        if self.smooth_Mpc is not None:
+            self.smoothed_density = []
+            for ishell in self.snap_lensing.shell_builder.tqdm(range(self.nshells), desc='[init] smoothing density'):
+                sigma = self.smooth_Mpc / (0.5 * (self.snap_lensing.shell_builder.shell_edges_comoving_distance()[ishell] + self.snap_lensing.shell_builder.shell_edges_comoving_distance()[ishell+1]))
+                alm = self.snap_lensing.shell_builder.compute_alms(ishell, save=True)[ishell]
+                hp.smoothalm(alm, sigma=sigma, inplace=True)
+                density = hp.alm2map(alm, nside=self.nside)
+                density = hp.reorder(density, r2n=True)
+                self.smoothed_density.append(density[self.ipix_mask])
 
     def _generate_galaxies(self, catalog, ikappas=None):
         """Generate a clustered catalog by shell-wise Poisson sampling.
@@ -530,8 +542,10 @@ class CatalogSourceClusteredPoisson(CatalogSourceGenerator):
         ikappas : int or array_like of int or None, optional
             Tomographic-bin indices to process.
         """
-        _, ipix_mask = self.snap_lensing.shell_builder.get_mask(return_ipix=True)
-        density_masked = self.snap_lensing.shell_builder.get_field_map(ishell, nest=True)[ipix_mask]
+        if self.smooth_Mpc is not None:
+            density_masked = self.smoothed_density[ishell]
+        else:
+            density_masked = self.snap_lensing.shell_builder.get_field_map(ishell, nest=True)[self.ipix_mask]
 
         # Loop over tomographic bins
         for ikappa in self.lensing.tqdm(ikappas, leave=False):
@@ -541,7 +555,7 @@ class CatalogSourceClusteredPoisson(CatalogSourceGenerator):
             p = np.clip(1. + self.bias[ikappa] * density_masked, 0., None)
             lam = p * self.nbar_per_pix_per_bin[ikappa][ishell]
             n_per_pix = rng.poisson(lam=lam)
-            ipix = np.repeat(ipix_mask, n_per_pix)
+            ipix = np.repeat(self.ipix_mask, n_per_pix)
 
             # Sampling ra, dec within pixel
             ra, dec = generate_radec_in_pix(self.nside, ipix, rng)

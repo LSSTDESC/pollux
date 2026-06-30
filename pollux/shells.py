@@ -18,7 +18,7 @@ from collections.abc import Iterable
 from .map_builder import MapBuilder
 from .utils import quad, split_bins, arange_endpoint, inter_diff
 from .reader import DummyReader
-from .lensing import BornLensingBuilder
+from .lensing import BornLensingBuilder, SnapshotBornLensingBuilder
 
 
 class ShellBuilder(MapBuilder):
@@ -46,17 +46,10 @@ class ShellBuilder(MapBuilder):
         Healpix nside of the shell maps.
     save_dir : str or None
         Output directory where maps and metadata are written.
-    kind : {'snapshot', 'lightcone'}, optional
-        Shell construction mode. 'snapshot' builds shells out of snapshot boxes;
-        'lightcone' uses reader-provided shell edges (typically already binned).
     seed : int, optional
         Random seed used to draw isometries/rotflips and for subsampling.
     dtype : data-type, optional
         dtype used to store shell map values.
-    save_density : bool, optional
-        If True, save density maps (HealSparse dense output via
-        ``generate_healpix_map``). If False, save count maps and expose density
-        contrast via :meth:`_field_map`.
     apply_grid_isometry : bool or sequence, optional
         If True, apply one random affine isometry per shell to the underlying
         particle distribution: ``xyz' = A(xyz + b)`` with random orthogonal-ish
@@ -91,29 +84,39 @@ class ShellBuilder(MapBuilder):
     - ``apply_grid_isometry`` and ``apply_replicate_rotflip`` do not commute;
       only one should be used at a time.
     - For octant-only footprints, particles outside x>0, y>0, z>0 are discarded.
+    
+    Class attribute
+    ---------------
+    kind : {'snapshot', 'lightcone'}
+        Shell construction mode. 'snapshot' builds shells out of snapshot boxes;
+        'lightcone' uses reader-provided shell edges (typically already binned).
+    add_orphans : bool
+        Whether orphan particles should be added in :meth:`combine_maps_subs`.
+        ``False`` here; overridden to ``True`` in :class:`SnapshotInterpBuilder`.
     """
+
+    add_orphans = False
+    kind = 'snapshot'
 
     def __init__(
             self,
             nshells,
             reader,
             nside,
-            save_dir,
-            kind='snapshot',
+            save_dir=None,
+            root_dir=None,
             seed=12345,
             dtype=np.uint64,
-            save_density=False,
             apply_grid_isometry=False,
             group_isometries=None,
             apply_replicate_rotflip=False,
             subsample_box=None,
+            base_fname=None,
             **kwargs):
         self.nshells = nshells
         self.reader = reader
         self.cosmo = reader.cosmo
-        self.kind = kind
         self.seed = seed
-        self.save_density = save_density
 
         # Options for isometries and replicate rotation/flips
         assert (not apply_grid_isometry) or (
@@ -122,7 +125,13 @@ class ShellBuilder(MapBuilder):
         self.apply_grid_isometry = apply_grid_isometry
         self.apply_replicate_rotflip = apply_replicate_rotflip
 
-        base_fname = f'shell_{self.reader.kind}_seed{self.seed}'
+        if root_dir is not None:
+            assert save_dir is None, "Provide either root_dir or save_dir, not both."
+            save_dir = os.path.join(root_dir, f'nside{nside}', f'seed{seed}', 'shells')
+            kwargs.setdefault('wsp_dir', os.path.join(root_dir, f'nside{nside}'))
+
+        if base_fname is None:
+            base_fname = 'shell'
 
         if dtype == np.int32:
             warnings.warn(f"The max value for {dtype} might not be enough : {np.iinfo(dtype)}")
@@ -387,20 +396,20 @@ class ShellBuilder(MapBuilder):
         if not os.path.exists(fname):
             yaml.dump(data, open(fname, "w"))
 
-    def snapshot_lensing_builder(self, kappa_dir='kappa_zsnapshots'):
-        """Return a snapshot-lensing builder (CMB-like) using shell snapshots.
+    def snapshot_lensing_builder(self, tag='zsnapshots'):
+        """Return a lensing builder with one convergence map per shell snapshot.
 
         Parameters
         ----------
-        kappa_dir : str, optional
-            Output directory name (relative to save_dir) for kappa maps.
+        tag : str or None, optional
+            Tag used to name the output subdirectory: ``kappa_{tag}``.
+            Default ``'zsnapshots'`` gives ``kappa_zsnapshots/``.
 
         Returns
         -------
-        pollux.lensing.BornLensingBuilder
-            Lensing builder configured with ``nzs='zsnapshots'``.
+        pollux.lensing.SnapshotBornLensingBuilder
         """
-        return BornLensingBuilder(self, nzs='zsnapshots', kappa_dir=kappa_dir, wsp_dir=self.wsp_dir)
+        return SnapshotBornLensingBuilder(self, tag=tag)
 
     def _dndz(self, zz):
         """Return a normalized redshift distribution proportional to dV/dz.
@@ -702,16 +711,17 @@ class ShellBuilder(MapBuilder):
         area = hp.nside2pixarea(self.nside, degrees=degrees)
         return self.pixel_density(ishell) / area
 
-    def combine_maps_subs(self, ishells=None, add_orphans=False):
+    def combine_maps_subs(self, ishells=None, allow_missing_subs=False):
         """Sum per-subvolume shell maps into final per-shell maps.
 
         Parameters
         ----------
         ishells : int or array_like of int or None, optional
             Shell indices to combine. If None, combines all shells.
-        add_orphans : bool, optional
-            If True, also add an ``orphan`` map stored under ``sub='orphan'``.
-            This is used by some interpolation/lightcone workflows.
+        allow_missing_subs : bool, optional
+            If True, iterate sub indices and skip missing files silently.
+            Deprecated — only kept as a workaround for incomplete runs where
+            not all sub-files were produced. Prefer completing all subs first.
 
         Returns
         -------
@@ -720,6 +730,11 @@ class ShellBuilder(MapBuilder):
               ``HealSparseMap``.
             - If ``ishells`` is ``None`` or an iterable: returns a dict keyed
               by shell index with combined ``HealSparseMap`` values.
+
+        Notes
+        -----
+        Orphan particles are added when ``self.add_orphans`` is True
+        (set on :class:`SnapshotInterpBuilder`; False everywhere else).
         """
         shells = {}
 
@@ -733,13 +748,21 @@ class ShellBuilder(MapBuilder):
 
             shell = healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
             shell.update_values_pix(ipix, self.dtype(0), nest=True)  # initialize to zero on valid pixels
-            isubs = self.reader.get_isubs_for_snapshot(ishell)
-            for isub in tqdm(isubs, desc=f"[combine_maps_subs: shell {ishell}]", leave=False):
-                tmp_shell = self.load_maps(ishell, sub=isub)
-                shell = healsparse.operations.sum_union([shell, tmp_shell])
 
-            if add_orphans:
-                print('Adding the orphan as well!')
+            isubs = self.reader.get_isubs_for_snapshot(ishell)
+            n_subs_added = 0
+            for isub in tqdm(isubs, desc=f"[combine_maps_subs: shell {ishell}]", leave=False):
+                try:
+                    tmp_shell = self.load_maps(ishell, sub=isub)
+                    shell = healsparse.operations.sum_union([shell, tmp_shell])
+                    n_subs_added += 1
+                except FileNotFoundError:
+                    if not allow_missing_subs:
+                        raise
+            if allow_missing_subs:
+                print(f'Sub files found for shell number {ishell} : {n_subs_added} / {len(isubs)}')
+
+            if self.add_orphans:
                 tmp_shell = healsparse.HealSparseMap.read(self.get_fname(ishell, sub='orphan'))
                 shell = healsparse.operations.sum_union([shell, tmp_shell])
 
@@ -792,30 +815,24 @@ class ShellBuilder(MapBuilder):
         Returns
         -------
         ndarray
-            If ``save_density=True``, returns a dense healpix density map derived
-            from the HealSparse map.
-            Otherwise returns a dense healpix *density contrast* map delta, with:
+            Dense healpix density contrast map with:
             - delta = -1 on masked (valid-but-empty) pixels by convention,
             - delta = shell_count/pixel_density - 1 on pixels containing data.
         """
         shell = self.load_maps(ishell)
+        spix = shell.valid_pixels
+        s = shell[spix]
 
-        if self.save_density:
-            return shell.generate_healpix_map(nest=nest)
-        else:
-            spix = shell.valid_pixels
-            s = shell[spix]
+        if not nest:
+            spix = hp.nest2ring(self.nside, spix)
 
-            if not nest:
-                spix = hp.nest2ring(self.nside, spix)
+        _, ipix = self.get_mask(nest=nest, return_ipix=True)
 
-            _, ipix = self.get_mask(nest=nest, return_ipix=True)
+        density = np.zeros(self.npix)
+        density[ipix] = -1.
+        density[spix] = s / self.pixel_density(ishell) - 1.
 
-            density = np.zeros(self.npix)
-            density[ipix] = -1.
-            density[spix] = s / self.pixel_density(ishell) - 1.
-
-            return density
+        return density
 
     def _noise_cls(self, ishell):
         """Return the Poisson shot-noise level for shell density maps.
@@ -833,6 +850,49 @@ class ShellBuilder(MapBuilder):
         """
         return 1. / self.sky_density(ishell)
 
+    def compute_smoothed_density_maps(self, ishells=None, smooth_Mpc=None, lmax=None, replicate_octant=False):
+        """Compute and save Gaussian-smoothed density maps.
+
+        Parameters
+        ----------
+        ishells : int or array_like of int or None, optional
+            Shell indices to process. If None, process all.
+        smooth_Mpc : float
+            Physical Gaussian smoothing scale in Mpc. The angular width per
+            shell is ``sigma = smooth_Mpc / chi_mid`` where ``chi_mid`` is the
+            shell midpoint comoving distance.
+        lmax : int or None, optional
+            Maximum multipole for harmonic transforms. Defaults to ``3*nside - 1``.
+        replicate_octant : bool, optional
+            If True, recompute a_lm from octant maps replicated to full sky.
+
+        Returns
+        -------
+        healsparse.HealSparseMap or dict
+            Smoothed density map(s), written to disk as ``what=f'density_{smooth_Mpc}Mpc'``.
+        """
+        assert smooth_Mpc is not None and smooth_Mpc > 0.
+        
+        if lmax is None:
+            lmax = 3 * self.nside - 1
+            
+        chi_bins = self.shell_edges_comoving_distance()
+        _, ipix = self.get_mask(nest=False, return_ipix=True)
+        
+        maps = {}
+        for ishell in self.tqdm(ishells, desc="[compute_smoothed_density]"):
+            # Check if the smoothed map already exists on disk
+            fname = self.get_fname(ishell, what='density', smooth_Mpc=smooth_Mpc)
+            existing = self.check_maps(read=True, fname=fname)
+            if existing is not None:
+                maps[ishell] = existing
+                continue
+
+            alm = self.compute_alms(ishell, save=not replicate_octant, replicate_octant=replicate_octant, pol=False, lmax=lmax)
+            maps[ishell] = self._smooth_alms(ishell, alm, smooth_Mpc / chi_bins[ishell + 1], ipix, lmax, what='density', smooth_Mpc=smooth_Mpc)
+            
+        return maps[ishells] if type(ishells) is int else maps
+
     def compute_tidal_tensor_maps(self, ishells=None, smooth_Mpc=None, lmax=None, replicate_octant=False):
         """Compute tidal tensor component maps from shell density maps.
 
@@ -846,7 +906,8 @@ class ShellBuilder(MapBuilder):
             Shell indices to process. If None, process all.
         smooth_Mpc : float or None, optional
             If provided, smooths a_lm with a Gaussian of angular width
-            ``sigma = smooth_Mpc / chi_shell``.
+            ``sigma = smooth_Mpc / chi_mid`` where ``chi_mid`` is the shell
+            midpoint comoving distance. Also saves the smoothed density map.
         lmax : int or None, optional
             Maximum multipole used for harmonic transforms. Defaults to
             ``3*nside - 1``.
@@ -865,33 +926,31 @@ class ShellBuilder(MapBuilder):
         if lmax is None:
             lmax = 3 * self.nside - 1
 
+        chi_bins = self.shell_edges_comoving_distance()
         _, ipix = self.get_mask(nest=False, return_ipix=True)
-
-        if smooth_Mpc is not None:
-            assert smooth_Mpc > 0.
-            whats = [f't11_{smooth_Mpc}Mpc', f't22_{smooth_Mpc}Mpc', f't12_{smooth_Mpc}Mpc']
-        else:
-            whats = ['t11', 't22', 't12']
+        whats = ['t11', 't22', 't12']
 
         ts = {}
         for ishell in self.tqdm(ishells, desc="[compute_tidal_tensor]"):
-            alm_E = self.compute_alms(ishell, save=not (replicate_octant), replicate_octant=replicate_octant, pol=False, lmax=lmax)
+            t11 = self.check_maps(read=True, fname=self.get_fname(ishell, what='t11', smooth_Mpc=smooth_Mpc))
+            t22 = self.check_maps(read=True, fname=self.get_fname(ishell, what='t22', smooth_Mpc=smooth_Mpc))
+            t12 = self.check_maps(read=True, fname=self.get_fname(ishell, what='t12', smooth_Mpc=smooth_Mpc))
+            if t11 is not None and t22 is not None and t12 is not None:
+                ts[ishell] = [t11, t22, t12]
+                continue
+
+            alm = self.compute_alms(ishell, save=not replicate_octant, replicate_octant=replicate_octant, pol=False, lmax=lmax)
 
             if smooth_Mpc is not None:
-                sigma = smooth_Mpc / self.shell_edges_comoving_distance()[ishell]
-                hp.sphtfunc.smoothalm(
-                    alm_E,
-                    sigma=sigma,
-                    pol=False,
-                    inplace=True,
-                )
+                density_hsp = self._smooth_alms(ishell, alm, smooth_Mpc / chi_bins[ishell + 1], ipix, lmax, what='density', smooth_Mpc=smooth_Mpc)
+                density = density_hsp.generate_healpix_map(nest=False)[ipix]
+                # alm is now smoothed inplace — reuse for spin-2 transform below
+            else:
+                density = self.get_field_map(ishell, nest=False)[ipix]
 
-            Q, U = hp.alm2map_spin((alm_E, np.zeros_like(alm_E)), self.nside, spin=2, lmax=lmax)
-
+            Q, U = hp.alm2map_spin((alm, np.zeros_like(alm)), self.nside, spin=2, lmax=lmax)
             Q = Q[ipix]
             U = U[ipix]
-
-            density = self.get_field_map(ishell, nest=False)[ipix]
 
             # In 2D cartesian, s11(k)+s22(k)=delta(k)
             # In the spherical polarization framework, we have:
@@ -910,7 +969,7 @@ class ShellBuilder(MapBuilder):
             for what, val in zip(whats, vals):
                 hsp = healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
                 hsp.update_values_pix(ipix, val.astype(self.dtype), nest=False)
-                hsp.write(self.get_fname(ishell, what=what), clobber=True, format=self.save_format)
+                hsp.write(self.get_fname(ishell, what=what, smooth_Mpc=smooth_Mpc), clobber=True, format=self.save_format)
                 ts[ishell].append(hsp)
 
         return ts[ishells] if type(ishells) is int else ts
@@ -924,7 +983,7 @@ class SnapshotShellBuilder(ShellBuilder):
     periodic snapshot box in comoving coordinates.
     """
 
-    def __init__(self, reader, nside, save_dir, shell_edges_match='center_scale_factor', **kwargs):
+    def __init__(self, reader, nside, save_dir=None, root_dir=None, shell_edges_match='center_scale_factor', **kwargs):
         """Initialize a snapshot-based shell builder.
 
         Parameters
@@ -933,8 +992,11 @@ class SnapshotShellBuilder(ShellBuilder):
             Simulation snapshot reader.
         nside : int
             Healpix nside of the shell maps.
-        save_dir : str or None
-            Output directory.
+        save_dir : str or None, optional
+            Explicit output directory.  Mutually exclusive with ``root_dir``.
+        root_dir : str or None, optional
+            Root directory; the builder computes
+            ``{root_dir}/nside{nside}/seed{seed}/shells/`` automatically.
         shell_edges_match : {'center_redshift','center_scale_factor','center_comoving_distance','center_comoving_volume'}, optional
             Defines how shell edges are placed relative to snapshot centers.
         **kwargs
@@ -943,7 +1005,7 @@ class SnapshotShellBuilder(ShellBuilder):
 
         self.shell_edges_match = shell_edges_match
 
-        super().__init__(reader.nsnapshots, reader, nside, save_dir, kind='snapshot', **kwargs)
+        super().__init__(reader.nsnapshots, reader, nside, save_dir=save_dir, root_dir=root_dir, **kwargs)
 
     def construct_maps_sub(self, ishell, isub, ijob=None, verbose=False, get_replicates_only=False, fast=True):
         """Construct a single shell map for one snapshot/sub-volume.
@@ -1077,15 +1139,15 @@ class SnapshotShellBuilder(ShellBuilder):
         if len(idx) > 0:
             return np.concatenate(idx), np.concatenate(ra), np.concatenate(dec), np.concatenate(r)
         else:
-            return [np.array([])] * 4
+            return np.array([], dtype=np.intp), np.array([]), np.array([]), np.array([])
 
-    def construct_catalog(self, ishell, extra_columns=[], **kwargs):
+    def construct_catalogs(self, ishells=None, extra_columns=[], **kwargs):
         """Construct and save a per-shell (halo/particle) FITS catalog.
 
         Parameters
         ----------
-        ishell : int
-            Shell index.
+        ishells : int or array_like of int or None, optional
+            Shell indices to construct. If None, constructs all shells.
         extra_columns : list of str, optional
             Extra properties to load using ``reader.read_props`` and store as
             additional FITS columns.
@@ -1094,93 +1156,116 @@ class SnapshotShellBuilder(ShellBuilder):
 
         Returns
         -------
-        astropy.io.fits.HDUList
-            FITS HDU list (primary HDU + one table HDU per sub-volume).
+        astropy.io.fits.HDUList or dict
+            - If ``ishells`` is a single int: returns a FITS HDU list
+              (primary HDU + one table HDU per sub-volume).
+            - If ``ishells`` is ``None`` or an iterable: returns a dict keyed
+              by shell index with FITS HDU list values.
 
         Notes
         -----
         Output filename is ``what='haloes'`` under :meth:`get_fname`.
         """
-        isubs = self.reader.get_isubs_for_snapshot(ishell)
+        out = {}
+        
+        for ishell in self.tqdm(ishells, desc="[construct_catalogs]"):
+            isubs = self.reader.get_isubs_for_snapshot(ishell)
 
-        fname = self.get_fname(ishell, what='haloes')
+            fname = self.get_fname(ishell, what='haloes')
 
-        if os.path.exists(fname):
-            try:
-                return fits.open(fname)
-            except:
-                pass
+            if os.path.exists(fname):
+                try:
+                    return fits.open(fname)
+                except:
+                    pass
 
-        hdul = [fits.PrimaryHDU()]
+            hdul = [fits.PrimaryHDU()]
 
-        for isub in self.tqdm(isubs, desc=f"[construct_halo_catalog: shell {ishell}]"):
-            # Construct catalog for simulation sub-volume/snapshot
-            res = self.construct_catalog_sub(ishell, isub, **kwargs)
+            for isub in self.tqdm(isubs, desc=f"[construct_catalogs: shell {ishell}]"):
+                # Construct catalog for simulation sub-volume/snapshot
+                res = self.construct_catalog_sub(ishell, isub, **kwargs)
 
-            # Build columns for output files
-            idx = fits.Column(name='ihaloes', format='J', array=res[0])
-            ra = fits.Column(name='ra', format='E', array=res[1])
-            dec = fits.Column(name='dec', format='E', array=res[2])
-            r = fits.Column(name='chi', format='E', array=res[3])
-            a = pyccl.scale_factor_of_chi(self.cosmo, res[3])
-            z = fits.Column(name='z', format='E', array=1. / a - 1.)
-            cols = [idx, ra, dec, r, z]
+                # Build columns for output files
+                idx = fits.Column(name='ihaloes', format='J', array=res[0])
+                ra = fits.Column(name='ra', format='E', array=res[1])
+                dec = fits.Column(name='dec', format='E', array=res[2])
+                r = fits.Column(name='chi', format='E', array=res[3])
+                a = pyccl.scale_factor_of_chi(self.cosmo, res[3])
+                z = fits.Column(name='z', format='E', array=1. / a - 1.)
+                cols = [idx, ra, dec, r, z]
 
-            # Add extra columns
-            if len(extra_columns) > 0:
-                tmp = self.reader.read_props(ishell, isub, extra_columns, ihaloes=res[0])
-                for name, array in tmp.items():
-                    cols.append(fits.Column(name=name, format='E', array=array))
+                # Add extra columns
+                if len(extra_columns) > 0:
+                    tmp = self.reader.read_props(ishell, isub, extra_columns, ihaloes=res[0])
+                    for name, array in tmp.items():
+                        cols.append(fits.Column(name=name, format='E', array=array))
 
-            header = fits.Header()
-            header[f'ISUB'] = isub
-            header[f'ZSNAP'] = self.reader.zsnapshots[ishell]
+                header = fits.Header()
+                header[f'ISUB'] = isub
+                header[f'ZSNAP'] = self.reader.zsnapshots[ishell]
 
-            hdul.append(fits.BinTableHDU.from_columns(cols, header))
+                hdul.append(fits.BinTableHDU.from_columns(cols, header))
 
-        fits.HDUList(hdul).writeto(fname, overwrite=True)
+            fits.HDUList(hdul).writeto(fname, overwrite=True)
+            
+            out[ishell] = hdul
 
-        return hdul
+        return out[ishells] if type(ishells) is int else out
 
-    def read_catalogs_props(self, ishell, variables):
+    def read_catalogs_props(self, ishells, variables, save=False):
         """Read variables from a previously constructed catalog (and/or reader).
 
         Parameters
         ----------
-        ishell : int
-            Shell index.
+        ishells : int or array_like of int or None, optional
+            Shell indices to read. If None, reads all shells.
         variables : list of str
             Variables to return. The special variables ``'ra'``, ``'dec'``,
             ``'chi'`` and ``'z'`` are read directly from the catalog; any other
             names are loaded from the reader via :meth:`reader.read_props`.
+        save : bool, optional
+            If True, saves the returned variables as a new FITS file with
+            ``what='haloes_props'`` under :meth:`get_fname`. This is useful
+            for caching variables loaded from the reader that are not stored in the
+            original catalog file.
 
         Returns
         -------
         dict
-            Dictionary mapping variable name to 1D concatenated numpy arrays.
+            - If ``ishells`` is a single int: mapping from variable name to 1D
+              concatenated numpy arrays.
+            - If ``ishells`` is ``None`` or an iterable: mapping from shell
+              index to the per-shell variable dicts described above.
         """
-        fname = self.get_fname(ishell, what='haloes')
-        hdul = fits.open(fname)
+        out = {}
+        
+        for ishell in self.tqdm(ishells, desc="[read_catalogs_props]"):
+            fname = self.get_fname(ishell, what='haloes')
+            hdul = fits.open(fname)
 
-        out = {k: [] for k in variables}
+            out[ishell] = {k: [] for k in variables}
 
-        catalog_variables = [v for v in variables if v in ['ra', 'dec', 'chi', 'z']]
-        props_variables = [v for v in variables if v not in ['ra', 'dec', 'chi', 'z']]
+            catalog_variables = [v for v in variables if v in ['ra', 'dec', 'chi', 'z']]
+            props_variables = [v for v in variables if v not in ['ra', 'dec', 'chi', 'z']]
 
-        for hdu in self.tqdm(hdul[1:], desc="[read_catalogs_props]"):
-            if len(props_variables) > 0:
-                isub = hdu.header['ISUB']
-                tmp = self.reader.read_props(ishell, isub, props_variables, ihaloes=hdu.data['ihaloes'])
-                for k in props_variables:
-                    out[k].append(tmp[k])
-            if len(catalog_variables) > 0:
-                for k in catalog_variables:
-                    out[k].append(hdu.data[k])
+            for hdu in self.tqdm(hdul[1:], desc=f"[read_catalogs_props: shell {ishell}]"):
+                if len(props_variables) > 0:
+                    isub = hdu.header['ISUB']
+                    tmp = self.reader.read_props(ishell, isub, props_variables, ihaloes=hdu.data['ihaloes'])
+                    for k in props_variables:
+                        out[ishell][k].append(tmp[k])
+                if len(catalog_variables) > 0:
+                    for k in catalog_variables:
+                        out[ishell][k].append(hdu.data[k])
 
-        for k in variables:
-            out[k] = np.concatenate(out[k])
+            for k in variables:
+                out[ishell][k] = np.concatenate(out[ishell][k])
 
-        return out
+            if save:
+                fname = self.get_fname(ishell, what='haloes_props')
+                fits.HDUList([fits.PrimaryHDU(out[ishell])]).writeto(fname, overwrite=True)
+
+        return out[ishells] if type(ishells) is int else out
 
 
 class LightconeSlicingBuilder(ShellBuilder):
@@ -1191,7 +1276,7 @@ class LightconeSlicingBuilder(ShellBuilder):
     into a shell map.
     """
 
-    def __init__(self, reader, nside, save_dir, shell_edges_match='center_scale_factor', **kwargs):
+    def __init__(self, reader, nside, save_dir=None, root_dir=None, shell_edges_match='center_scale_factor', **kwargs):
         """Initialize a lightcone slicing builder.
 
         Parameters
@@ -1201,8 +1286,11 @@ class LightconeSlicingBuilder(ShellBuilder):
             ``read_sub(isnapshot, isub)`` for lightcone snapshots.
         nside : int
             Healpix nside of the shell maps.
-        save_dir : str or None
-            Output directory.
+        save_dir : str or None, optional
+            Explicit output directory.  Mutually exclusive with ``root_dir``.
+        root_dir : str or None, optional
+            Root directory; the builder computes
+            ``{root_dir}/nside{nside}/seed{seed}/shells/`` automatically.
         shell_edges_match : str, optional
             Shell-edge placement strategy (same meaning as for SnapshotShellBuilder).
         **kwargs
@@ -1211,7 +1299,7 @@ class LightconeSlicingBuilder(ShellBuilder):
 
         self.shell_edges_match = shell_edges_match
 
-        super().__init__(reader.nsnapshots, reader, nside, save_dir, kind='snapshot', **kwargs)
+        super().__init__(reader.nsnapshots, reader, nside, save_dir=save_dir, root_dir=root_dir, **kwargs)
 
     def construct_maps_sub(self, ishell, isub, ijob=None, verbose=False):
         """Construct a single shell map for one lightcone sub-volume.
@@ -1306,63 +1394,19 @@ class LightconeSlicingBuilder(ShellBuilder):
 
         return shell
 
-    def combine_maps_subs(self, ishells=None):
-        """Combine per-sub shell maps into final shells (lightcone slicing mode).
-
-        Parameters
-        ----------
-        ishells : int or array_like of int or None, optional
-            Shell indices to combine. If None, combines all shells.
-
-        Returns
-        -------
-        healsparse.HealSparseMap or dict
-            - If ``ishells`` is a single int: returns a single combined
-              ``HealSparseMap``.
-            - If ``ishells`` is ``None`` or an iterable: returns a dict keyed
-              by shell index with combined ``HealSparseMap`` values.
-        """
-        shells = {}
-
-        _, ipix = self.get_mask(nest=True, return_ipix=True)
-        for ishell in self.tqdm(ishells, desc="[combine_maps_subs]"):
-            fname = self.get_fname(ishell)
-            shell = self.check_maps(read=True, fname=fname)
-            if shell is not None:
-                shells[ishell] = shell
-                continue
-
-            shell = healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
-            shell.update_values_pix(ipix, self.dtype(0), nest=True)  # initialize to zero on valid pixels
-            isubs = range(1000)
-            n_subs_added = 0
-            for isub in tqdm(isubs, desc=f"[combine_maps_subs: shell {ishell}]", leave=False):
-                try:
-                    tmp_shell = self.load_maps(ishell, sub=isub)
-                    shell = healsparse.operations.sum_union([shell, tmp_shell])
-                    n_subs_added += 1
-                except FileNotFoundError:
-                    continue
-            if n_subs_added != 0:
-                shell.write(fname, clobber=True, format=self.save_format, nocompress=self.nocompress)
-            else:
-                print('Zero sub files found for shell number ' + str(ishell) + '!')
-
-            shells[ishell] = shell
-
-        return shells[ishells] if type(ishells) is int else shells
-
-
 class SnapshotInterpBuilder(ShellBuilder):
     """ShellBuilder that interpolates particle worldlines between snapshots.
 
     This builder treats consecutive snapshot boxes as endpoints of particle
     worldlines and finds their intersections with a lightcone defined by a
     sequence of scale factors. It supports orphan handling when particles appear
-    or disappear between snapshots.
+    or disappear between snapshot subvolumes.
     """
 
-    def __init__(self, reader, nside, save_dir, **kwargs):
+    add_orphans = True
+    kind = 'lightcone'
+
+    def __init__(self, reader, nside, save_dir=None, root_dir=None, **kwargs):
         """Initialize a snapshot-interpolation builder.
 
         Parameters
@@ -1371,8 +1415,11 @@ class SnapshotInterpBuilder(ShellBuilder):
             Reader providing at least consecutive snapshots and particle ids.
         nside : int
             Healpix nside of the shell maps.
-        save_dir : str or None
-            Output directory.
+        save_dir : str or None, optional
+            Explicit output directory.  Mutually exclusive with ``root_dir``.
+        root_dir : str or None, optional
+            Root directory; the builder computes
+            ``{root_dir}/nside{nside}/seed{seed}/shells/`` automatically.
         **kwargs
             Forwarded to :class:`ShellBuilder`.
 
@@ -1381,7 +1428,7 @@ class SnapshotInterpBuilder(ShellBuilder):
         This builder uses ``kind='lightcone'`` with ``nshells = nsnapshots - 1``.
         """
 
-        super().__init__(reader.nsnapshots - 1, reader, nside, save_dir, kind='lightcone', **kwargs)
+        super().__init__(reader.nsnapshots - 1, reader, nside, save_dir=save_dir, root_dir=root_dir, **kwargs)
 
     def construct_maps_sub(self, isnap, isub, ijob=None, verbose=False, replicate_ixyz=None, get_replicates_only=False, fast=True, do_orphan_ishell=None):
         """Construct one interpolated lightcone shell map for a sub-volume.

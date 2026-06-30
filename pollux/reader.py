@@ -1,9 +1,13 @@
+from __future__ import annotations
+
 import itertools
 import os
 import warnings
 from time import time
+from typing import Any
 
 import numpy as np
+from numpy.typing import NDArray
 import pyccl
 from pynverse import inversefunc
 
@@ -64,7 +68,17 @@ class Reader:
     subclasses also implement :meth:`read_props`.
     """
 
-    def __init__(self, cosmo, kind, unit, nparticles, zsnapshots, zmax, nsubs, dtype=np.float64):
+    def __init__(
+        self,
+        cosmo: pyccl.Cosmology,
+        kind: str,
+        unit: str,
+        nparticles: int,
+        zsnapshots: NDArray,
+        zmax: float | None,
+        nsubs: int,
+        dtype: Any = np.float64,
+    ) -> None:
         self.cosmo = cosmo
         self.kind = kind
 
@@ -93,7 +107,7 @@ class Reader:
 
         self.dtype = dtype
 
-    def get_job_args(self, ijob):
+    def get_job_args(self, ijob: int) -> tuple[int, int]:
         """Return ``(isnapshot, isub)`` for a global job index.
 
         Parameters
@@ -110,7 +124,7 @@ class Reader:
         """
         return self._job_args[ijob]
 
-    def get_isubs_for_snapshot(self, isnapshot):
+    def get_isubs_for_snapshot(self, isnapshot: int) -> NDArray:
         """Return global job indices for all sub-volumes of one snapshot.
 
         Parameters
@@ -125,7 +139,7 @@ class Reader:
         """
         return np.array([x[1] for x in self._job_args if x[0] == isnapshot])  # in case self._jobs_args is overwritten in subclasses
 
-    def get_ijobs_for_snapshot(self, isnapshot):
+    def get_ijobs_for_snapshot(self, isnapshot: int) -> NDArray:
         """Return global job indices for all sub-volumes of one snapshot.
 
         Parameters
@@ -140,7 +154,7 @@ class Reader:
         """
         return np.array([i for i, x in enumerate(self._job_args) if x[0] == isnapshot])  # in case self._jobs_args is overwritten in subclasses
 
-    def boxsize(self):
+    def boxsize(self) -> float:
         """Return the (comoving) box side length in Mpc.
 
         Returns
@@ -157,13 +171,13 @@ class Reader:
 
     def read_sub(
         self,
-        isnapshot,
-        isub,
-        assert_xyz_in_box=False,
-        read_box_edges_only=False,
-        extra_variables=None,
-        verbose=False,
-    ):
+        isnapshot: int,
+        isub: int,
+        assert_xyz_in_box: bool = False,
+        read_box_edges_only: bool = False,
+        extra_variables: list[str] | None = None,
+        verbose: bool = False,
+    ) -> tuple[NDArray, NDArray] | tuple[NDArray, NDArray, dict[str, NDArray]]:
         """Read a snapshot sub-volume and return particle positions.
 
         Parameters
@@ -200,7 +214,14 @@ class Reader:
         """
         raise NotImplementedError
 
-    def read_props(self, isnapshot, isub, props_variables, ihaloes=slice(-1), verbose=False):
+    def read_props(
+            self,
+            isnapshot: int,
+            isub: int,
+            props_variables: list[str],
+            ihaloes: slice | NDArray = slice(-1),
+            verbose: bool = False,
+    ) -> dict[str, NDArray]:
         """Read extra per-object properties for a snapshot sub-volume.
 
         Parameters
@@ -228,7 +249,7 @@ class Reader:
         """
         raise NotImplementedError
 
-    def box_comoving_density(self):
+    def box_comoving_density(self) -> float:
         """Return the comoving particle number density.
 
         Returns
@@ -268,15 +289,15 @@ class SLICSReader(Reader):
 
     def __init__(
         self,
-        path,
-        cosmo,
-        boxsize=505.0 / 0.6898,
-        nparticles=1536**3,
-        nodes_dim=4,
-        ncc=768,
-        rnc=3072.0,
-        zmax=None,
-    ):
+        path: str,
+        cosmo: pyccl.Cosmology,
+        boxsize: float = 505.0 / 0.6898,
+        nparticles: int = 1536**3,
+        nodes_dim: int = 4,
+        ncc: int = 768,
+        rnc: float = 3072.0,
+        zmax: float | None = None,
+    ) -> None:
         self.path = path
         self._boxsize = float(boxsize)
         self.nodes_dim = int(nodes_dim)
@@ -291,11 +312,19 @@ class SLICSReader(Reader):
 
         super().__init__(cosmo, "slics", "Mpc", nparticles, zsnapshots, zmax, nsubs, dtype=np.float32)
 
-    def boxsize(self):
+    def boxsize(self) -> float:
         """Return the simulation box side length in Mpc."""
         return self._boxsize
 
-    def read_sub(self, isnapshot, isub, assert_xyz_in_box=False, read_box_edges_only=False, extra_variables=None, verbose=False):
+    def read_sub(
+        self,
+        isnapshot: int,
+        isub: int,
+        assert_xyz_in_box: bool = False,
+        read_box_edges_only: bool = False,
+        extra_variables: list[str] | None = None,
+        verbose: bool = False,
+    ) -> tuple[NDArray, NDArray]:
         """Read a SLICS snapshot sub-volume.
 
         Parameters
@@ -378,9 +407,8 @@ class HACCReader(Reader):
     ----------
     path : str
         Root path to the HACC simulation outputs.
-    run_params : str, optional
-        Relative path to the HACC parameter file. Default is
-        ``'run/run000/indat.params'``.
+    run_params : str
+        Relative path to the HACC parameter file.
     snap_sub_zmax : float or None, optional
         If provided, keep only snapshots with ``z <= snap_sub_zmax``.
     snap_sub_aminstep : float, optional
@@ -390,7 +418,7 @@ class HACCReader(Reader):
         in scale factor, keeping roughly this many snapshots.
     snap_sub_every_n : int, optional
         Keep every n-th snapshot after other selections. Default is 1.
-    snap_sub_index : array_like of int or None, optional
+    snapshots : array_like of int or None, optional
         If provided, use this list of snapshot steps. Otherwise, use the steps
         from the parameter file (and optionally check the output directory).
     group_along_x : bool, optional
@@ -402,109 +430,48 @@ class HACCReader(Reader):
 
     def __init__(
         self,
-        path,
-        run_params="run/run000/indat.params",
-        snap_sub_zmax=None,
-        snap_sub_aminstep=0.0,
-        snap_sub_match_dist_n=False,
-        snap_sub_every_n=1,
-        snap_sub_index=None,
-        group_along_x=False,
-        matter_power_spectrum=None,
-    ):
+        path: str,
+        run_params: str,
+        snap_sub_zmax: float | None = None,
+        snap_sub_aminstep: float = 0.0,
+        snap_sub_match_dist_n: bool | int = False,
+        snap_sub_every_n: int = 1,
+        snapshots: NDArray | None = None,
+        group_along_x: bool = False,
+        matter_power_spectrum: Any | None = None,
+        **kwargs,
+    ) -> None:
         self.path = path
         self.group_along_x = group_along_x
-        self.variables = ["x", "y", "z"]
+        self.variables: list[str] = ["x", "y", "z"]
 
         print("*** HACC reader ***")
 
-        # Read run parameters
-        fname = os.path.join(path, run_params)
-        print("  - Reading parameter file at", fname)
-        params = read_params(fname)
-
-        # Build CCL cosmology
-        cosmo_dict = dict(
-            Omega_c=float(params["OMEGA_CDM"]),
-            Omega_b=float(params["DEUT"]) / float(params["HUBBLE"])**2,
-            h=float(params["HUBBLE"]),
-            n_s=float(params["NS"]),
-            sigma8=float(params["SS8"]),
-            Neff=3.046,
-            w0=float(params["W_DE"]),
-            wa=float(params["WA_DE"]),
-            T_CMB=2.726,
-            Omega_k=0.0,
+        # Read run parameters and build cosmology
+        cosmo, params, snapshots_all, boxsize_h, sim_zmax, sim_zmin = _read_hacc_params(
+            path, run_params, matter_power_spectrum=matter_power_spectrum
         )
-        if matter_power_spectrum is not None:
-            cosmo_dict["matter_power_spectrum"] = matter_power_spectrum
-        cosmo = pyccl.Cosmology(**cosmo_dict)
-        print("  - Cosmology", cosmo)
 
-        # Snapshot list in parameter file
         nsteps = int(params["N_STEPS"])
-        sim_zmax = float(params["Z_IN"])
-        sim_zmin = float(params["Z_FIN"])
+        get_asnapshots_func = _get_asnapshots(snapshots_all, nsteps, sim_zmax, sim_zmin)
 
-        snapshots = np.array(list(map(int, params["ALIVE_DUMP"].split())))
-        snapshot_dir = os.path.join(path, "output")
-        if os.path.exists(snapshot_dir):
-            try:
-                snapshot_dirs = os.listdir(snapshot_dir)
-                snapshots_output = np.array([i for i in range(nsteps) if f"STEP{i}" in snapshot_dirs])
-                np.testing.assert_array_equal(snapshots, snapshots_output)
-            except AssertionError:
-                snapshots = snapshots_output
-                warnings.warn("Using snapshots found in the `output` folder, which do not match those in the parameter file.")
-        print(f"  - Found {len(snapshots)} snapshots :", snapshots)
-
-        def get_asnapshots(idx):
-            """Return scale factors for given step indices."""
-            asnapshots_all = np.linspace(1.0 / (1.0 + sim_zmax), 1.0 / (1.0 + sim_zmin), nsteps + 1)[1:]
-            return asnapshots_all[idx]
-
-        if snap_sub_index is not None:
-            self.snapshots = snap_sub_index
+        # Handle snapshot subsampling
+        if snapshots is not None:
+            self.snapshots = snapshots
         else:
-            # Subsample: minimum minimum step in scale factor
-            if snap_sub_aminstep > 0.0:
-                _, idx = trim(get_asnapshots(snapshots), snap_sub_aminstep, return_indices=True)
-                print(f"  - Subsampling : minimum a step {snap_sub_aminstep}, returns {len(idx)} snapshots")
-                snapshots = snapshots[idx]
-    
-            # Subsample: maximum redshift
-            if snap_sub_zmax is not None:
-                w = np.argwhere(get_asnapshots(snapshots) > 1.0 / (1.0 + snap_sub_zmax))
-                if len(w) > 0:
-                    snapshots = snapshots[w[0, 0]:]
-                    print(f"  - Subsampling : max redshift {snap_sub_zmax}, returns {len(snapshots)} snapshots")
-    
-            # Subsample: match inferred bimodal distribution
-            if snap_sub_match_dist_n:
-                aa = get_asnapshots(snapshots)
-                
-                # multimodal distribution in scale factor, need ppf (computed numerically)
-                s1, s2, lam = 0.12, 0.27, 0.4
-                amin = np.min(aa)
-                t1 = trunc_norm(amin, 1.0, 0.5, s1)
-                t2 = trunc_norm(amin, 1.0, 1.0, s2)
-                cdf = lambda a: lam * t1.cdf(a) + (1 - lam) * t2.cdf(a)
-                ppf = inversefunc(cdf, domain=[amin, 1.0], image=[0.0, 1.0])
-    
-                idx, _ = subsample_ppf(aa, snap_sub_match_dist_n, ppf)
-                if len(idx) < len(snapshots):
-                    print(f"  - Subsampling : match distribution, returns {len(idx)} snapshots")
-                snapshots = snapshots[idx]
-    
-            # Subsample: keep every n-th snapshot (snapshots ordered by redshift)
-            self.snapshots = snapshots[::-snap_sub_every_n]
-            if snap_sub_every_n > 1:
-                print(f"  - Subsampling : keeping every {snap_sub_every_n} snapshots, returns {len(self.snapshots)} snapshots")
+            self.snapshots = _subsample_hacc_snapshots(
+                snapshots_all,
+                get_asnapshots_func,
+                snap_sub_aminstep=snap_sub_aminstep,
+                snap_sub_zmax=snap_sub_zmax,
+                snap_sub_match_dist_n=snap_sub_match_dist_n,
+                snap_sub_every_n=snap_sub_every_n,
+            )
 
-        zsnapshots = 1.0 / get_asnapshots(self.snapshots) - 1.0
+        zsnapshots = 1.0 / get_asnapshots_func(self.snapshots) - 1.0
 
         # Simulation properties
-        self.boxsize_h = float(params["RL"])
+        self.boxsize_h = boxsize_h
         nparticles = int(params["NP"])**3
         dtype = np.float32
 
@@ -518,11 +485,11 @@ class HACCReader(Reader):
         nsub = 16 if self.group_along_x else 64
         super().__init__(cosmo, "hacc", "Mpc_over_h", nparticles, zsnapshots, snap_sub_zmax, nsub, dtype=dtype)
 
-    def boxsize(self):
+    def boxsize(self) -> float:
         """Return the simulation box side length in Mpc."""
         return self.boxsize_h / self.cosmo["h"]
 
-    def _read_sub_helper(self, isnapshot, isub):
+    def _read_sub_helper(self, isnapshot: int, isub: int) -> tuple[NDArray, int]:
         """Return (box_edges, step) for a given snapshot/sub-volume."""
         snapshot = self.snapshots[isnapshot]
         boxsize = self.boxsize()
@@ -539,11 +506,19 @@ class HACCReader(Reader):
 
         return box_edges.astype(self.dtype), snapshot
 
-    def _get_name(self, step, isub):
+    def _get_name(self, step: int, isub: int) -> str:
         """Return the GenericIO file name for a given step/sub-volume."""
         return os.path.join(self.path, "output", f"STEP{step}/m000.full.mpicosmo.{step}#{isub}")
 
-    def read_sub(self, isnapshot, isub, assert_xyz_in_box=False, read_box_edges_only=False, extra_variables=None, verbose=False):
+    def read_sub(
+        self,
+        isnapshot: int,
+        isub: int,
+        assert_xyz_in_box: bool = False,
+        read_box_edges_only: bool = False,
+        extra_variables: list[str] | None = None,
+        verbose: bool = False,
+    ) -> tuple[NDArray, NDArray] | tuple[NDArray, NDArray, dict[str, NDArray]]:
         """Read a HACC snapshot sub-volume.
 
         Parameters
@@ -620,9 +595,10 @@ class HACCLightconeReader(Reader):
     ----------
     path : str
         Root path to the HACC simulation outputs.
-    run_params : str, optional
-        Relative path to the HACC parameter file. Default is
-        ``'run/run000/indat.params'``.
+    run_params : str
+        Relative path to the HACC parameter file.
+    lightcone_path : str
+        Path (relative to ``path``) containing lightcone files.
     snapshots : array_like of int or None, optional
         If provided, use this list of snapshot steps. Otherwise, use the steps
         from the parameter file (and optionally check the output directory).
@@ -638,78 +614,52 @@ class HACCLightconeReader(Reader):
 
     def __init__(
         self,
-        path,
-        run_params="run/run000/indat.params",
-        snapshots=None,
-        snap_sub_zmax=None,
-        snap_sub_every_n=1,
-        matter_power_spectrum=None,
-        nsub=32,
-    ):
+        path: str,
+        run_params: str,
+        lightcone_path: str,
+        snapshots: NDArray | None = None,
+        snap_sub_zmax: float | None = None,
+        snap_sub_every_n: int = 1,
+        matter_power_spectrum: Any | None = None,
+        nsub: int = 32,
+    ) -> None:
         self.path = path
-        self.variables = ["x", "y", "z"]
+        self.lightcone_path = lightcone_path
+        self.variables: list[str] = ["x", "y", "z"]
 
         print("*** HACC lightcone reader ***")
 
-        fname = os.path.join(path, run_params)
-        print("  - Reading parameter file at", fname)
-        params = read_params(fname)
-
-        cosmo_dict = dict(
-            Omega_c=float(params["OMEGA_CDM"]),
-            Omega_b=float(params["DEUT"]) / float(params["HUBBLE"])**2,
-            h=float(params["HUBBLE"]),
-            n_s=float(params["NS"]),
-            sigma8=float(params["SS8"]),
-            Neff=3.046,
-            w0=float(params["W_DE"]),
-            wa=float(params["WA_DE"]),
-            T_CMB=2.726,
-            Omega_k=0.0,
+        # Read run parameters and build cosmology
+        cosmo, params, snapshots_param, boxsize_h, sim_zmax, sim_zmin = _read_hacc_params(
+            path, run_params, matter_power_spectrum=matter_power_spectrum
         )
-        if matter_power_spectrum is not None:
-            cosmo_dict["matter_power_spectrum"] = matter_power_spectrum
-        cosmo = pyccl.Cosmology(**cosmo_dict)
-        print("  - Cosmology", cosmo)
 
         nsteps = int(params["N_STEPS"])
-        sim_zmax = float(params["Z_IN"])
-        sim_zmin = float(params["Z_FIN"])
-        self.nsteps = nsteps
-        self.sim_zmax = sim_zmax
-        self.sim_zmin = sim_zmin
 
         if snapshots is None:
-            snapshots = np.array(list(map(int, params["ALIVE_DUMP"].split())))
-            snapshot_dir = os.path.join(path, "output")
-            if os.path.exists(snapshot_dir):
-                try:
-                    snapshot_dirs = os.listdir(snapshot_dir)
-                    snapshots_output = np.array([i for i in range(nsteps) if f"STEP{i}" in snapshot_dirs])
-                    np.testing.assert_array_equal(snapshots, snapshots_output)
-                except AssertionError:
-                    snapshots = snapshots_output
-                    warnings.warn("Using snapshots found in the `output` folder, which do not match those in the parameter file.")
-            print(f"  - Found {len(snapshots)} snapshots :", snapshots)
+            snapshots_param_list = snapshots_param
+        else:
+            snapshots_param_list = snapshots
 
-        def get_asnapshots(idx):
-            """Return scale factors for given step indices."""
-            asnapshots_all = np.linspace(1.0 / (1.0 + sim_zmax), 1.0 / (1.0 + sim_zmin), nsteps + 1)[1:]
-            return asnapshots_all[idx]
+        get_asnapshots_func = _get_asnapshots(snapshots_param_list, nsteps, sim_zmax, sim_zmin)
 
-        self.snapshots_fulllist = np.copy(snapshots[::-1])
-        self.zsnapshots_fulllist = 1.0 / get_asnapshots(self.snapshots_fulllist) - 1.0
+        # Store full list for lightcone indexing
+        self.snapshots_fulllist = snapshots_param_list[::-1]
+        self.zsnapshots_fulllist = 1.0 / get_asnapshots_func(self.snapshots_fulllist) - 1.0
 
-        self.snapshots = snapshots[::-snap_sub_every_n]
+        # Subsample by every n-th snapshot
+        self.snapshots = snapshots_param_list[::-snap_sub_every_n]
         if snap_sub_every_n > 1:
-            print(f"  - Subsampling : keeping every {snap_sub_every_n} snapshots, returns {len(self.snapshots)} snapshots")
+            print(f"  - Subsampling: keeping every {snap_sub_every_n} snapshots, returns {len(self.snapshots)} snapshots")
 
-        zsnapshots = 1.0 / get_asnapshots(self.snapshots) - 1.0
+        zsnapshots = 1.0 / get_asnapshots_func(self.snapshots) - 1.0
 
-        self.boxsize_h = float(params["RL"])
+        # Simulation properties
+        self.boxsize_h = boxsize_h
         nparticles = int(params["NP"])**3
         dtype = np.float32
 
+        # Sub-volume limits (for consistency with HACCReader)
         self.lims = np.array([[
             [np.floor(ibox / 16) * 0.5, np.floor(ibox / 16) * 0.5 + 2.5],
             [np.floor(ibox / 4) % 4, (np.floor(ibox / 4) % 4) + 1],
@@ -718,15 +668,15 @@ class HACCLightconeReader(Reader):
 
         super().__init__(cosmo, "hacc", "Mpc_over_h", nparticles, zsnapshots, snap_sub_zmax, int(nsub), dtype=dtype)
 
-    def boxsize(self):
+    def boxsize(self) -> float:
         """Return the simulation box side length in Mpc."""
         return self.boxsize_h / self.cosmo["h"]
 
-    def _get_name(self, step, isub):
+    def _get_name(self, step: int, isub: int) -> str:
         """Return the GenericIO lightcone file name for a given step/sub-volume."""
-        return os.path.join(self.path, "Lightcones", f"STEP{step}", f"m000.lc.mpicosmo.{step}#{isub}")
+        return os.path.join(self.path, self.lightcone_path, f"STEP{step}", f"m000.lc.mpicosmo.{step}#{isub}")
 
-    def read_sub(self, isnapshot, isub):
+    def read_sub(self, isnapshot: int, isub: int) -> NDArray:
         """Read one lightcone file and return particle positions.
 
         Parameters
@@ -756,24 +706,30 @@ class HACCHaloReader(HACCReader):
 
     Parameters
     ----------
-    halo_path : str, optional
-        Path (relative to ``path``) containing halo property files. Default is
-        ``'analysis/Halos/b0168/Props'``.
+    halo_path : str
+        Path (relative to ``path``) containing halo property files.
     *args, **kwargs
         Forwarded to :class:`HACCReader`.
     """
 
-    def __init__(self, halo_path="analysis/Halos/b0168/Props", *args, **kwargs):
+    def __init__(self, halo_path: str, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
-        self.variables = ["fof_halo_center_x", "fof_halo_center_y", "fof_halo_center_z"]
+        self.variables: list[str] = ["fof_halo_center_x", "fof_halo_center_y", "fof_halo_center_z"]
         self.halo_path = halo_path
         assert not self.group_along_x
 
-    def _get_name(self, step, isub):
+    def _get_name(self, step: int, isub: int) -> str:
         """Return the GenericIO halo file name for a given step/sub-volume."""
         return os.path.join(self.path, self.halo_path, f"STEP{step}/m000-{step}.haloproperties#{isub}")
 
-    def read_props(self, isnapshot, isub, props_variables, ihaloes=slice(-1), verbose=False):
+    def read_props(
+            self,
+            isnapshot: int,
+            isub: int,
+            props_variables: list[str],
+            ihaloes: slice | NDArray = slice(-1),
+            verbose: bool = False,
+    ) -> dict[str, NDArray]:
         """Read halo properties for one snapshot sub-volume.
 
         Parameters
@@ -828,7 +784,16 @@ class SkySimReader(Reader):
         Maximum redshift considered by downstream products.
     """
 
-    def __init__(self, path, cosmo, nsteps=500, sim_zmin=0.0, sim_zmax=200.0, aminstep=0.0, zmax=None):
+    def __init__(
+        self,
+        path: str,
+        cosmo: pyccl.Cosmology,
+        nsteps: int = 500,
+        sim_zmin: float = 0.0,
+        sim_zmax: float = 200.0,
+        aminstep: float = 0.0,
+        zmax: float | None = None,
+    ) -> None:
         self.path = path
         self.aminstep = aminstep
 
@@ -885,7 +850,15 @@ class MockReader(Reader):
         Maximum redshift considered. Default is 2.
     """
 
-    def __init__(self, cosmo, boxsize=200.0, nsnapshots=3, nsplit=2, nparticule_per_sub=10, zmax=2.0):
+    def __init__(
+        self,
+        cosmo: pyccl.Cosmology,
+        boxsize: float = 200.0,
+        nsnapshots: int = 3,
+        nsplit: int = 2,
+        nparticule_per_sub: int = 10,
+        zmax: float = 2.0,
+    ) -> None:
         self._boxsize = float(boxsize)
         self.xyzs = np.random.uniform(high=self._boxsize, size=(nsplit**3 * nsnapshots, nparticule_per_sub, 3))
 
@@ -895,11 +868,19 @@ class MockReader(Reader):
 
         super().__init__(cosmo, "dummy", "Mpc", nparticles, zsnapshots, zmax, nsubs, dtype=np.float64)
 
-    def boxsize(self):
+    def boxsize(self) -> float:
         """Return the mock box side length in Mpc."""
         return self._boxsize
 
-    def read_sub(self, isnapshot, isub, assert_xyz_in_box=False, read_box_edges_only=False, extra_variables=None, verbose=False):
+    def read_sub(
+        self,
+        isnapshot: int,
+        isub: int,
+        assert_xyz_in_box: bool = False,
+        read_box_edges_only: bool = False,
+        extra_variables: list[str] | None = None,
+        verbose: bool = False,
+    ) -> tuple[NDArray, NDArray]:
         """Return mock particles for one job.
 
         Parameters
@@ -947,5 +928,183 @@ class DummyReader(Reader):
     This is mainly used as a placeholder in APIs that require a Reader instance.
     """
 
-    def __init__(self, cosmo, kind, unit, nsnapshots):
-        super().__init__(cosmo, kind, unit, nparticles=0, zsnapshots=np.zeros(nsnapshots), zmax=None, nsubs=0, dtype=np.float64)
+    def __init__(self, cosmo: pyccl.Cosmology, kind: str, unit: str, nsnapshots: int) -> None:
+        super().__init__(
+            cosmo,
+            kind,
+            unit,
+            nparticles=0,
+            zsnapshots=np.zeros(nsnapshots),
+            zmax=None,
+            nsubs=0,
+            dtype=np.float64,
+        )
+
+
+def _read_hacc_params(
+    path: str,
+    run_params: str,
+    matter_power_spectrum: Any | None = None,
+) -> tuple[pyccl.Cosmology, dict[str, Any], NDArray, float, float, float]:
+    """Read HACC parameter file and build cosmology.
+    
+    Parameters
+    ----------
+    path : str
+        Root path to HACC simulation outputs.
+    run_params : str
+        Relative path to parameter file.
+    matter_power_spectrum : object, optional
+        Matter power spectrum to use when building cosmology from parameters.
+        
+    Returns
+    -------
+    cosmo : pyccl.Cosmology
+        Cosmology object.
+    params : dict
+        Raw parameter dictionary.
+    snapshots : ndarray
+        Snapshot step indices.
+    boxsize_h : float
+        Box size in Mpc/h.
+    sim_zmax : float
+        Initial redshift.
+    sim_zmin : float
+        Final redshift.
+    """
+    fname = os.path.join(path, run_params)
+    print(f"  - Reading parameter file at {fname}")
+    params = read_params(fname)
+
+    cosmo_dict = dict(
+        Omega_c=float(params["OMEGA_CDM"]),
+        Omega_b=float(params["DEUT"]) / float(params["HUBBLE"])**2,
+        h=float(params["HUBBLE"]),
+        n_s=float(params["NS"]),
+        sigma8=float(params["SS8"]),
+        Neff=3.046,
+        w0=float(params["W_DE"]),
+        wa=float(params["WA_DE"]),
+        T_CMB=2.726,
+        Omega_k=0.0,
+    )
+    if matter_power_spectrum is not None:
+        cosmo_dict["matter_power_spectrum"] = matter_power_spectrum
+    cosmo = pyccl.Cosmology(**cosmo_dict)
+    print(f"  - Cosmology {cosmo}")
+
+    nsteps = int(params["N_STEPS"])
+    sim_zmax = float(params["Z_IN"])
+    sim_zmin = float(params["Z_FIN"])
+    boxsize_h = float(params["RL"])
+
+    snapshots = np.array(list(map(int, params["ALIVE_DUMP"].split())))
+    snapshot_dir = os.path.join(path, "output")
+    if os.path.exists(snapshot_dir):
+        try:
+            snapshot_dirs = os.listdir(snapshot_dir)
+            snapshots_output = np.array([i for i in range(nsteps) if f"STEP{i}" in snapshot_dirs])
+            np.testing.assert_array_equal(snapshots, snapshots_output)
+        except AssertionError:
+            snapshots = snapshots_output
+            warnings.warn("Using snapshots found in the `output` folder, which do not match those in the parameter file.")
+    print(f"  - Found {len(snapshots)} snapshots: {snapshots}")
+
+    return cosmo, params, snapshots, boxsize_h, sim_zmax, sim_zmin
+
+
+def _get_asnapshots(snapshots: NDArray, nsteps: int, sim_zmax: float, sim_zmin: float) -> callable:
+    """Compute scale factor function for snapshots.
+    
+    Parameters
+    ----------
+    snapshots : ndarray
+        Snapshot step indices (unused but kept for API clarity).
+    nsteps : int
+        Total number of simulation steps.
+    sim_zmax : float
+        Initial redshift.
+    sim_zmin : float
+        Final redshift.
+        
+    Returns
+    -------
+    asnapshots : ndarray
+        Scale factors array for referencing by snapshot indices.
+    get_asnapshots : callable
+        Function to compute scale factors for any snapshot indices.
+    """
+    asnapshots_all = np.linspace(1.0 / (1.0 + sim_zmax), 1.0 / (1.0 + sim_zmin), nsteps + 1)[1:]
+
+    def get_asnapshots(idx: NDArray) -> NDArray:
+        return asnapshots_all[idx]
+
+    return get_asnapshots
+
+
+def _subsample_hacc_snapshots(
+    snapshots: NDArray,
+    get_asnapshots,
+    snap_sub_aminstep: float = 0.0,
+    snap_sub_zmax: float | None = None,
+    snap_sub_match_dist_n: bool | int = False,
+    snap_sub_every_n: int = 1,
+) -> NDArray:
+    """Subsample HACC snapshots based on various criteria.
+    
+    Parameters
+    ----------
+    snapshots : ndarray
+        Initial snapshot steps.
+    get_asnapshots : callable
+        Function to compute scale factors.
+    snap_sub_aminstep : float
+        Minimum scale factor step.
+    snap_sub_zmax : float or None
+        Maximum redshift cutoff.
+    snap_sub_match_dist_n : bool or int
+        Target for distribution matching.
+    snap_sub_every_n : int
+        Keep every n-th snapshot.
+        
+    Returns
+    -------
+    ndarray
+        Subsampled snapshot steps.
+    """
+    # Subsample: minimum step in scale factor
+    if snap_sub_aminstep > 0.0:
+        _, idx = trim(get_asnapshots(snapshots), snap_sub_aminstep, return_indices=True)
+        print(f"  - Subsampling: minimum a step {snap_sub_aminstep}, returns {len(idx)} snapshots")
+        snapshots = snapshots[idx]
+
+    # Subsample: maximum redshift
+    if snap_sub_zmax is not None:
+        w = np.argwhere(get_asnapshots(snapshots) > 1.0 / (1.0 + snap_sub_zmax))
+        if len(w) > 0:
+            snapshots = snapshots[w[0, 0]:]
+            print(f"  - Subsampling: max redshift {snap_sub_zmax}, returns {len(snapshots)} snapshots")
+
+    # Subsample: match inferred bimodal distribution
+    if snap_sub_match_dist_n:
+        aa = get_asnapshots(snapshots)
+
+        # multimodal distribution in scale factor, need ppf (computed numerically)
+        s1, s2, lam = 0.12, 0.27, 0.4
+        amin = np.min(aa)
+        t1 = trunc_norm(amin, 1.0, 0.5, s1)
+        t2 = trunc_norm(amin, 1.0, 1.0, s2)
+        cdf = lambda a: lam * t1.cdf(a) + (1 - lam) * t2.cdf(a)
+        ppf = inversefunc(cdf, domain=[amin, 1.0], image=[0.0, 1.0])
+
+        idx, _ = subsample_ppf(aa, snap_sub_match_dist_n, ppf)
+        if len(idx) < len(snapshots):
+            print(f"  - Subsampling: match distribution, returns {len(idx)} snapshots")
+        snapshots = snapshots[idx]
+
+    # Subsample: keep every n-th snapshot
+    snapshots = snapshots[::-snap_sub_every_n]
+    if snap_sub_every_n > 1:
+        print(f"  - Subsampling: keeping every {snap_sub_every_n} snapshots, returns {len(snapshots)} snapshots")
+
+    return snapshots

@@ -1,5 +1,7 @@
+from __future__ import annotations
+
 import os
-from collections.abc import Iterable
+from typing import Iterable
 
 import healpy as hp
 import healsparse
@@ -10,7 +12,6 @@ import pymaster as nmt
 import sacc
 from itertools import product
 from tqdm.auto import tqdm, trange
-from itertools import product
 
 from .utils import *
 
@@ -68,163 +69,151 @@ class MapBuilder:
     """
 
     def __init__(
-            self,
-            nside,
-            dtype,
-            save_dir,
-            base_fname,
-            nmaps,
-            nside_c=32,
-            octant_only=True,
-            save_format='fits',
-            wsp_dir=None,
-            sacc_type=None,
-            b=None,
-            nlb=20,
-            remove_monopole=True,
-            nocompress=True,
-            f_ell='pixwin'):
-        """Initialize a MapBuilder.
-
-        Parameters
-        ----------
-        nside : int
-            Healpix resolution parameter of the maps.
-        dtype : data-type
-            Data type used for stored map values.
-        save_dir : str or None
-            Output directory. If None, file I/O is disabled.
-        base_fname : str
-            Filename prefix used by :meth:`get_fname`.
-        nmaps : int
-            Number of maps handled/produced by this builder.
-        nside_c : int, optional
-            HealSparse coverage nside (controls sparse tiling). Default is 32.
-        octant_only : bool, optional
-            If True, the sky footprint is restricted to one octant.
-        save_format : str, optional
-            File format for HealSparse I/O, e.g. ``'fits'``.
-        wsp_dir : str or None, optional
-            Directory for NaMaster workspace caching. If None, uses ``save_dir``.
-        sacc_type : str or None, optional
-            SACC data type string used when writing spectra.
-        b : pymaster.NmtBin, optional
-            Pre-built NaMaster binning scheme.
-        nlb : int, optional
-            Number of bandpowers used when constructing bins lazily.
-        remove_monopole : bool, optional
-            If True, subtract the mean on the mask before computing transforms.
-        nocompress : bool, optional
-            If True, disable HealSparse compression when writing maps.
-        f_ell : {'pixwin'} or ndarray or None, optional
-            Multiplicative response applied to theory spectra. If ``'pixwin'``,
-            uses Healpix pixel window. If ndarray, it is interpreted as a
-            per-ell factor starting at ``b.get_ell_list(0)[0]`` for the current
-            binning scheme.
-        """
+        self,
+        nside: int,
+        dtype: np.dtype,
+        save_dir: str,
+        base_fname: str,
+        nmaps: int,
+        nside_c: int = 32,
+        octant_only: bool = True,
+        save_format: str = 'fits',
+        wsp_dir: str | None = None,
+        sacc_type: str | None = None,
+        b: 'nmt.NmtBin' | None = None,
+        nlb: int = 20,
+        remove_monopole: bool = True,
+        nocompress: bool = True,
+        f_ell: str | np.ndarray | None = 'pixwin',
+    ) -> None:
+        """Initialize derived attributes and set up directories."""
         self.nside = nside
-        self.npix = hp.nside2npix(nside)
         self.dtype = dtype
-        self.nmaps = nmaps
-        self.base_fname = base_fname
-        self.sacc_type = sacc_type
         self.save_dir = save_dir
+        self.base_fname = base_fname
+        self.nmaps = nmaps
         self.nside_c = nside_c
         self.octant_only = octant_only
         self.save_format = save_format
-        if wsp_dir is None:
-            wsp_dir = save_dir
-        self.wsp_dir = wsp_dir
+        self.wsp_dir = wsp_dir if wsp_dir is not None else save_dir
+        self.sacc_type = sacc_type
+        self.b = b
+        self.nlb = nlb
         self.remove_monopole = remove_monopole
         self.nocompress = nocompress
         self.f_ell = f_ell
-
-        if b is not None:
-            self.b = b
-        else:
-            self._nlb = nlb
-
-        # make sure folder exists
+        
+        # Derived attributes
+        self.npix = hp.nside2npix(self.nside)
+        self._nlb_cached = self.nlb if self.b is None else None
+        
+        # Cached attributes (lazy-initialized)
+        self.tracers = None
+        self.tracers_sacc = None
+        self.mask = None
+        self.ipix = None
+        self.mask_ring = None
+        self.ipix_ring = None
+        self.ipix_oct_fullsky = None
+        self.wsp = None
+        self.predicted_cls = None
+        
+        # Make sure folder exists
         os.makedirs(self.save_dir, exist_ok=True)
-
+        
         print(f"*** Map builder ({self.base_fname}) ***")
+        print(f"  - Builder class = {self.__class__.__name__}")
         print(f"  - Number of maps = {self.nmaps}")
         print(f"  - Maps saved to", self.save_dir)
 
-    def iter(self, it=None):
-        """Return an iterator over the input.
+    def iter(self, it: Iterable[int] | int | None = None) -> range | Iterable[int] | list[int]:
+        """Return an iterator over the requested indices.
 
         Parameters
         ----------
-        it : iterable or int or None, optional
+        it : Iterable[int] or int or None, optional
             - If None: iterate over ``range(self.nmaps)``.
-            - If iterable: return the iterable as is.
+            - If Iterable[int]: return the iterable as is.
             - If int: return a singleton list ``[it]``.
 
         Returns
         -------
-        iterable
-            Iterable over the requested items.
+        range or Iterable[int] or list
+            Iterable over the requested map indices.
 
         Raises
         ------
         ValueError
-            If ``it`` is neither None, an int, nor an iterable.
+            If ``it`` is neither None, an int, nor an iterable of ints, or if
+            indices are not in ``[0, self.nmaps)``.
         """
-        if it is None:
-            return range(self.nmaps)
-        elif isinstance(it, Iterable):
-            return it
-        elif type(it) is int:
-            return [it]
-        else:
-            raise ValueError
+        match it:
+            case None:
+                return range(self.nmaps)
+            case int():
+                return [it]
+            case _:
+                return it
         
-    def tqdm(self, it=None, **tqdm_kwargs):
-        """Wrap an iterable (or default range) with tqdm progress bars.
+    def tqdm(self, it: Iterable[int] | int | None = None, **tqdm_kwargs) -> trange | tqdm | list[int]:
+        """Wrap an iterable of ints (or default range) with tqdm progress bars.
 
         Parameters
         ----------
-        it : iterable or int or None, optional
+        it : Iterable[int] or int or None, optional
             - If None: iterate over ``range(self.nmaps)`` using :func:`trange`.
-            - If iterable: wrap with :func:`tqdm`.
+            - If Iterable[int]: wrap with :func:`tqdm`.
             - If int: return a singleton list ``[it]``.
 
         Returns
         -------
-        iterable
+        trange or tqdm or list
             Iterable with tqdm progress bar behavior.
 
         Raises
         ------
         ValueError
-            If ``it`` is neither None, an int, nor an iterable.
+            If ``it`` is neither None, an int, nor an iterable of ints, or if
+            indices are not in ``[0, self.nmaps)``.
         """
-        if it is None:
-            return trange(self.nmaps, **tqdm_kwargs)
-        elif isinstance(it, Iterable):
-            return tqdm(it, **tqdm_kwargs)
-        elif type(it) is int:
-            return [it]
-        else:
-            raise ValueError
+        match it:
+            case None:
+                return trange(self.nmaps, **tqdm_kwargs)
+            case int():
+                return [it]
+            case _:
+                return tqdm(it, **tqdm_kwargs)
 
-    def get_fname(self, imap=None, sub=None, what=None, extra=None, format=None):
+    def get_fname(
+        self,
+        imap: int | None = None,
+        sub: int | None = None,
+        what: str | None = None,
+        smooth_Mpc: float | None = None,
+        extra: str | None = None,
+        format: str | None = None,
+    ) -> str:
         """Build an output filename for a given data product.
 
         Parameters
         ----------
         imap : int or None, optional
             Map index to include in the filename.
-        sub : int or str or None, optional
+        sub : int or None, optional
             Sub-volume identifier. If provided, the file is placed under
             ``{save_dir}/subs/``.
         what : str or None, optional
-            Product tag (e.g. ``'alms'``, ``'cls'``, ``'gamma1'``).
+            Field/product tag (e.g. ``'alms'``, ``'cls'``, ``'gamma1'``,
+            ``'density'``).  Do *not* embed the smoothing scale here — pass it
+            via ``smooth_Mpc`` instead so the convention is consistent.
+        smooth_Mpc : float or None, optional
+            Physical Gaussian smoothing scale in Mpc.  When provided,
+            ``_{smooth_Mpc}Mpc`` is appended after ``what`` in the filename.
         extra : str or None, optional
-            Extra string appended to the filename.
+            Additional string appended at the end of the stem.
         format : str or None, optional
-            File extension (without leading dot). If None, uses ``self.save_format``.
+            File extension (without leading dot). Defaults to
+            ``self.save_format``.
 
         Returns
         -------
@@ -233,37 +222,34 @@ class MapBuilder:
 
         Notes
         -----
-        The base filename is of the form::
+        The filename stem is built as::
 
-            {base_fname}_nside{nside}[_{what}][_imap{imap}][_sub{sub}][_{extra}].{format}
+            {base_fname}[_{what}][_{smooth_Mpc}Mpc][_imap{imap}][_sub{sub}][_{extra}]
+
+        The folder encodes all context that varies (nside, seed, builder type,
+        smoothing hierarchy); filenames are kept as short as possible.
         """
-        fname = self.base_fname + f'_nside{self.nside}'
-
+        parts = [self.base_fname]
         if what is not None:
-            fname += f'_{what}'
-
+            parts.append(what)
+        if smooth_Mpc is not None:
+            parts.append(f'{smooth_Mpc}Mpc')
         if imap is not None:
-            fname += f'_imap{imap}'
-
+            parts.append(f'imap{imap}')
         if sub is not None:
-            fname += f'_sub{sub}'
-
+            parts.append(f'sub{sub}')
         if extra is not None:
-            fname += f'_{extra}'
-
-        if format is not None:
-            fname += f'.{format}'
-        else:
-            fname += f'.{self.save_format}'
+            parts.append(extra)
+        fname = '_'.join(parts) + f'.{format or self.save_format}'
 
         if sub is None:
             return os.path.join(self.save_dir, fname)
         else:
-            subs_save_dir = os.path.join(self.save_dir, 'subs')
-            os.makedirs(subs_save_dir, exist_ok=True)
-            return os.path.join(subs_save_dir, fname)
+            subs_dir = os.path.join(self.save_dir, 'subs')
+            os.makedirs(subs_dir, exist_ok=True)
+            return os.path.join(subs_dir, fname)
 
-    def _create_tracers_ccl(self):
+    def _create_tracers_ccl(self) -> list:
         """Create CCL tracer objects.
 
         Returns
@@ -278,7 +264,7 @@ class MapBuilder:
         """
         raise NotImplementedError
 
-    def get_tracers_ccl(self):
+    def get_tracers_ccl(self) -> list:
         """Return (and cache) CCL tracer objects used for theory predictions.
 
         Returns
@@ -286,11 +272,11 @@ class MapBuilder:
         list
             List of tracer objects with length ``self.nmaps``.
         """
-        if not hasattr(self, 'tracers'):
+        if self.tracers is None:
             self.tracers = self._create_tracers_ccl()
         return self.tracers
 
-    def _create_tracers_sacc(self):
+    def _create_tracers_sacc(self) -> list:
         """Create SACC tracer objects.
 
         Returns
@@ -305,7 +291,7 @@ class MapBuilder:
         """
         raise NotImplementedError
 
-    def get_tracers_sacc(self):
+    def get_tracers_sacc(self) -> list:
         """Return (and cache) SACC tracers used to store measured spectra.
 
         Returns
@@ -313,11 +299,15 @@ class MapBuilder:
         list
             List of SACC tracer objects with length ``self.nmaps``.
         """
-        if not hasattr(self, 'tracers_sacc'):
+        if self.tracers_sacc is None:
             self.tracers_sacc = self._create_tracers_sacc()
         return self.tracers_sacc
 
-    def construct_maps(self, imaps=None, **kwargs):
+    def construct_maps(
+        self,
+        imaps: int | Iterable[int] | None = None,
+        **kwargs
+    ) -> healsparse.HealSparseMap | dict[int, healsparse.HealSparseMap]:
         """Construct maps and return them as HealSparse objects.
 
         Parameters
@@ -341,7 +331,7 @@ class MapBuilder:
         """
         raise NotImplementedError
 
-    def check_maps(self, imaps=None, read=False, fname=None, check_finite=False):
+    def check_maps(self, imaps: int | Iterable[int] | None = None, read: bool = False, fname: str | None = None, check_finite: bool = False) -> dict[int, bool | healsparse.HealSparseMap | None] | bool | healsparse.HealSparseMap | None:
         """Check existence/readability of map files.
 
         Parameters
@@ -410,7 +400,7 @@ class MapBuilder:
 
         return out[imaps] if type(imaps) is int else out
 
-    def load_maps(self, imaps=None, **fname_kwargs):
+    def load_maps(self, imaps: int | Iterable[int] | None = None, **fname_kwargs) -> healsparse.HealSparseMap | dict[int, healsparse.HealSparseMap]:
         """Load one or multiple HealSparse maps from disk.
 
         Parameters
@@ -433,8 +423,8 @@ class MapBuilder:
             maps[imap] = healsparse.HealSparseMap.read(fname, nside_coverage=self.nside_c)
 
         return maps[imaps] if type(imaps) is int else maps
-
-    def plot_maps(self, maps_or_imaps=None, nx=None, log=False, title_prefix=None, cbar=True, save=True, **hpview_kwargs):
+    
+    def plot_maps(self, maps_or_imaps: int | Iterable[int] | Iterable | None = None, nx: int | None = None, log: bool = False, title_prefix: str | None = None, cbar: bool = True, save: bool = True, **hpview_kwargs) -> None:
         """Plot one or multiple maps.
 
         Parameters
@@ -458,24 +448,26 @@ class MapBuilder:
             Forwarded to :func:`healpy.orthview` (octant mode) or
             :func:`healpy.mollview` (full sky).
         """
-        if maps_or_imaps is None:
-            nmaps = self.nmaps
-            imaps = range(nmaps)
-            maps = None
-        elif type(maps_or_imaps) is int:
-            nmaps = 1
-            imaps = [maps_or_imaps]
-            maps = None
-        elif isinstance(maps_or_imaps, Iterable):
-            nmaps = len(maps_or_imaps)
-            if type(maps_or_imaps[0]) is int:
+        match maps_or_imaps:
+            case None:
+                nmaps = self.nmaps
+                imaps = range(nmaps)
+                maps = None
+            case int():
+                nmaps = 1
                 imaps = maps_or_imaps
                 maps = None
-            else:
-                imaps = range(nmaps)
-                maps = maps_or_imaps
-        else:
-            raise ValueError
+            case _:
+                maps_or_imaps = list(maps_or_imaps)
+                nmaps = len(maps_or_imaps)
+                assert nmaps > 0
+                match maps_or_imaps[0]:
+                    case int():
+                        imaps = maps_or_imaps
+                        maps = None
+                    case _:
+                        imaps = range(nmaps)
+                        maps = maps_or_imaps
 
         if nx is None:
             nx = nmaps
@@ -516,7 +508,7 @@ class MapBuilder:
             fname = self.get_fname(format='png')
             plt.savefig(fname, bbox_inches='tight', dpi=150, transparent=False)
 
-    def _create_mask(self, nside=None):
+    def _create_mask(self, nside: int | None = None) -> tuple[np.ndarray, np.ndarray]:
         """Create a footprint mask and list of valid pixels.
 
         Parameters
@@ -547,7 +539,7 @@ class MapBuilder:
 
         return mask, ipix
 
-    def get_mask(self, nest=True, return_ipix=False, nside=None):
+    def get_mask(self, nest: bool = True, return_ipix: bool = False, nside: int | None = None) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
         """Return (and cache) the analysis mask.
 
         Parameters
@@ -572,7 +564,7 @@ class MapBuilder:
         ``self.mask`` / ``self.ipix`` (NESTED) and
         ``self.mask_ring`` / ``self.ipix_ring`` (RING).
         """
-        if not hasattr(self, 'mask'):
+        if self.mask is None:
             mask, ipix = self._create_mask()
             self.mask = mask
             self.ipix = ipix
@@ -589,7 +581,7 @@ class MapBuilder:
             else:
                 return self.mask_ring
 
-    def get_octant_to_fullsky_ipix(self, nest=True):
+    def get_octant_to_fullsky_ipix(self, nest: bool = True) -> np.ndarray:
         """Return a mapping from octant pixels to their full-sky replicas.
 
         Parameters
@@ -610,13 +602,13 @@ class MapBuilder:
             If ``self.octant_only`` is False.
         """
         assert self.octant_only
-        if not hasattr(self, 'ipix_oct_fullsky'):
+        if self.ipix_oct_fullsky is None:
             theta, phi = hp.pix2ang(self.nside, np.arange(self.npix), nest=nest)
             self.ipix_oct_fullsky = hp.ang2pix(self.nside, np.where(theta <= np.pi / 2., theta, np.pi - theta), phi % np.pi / 2., nest=nest)
 
         return self.ipix_oct_fullsky
 
-    def get_cls_b(self):
+    def get_cls_b(self) -> 'nmt.NmtBin':
         """Return (and lazily create) the NaMaster binning scheme.
 
         Returns
@@ -629,11 +621,11 @@ class MapBuilder:
         This is implemented as a lazy getter to keep the builder pickle/serialize
         friendly.
         """
-        if not hasattr(self, 'b'):
-            self.b = make_nmtbin_logspaced(self.nside, 8, 2 * self.nside, self._nlb, f_ell=self.f_ell)
+        if self.b is None:
+            self.b = make_nmtbin_logspaced(self.nside, 8, 2 * self.nside, self._nlb_cached or self.nlb, f_ell=self.f_ell)
         return self.b
 
-    def get_cls_wsp(self):
+    def get_cls_wsp(self) -> 'nmt.NmtWorkspace':
         """Return (and lazily create) the NaMaster workspace.
 
         The workspace stores the mode-coupling matrix and bandpower windows for
@@ -645,24 +637,25 @@ class MapBuilder:
             Workspace containing the coupling matrix and bandpower windows.
         """
 
-        if hasattr(self, 'wsp'):
+        if self.wsp is not None:
             return self.wsp
         else:
             fname = os.path.join(self.wsp_dir, f'wsp_nside{self.nside}.wsp')
-            self.wsp = nmt.NmtWorkspace()
+            wsp = nmt.NmtWorkspace()
             if os.path.exists(fname):
                 print("Loading workspace in", fname)
-                self.wsp.read_from(fname)
+                wsp.read_from(fname)
             else:
                 print("Computing and saving workspace in", fname)
                 mask = self.get_mask(nest=False)
                 b = self.get_cls_b()
                 dummy_f = nmt.NmtField(mask, [np.zeros_like(mask)], lite=True)
-                self.wsp.compute_coupling_matrix(dummy_f, dummy_f, b)
-                self.wsp.write_to(fname)
+                wsp.compute_coupling_matrix(dummy_f, dummy_f, b)
+                wsp.write_to(fname)
+            self.wsp = wsp
             return self.wsp
 
-    def _field_map(self, imap, nest=True):
+    def _field_map(self, imap: int, nest: bool = True) -> np.ndarray:
         """Load a map and return a dense Healpix array.
 
         Parameters
@@ -679,7 +672,7 @@ class MapBuilder:
         """
         return self.load_maps(imap).generate_healpix_map(nest=nest)
 
-    def get_field_map(self, imap, nest=True, replicate_octant=False):
+    def get_field_map(self, imap: int, nest: bool = True, replicate_octant: bool = False) -> np.ndarray:
         """Return a dense Healpix map suitable for harmonic transforms.
 
         Parameters
@@ -716,7 +709,7 @@ class MapBuilder:
 
         return _map
 
-    def compute_alms(self, imaps=None, save=True, replicate_octant=False, **map2am_kwargs):
+    def compute_alms(self, imaps: int | Iterable[int] | None = None, save: bool = True, replicate_octant: bool = False, **map2am_kwargs) -> np.ndarray | dict[int, np.ndarray]:
         """Compute spherical harmonic coefficients a_lm from maps.
 
         Parameters
@@ -760,7 +753,43 @@ class MapBuilder:
 
         return alms[imaps] if type(imaps) is int else alms
 
-    def compute_maps_from_alms(self, imaps=None, save=True):
+    def _smooth_alms(self, imap, alm, sigma, ipix, lmax, what=None, smooth_Mpc=None):
+        """Smooth alm coefficients in-place, convert to a HealSparse map, and save.
+
+        Parameters
+        ----------
+        imap : int
+            Map index used to construct the output filename via ``get_fname``.
+        alm : array_like
+            Spherical harmonic coefficients.  Modified in-place by Gaussian smoothing.
+        sigma : float
+            Gaussian smoothing width in radians.  Typically ``smooth_Mpc / chi``.
+        ipix : array_like of int
+            Ring-ordered HEALPix pixel indices of the survey footprint.
+        lmax : int
+            Maximum multipole used for the back-transform ``alm2map``.
+        what : str or None, optional
+            Field tag (e.g. ``'density'``, ``'gamma1'``).  Passed directly to
+            ``get_fname``; do not embed the smoothing scale here.
+        smooth_Mpc : float or None, optional
+            Physical smoothing scale in Mpc.  Passed to ``get_fname`` so the
+            scale appears consistently in all output filenames.
+
+        Returns
+        -------
+        healsparse.HealSparseMap
+            Smoothed map restricted to the survey footprint.  ``alm`` is modified
+            in-place and can be reused for further transforms (e.g. spin-2).
+        """
+        hp.sphtfunc.smoothalm(alm, sigma=sigma, pol=False, inplace=True)
+        values = hp.alm2map(alm, self.nside, lmax=lmax)[ipix]
+        hsp = healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
+        hsp.update_values_pix(ipix, values.astype(self.dtype), nest=False)
+        hsp.write(self.get_fname(imap, what=what, smooth_Mpc=smooth_Mpc), clobber=True,
+                  format=self.save_format, nocompress=self.nocompress)
+        return hsp
+
+    def compute_maps_from_alms(self, imaps: int | Iterable[int] | None = None, save: bool = True) -> healsparse.HealSparseMap | dict[int, healsparse.HealSparseMap]:
         """Reconstruct HealSparse maps from saved a_lm coefficients.
 
         Parameters
@@ -795,7 +824,7 @@ class MapBuilder:
 
         return maps[imaps] if type(imaps) is int else maps
 
-    def _save_cls(self, ell, cl):
+    def _save_cls(self, ell: np.ndarray, cl: dict[tuple[int, int], np.ndarray]) -> None:
         """Save angular power spectra to a SACC FITS file.
 
         Parameters
@@ -816,7 +845,7 @@ class MapBuilder:
         fname = self.get_fname(what='cls', format='fits')
         s.save_fits(fname, overwrite=True)
 
-    def compute_cls(self, imaps=None, auto_only=False, save=True, use_precomputed_alms=True, pair_job=None):
+    def compute_cls(self, imaps: int | Iterable[int] | None = None, auto_only: bool = False, save: bool = True, use_precomputed_alms: bool = True, pair_job: int | None = None) -> tuple[np.ndarray, dict[tuple[int, int], np.ndarray]]:
         """Compute binned pseudo-C_ell bandpowers for requested map pairs.
 
         Parameters
@@ -889,7 +918,7 @@ class MapBuilder:
 
         return ell, cl
 
-    def load_cls(self, return_dict=False):
+    def load_cls(self, return_dict: bool = False) -> sacc.Sacc | tuple[np.ndarray, dict[tuple[int, int], np.ndarray]]:
         """Load saved angular power spectra.
 
         Parameters
@@ -924,7 +953,7 @@ class MapBuilder:
         else:
             return s
 
-    def _noise_cls(self, imap):
+    def _noise_cls(self, imap: int) -> float | np.ndarray:
         """Return the noise angular power spectrum for one map.
 
         Parameters
@@ -944,7 +973,7 @@ class MapBuilder:
         """
         raise NotImplementedError
 
-    def predict_cls(self, imaps=None, auto_only=False, approximate=False, add_noise=False, error_bars=False, keep_cls=False, stacked=False, ell=None):
+    def predict_cls(self, imaps: int | Iterable[int] | None = None, auto_only: bool = False, approximate: bool = False, add_noise: bool = False, error_bars: bool = False, keep_cls: bool = False, stacked: bool = False, ell: np.ndarray | None = None) -> tuple:
         """Predict theory angular power spectra using CCL.
 
         Parameters
@@ -994,7 +1023,7 @@ class MapBuilder:
         - ``fsky = 1/8`` for octant-only,
         - ``fsky = 1`` for full-sky.
         """
-        if hasattr(self, 'predicted_cls'):
+        if self.predicted_cls is not None:
             return self.predicted_cls
 
         if imaps is None:
@@ -1004,7 +1033,7 @@ class MapBuilder:
             pairs = [(i, i) for i in imaps]
         else:
             # pairs = [(i1, i2) for i, i1 in enumerate(imaps) for i2 in imaps[:i + 1]]
-            pairs = [(i1, i2) for i, i2 in enumerate(imaps) for i1 in imaps[i:]]
+            pairs = [(i1, i2) for i, i2 in enumerate(imaps) for i1 in imaps[i:]]  # with this order, i2 is preserved
 
         tracers = self.get_tracers_ccl()
         tracers_ = {imap: tracers[imap] for imap in imaps}
@@ -1120,20 +1149,20 @@ class MapBuilder:
 
     def triangle_plot_cls(
             self,
-            auto_only=False,
-            logy=False,
-            theory_only=False,
-            data_only=False,
-            ratio_data_theory=False,
-            diff_data_theory_over_error=False,
-            save=True,
-            sharey=None,
-            figaxes=None,
-            colortheory='orange',
-            colordata='dodgerblue',
-            approximate=False,
-            ell_factor=0,
-            error_bars=False):
+            auto_only: bool = False,
+            logy: bool = False,
+            theory_only: bool = False,
+            data_only: bool = False,
+            ratio_data_theory: bool = False,
+            diff_data_theory_over_error: bool = False,
+            save: bool = True,
+            sharey: bool | str | None = None,
+            figaxes: tuple | None = None,
+            colortheory: str = 'orange',
+            colordata: str = 'dodgerblue',
+            approximate: bool = False,
+            ell_factor: int = 0,
+            error_bars: bool = False) -> None:
         """Plot a triangle matrix of theory and/or measured angular spectra.
 
         Parameters
@@ -1254,12 +1283,12 @@ class MapBuilder:
             fname = self.get_fname(what='cls', format='png')
             fig.savefig(fname, bbox_inches='tight')
 
-    def compute_map_moments(self, theta_smooth=np.geomspace(2.5, 250, 8), nside_small=512):
+    def compute_map_moments(self, theta_smooth: np.ndarray | Iterable[float], nside_small: int = 512) -> tuple[np.ndarray, dict, dict, dict]:
         """Compute 2nd/3rd/4th moments of smoothed maps.
 
         Parameters
         ----------
-        theta_smooth : array_like, optional
+        theta_smooth : array_like of float
             Gaussian smoothing scales in arcmin.
         nside_small : int, optional
             Nside used for the smoothed maps and moment evaluation.
@@ -1286,6 +1315,8 @@ class MapBuilder:
         4) computes raw moments on the masked pixels,
         5) caches results to ``what='2nd_3rd_4th_moments', format='npy'``.
         """
+        assert min(theta_smooth) > hp.nside2resol(nside_small, arcmin=True), "Smoothing scale should be larger than pixel size to avoid pixel effects."
+        
         fname = self.get_fname(what='2nd_3rd_4th_moments', format='npy')
 
         if os.path.exists(fname):
@@ -1346,7 +1377,7 @@ class MapBuilder:
 
         return theta_smooth, moments['second_moment'], moments['third_moment'], moments['fourth_moment']
 
-    def generate_gaussian_maps(self, imaps=None, auto_only=False, seed=-1):
+    def generate_gaussian_maps(self, imaps: int | Iterable[int] | None = None, auto_only: bool = False, seed: int = -1) -> None:
         """Generate Gaussian random maps consistent with predicted spectra.
 
         Parameters

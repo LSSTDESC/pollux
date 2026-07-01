@@ -753,40 +753,37 @@ class MapBuilder:
 
         return alms[imaps] if type(imaps) is int else alms
 
-    def _smooth_alms(self, imap, alm, sigma, ipix, lmax, what=None, smooth_Mpc=None):
-        """Smooth alm coefficients in-place, convert to a HealSparse map, and save.
+    def _smooth_alms(self, alm, sigma, ipix, lmax):
+        """Smooth alm in-place and return a HealSparse map over the footprint.
+
+        The pixel window function is deconvolved so that *sigma* is the sole
+        effective smoothing in the output map — pixel smoothing is removed.
+        ``alm`` is modified in-place and can be reused for further transforms
+        (e.g. spin-2) after this call.
 
         Parameters
         ----------
-        imap : int
-            Map index used to construct the output filename via ``get_fname``.
         alm : array_like
-            Spherical harmonic coefficients.  Modified in-place by Gaussian smoothing.
+            Spherical harmonic coefficients.  Modified in-place.
         sigma : float
-            Gaussian smoothing width in radians.  Typically ``smooth_Mpc / chi``.
+            Gaussian smoothing width in radians (typically ``smooth_Mpc / chi``).
+            This is the *only* smoothing present in the output.
         ipix : array_like of int
             Ring-ordered HEALPix pixel indices of the survey footprint.
         lmax : int
             Maximum multipole used for the back-transform ``alm2map``.
-        what : str or None, optional
-            Field tag (e.g. ``'density'``, ``'gamma1'``).  Passed directly to
-            ``get_fname``; do not embed the smoothing scale here.
-        smooth_Mpc : float or None, optional
-            Physical smoothing scale in Mpc.  Passed to ``get_fname`` so the
-            scale appears consistently in all output filenames.
 
         Returns
         -------
         healsparse.HealSparseMap
-            Smoothed map restricted to the survey footprint.  ``alm`` is modified
-            in-place and can be reused for further transforms (e.g. spin-2).
+            Smoothed map restricted to the survey footprint.
         """
-        hp.sphtfunc.smoothalm(alm, sigma=sigma, pol=False, inplace=True)
+        ell = np.arange(lmax + 1)
+        fl = np.exp(-0.5 * (ell * (ell + 1)) * sigma ** 2) / hp.pixwin(self.nside, pol=False, lmax=lmax)
+        hp.almxfl(alm, fl, inplace=True)
         values = hp.alm2map(alm, self.nside, lmax=lmax)[ipix]
         hsp = healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
         hsp.update_values_pix(ipix, values.astype(self.dtype), nest=False)
-        hsp.write(self.get_fname(imap, what=what, smooth_Mpc=smooth_Mpc), clobber=True,
-                  format=self.save_format, nocompress=self.nocompress)
         return hsp
 
     def compute_maps_from_alms(self, imaps: int | Iterable[int] | None = None, save: bool = True) -> healsparse.HealSparseMap | dict[int, healsparse.HealSparseMap]:

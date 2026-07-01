@@ -221,8 +221,8 @@ class LensingBuilder(MapBuilder):
             # Get harmonic coefficients of convergence map
             klm = self.compute_alms(ikappa, save=not (replicate_octant), replicate_octant=replicate_octant, pol=False, lmax=lmax)
             if smooth_Mpc is not None:
-                # smooth_Mpc=smooth_Mpc, what=None → kappa_{smooth_Mpc}Mpc_imap{i}.fits
-                self._smooth_alms(ikappa, klm, smooth_Mpc / chi_bins[ikappa + 1], ipix, lmax, smooth_Mpc=smooth_Mpc)
+                kappa_hsp = self._smooth_alms(klm, smooth_Mpc / chi_bins[ikappa + 1], ipix, lmax)
+                kappa_hsp.write(self.get_fname(ikappa, smooth_Mpc=smooth_Mpc), clobber=True, format=self.save_format, nocompress=self.nocompress)
                 # klm is now smoothed inplace
 
             # Convert to shear

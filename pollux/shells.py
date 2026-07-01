@@ -889,7 +889,8 @@ class ShellBuilder(MapBuilder):
                 continue
 
             alm = self.compute_alms(ishell, save=not replicate_octant, replicate_octant=replicate_octant, pol=False, lmax=lmax)
-            maps[ishell] = self._smooth_alms(ishell, alm, smooth_Mpc / chi_bins[ishell + 1], ipix, lmax, what='density', smooth_Mpc=smooth_Mpc)
+            maps[ishell] = self._smooth_alms(alm, smooth_Mpc / chi_bins[ishell + 1], ipix, lmax)
+            maps[ishell].write(fname, clobber=True, format=self.save_format, nocompress=self.nocompress)
             
         return maps[ishells] if type(ishells) is int else maps
 
@@ -942,8 +943,9 @@ class ShellBuilder(MapBuilder):
             alm = self.compute_alms(ishell, save=not replicate_octant, replicate_octant=replicate_octant, pol=False, lmax=lmax)
 
             if smooth_Mpc is not None:
-                density_hsp = self._smooth_alms(ishell, alm, smooth_Mpc / chi_bins[ishell + 1], ipix, lmax, what='density', smooth_Mpc=smooth_Mpc)
-                density = density_hsp.generate_healpix_map(nest=False)[ipix]
+                density_hsp = self._smooth_alms(alm, smooth_Mpc / chi_bins[ishell + 1], ipix, lmax)
+                density_hsp.write(self.get_fname(ishell, what='density', smooth_Mpc=smooth_Mpc), clobber=True, format=self.save_format, nocompress=self.nocompress)
+                density = density_hsp.get_values_pix(ipix, nest=False)
                 # alm is now smoothed inplace — reuse for spin-2 transform below
             else:
                 density = self.get_field_map(ishell, nest=False)[ipix]

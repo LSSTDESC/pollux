@@ -4,7 +4,8 @@ import os
 from typing import Iterable
 
 import healpy as hp
-import healsparse
+import healsparse as hsp
+import skyproj
 import matplotlib.pyplot as plt
 import numpy as np
 import pyccl
@@ -41,8 +42,16 @@ class MapBuilder:
         Number of maps handled/produced by this builder.
     nside_c : int, optional
         HealSparse coverage nside. Default is 32.
-    octant_only : bool, optional
-        If True, restrict the footprint to one octant. Default is True.
+    mask : ndarray or str or None, optional
+        Footprint specification:
+        - ``None``: full sky (no mask applied).
+        - ``'octant'``: restrict to the positive octant (x>0, y>0, z>0).
+        - ndarray: binary HEALPix mask of length ``hp.nside2npix(nside)``; pixels
+          where the mask is non-zero are kept. Must be in NESTED ordering.
+        - str (other than ``'octant'``): path to a FITS file containing a
+          binary HEALPix mask in NESTED ordering, read lazily inside
+          :meth:`_create_mask`.
+        Default is ``None``.
     save_format : str, optional
         HealSparse file format (e.g. 'fits'). Default is 'fits'.
     wsp_dir : str or None, optional
@@ -76,7 +85,7 @@ class MapBuilder:
         base_fname: str,
         nmaps: int,
         nside_c: int = 32,
-        octant_only: bool = True,
+        mask: np.ndarray | str | None = None,
         save_format: str = 'fits',
         wsp_dir: str | None = None,
         sacc_type: str | None = None,
@@ -87,13 +96,19 @@ class MapBuilder:
         f_ell: str | np.ndarray | None = 'pixwin',
     ) -> None:
         """Initialize derived attributes and set up directories."""
+        if isinstance(mask, np.ndarray) and len(mask) != hp.nside2npix(nside):
+            raise ValueError(
+                f"mask has {len(mask)} pixels but nside={nside} requires {hp.nside2npix(nside)}.")
+        if isinstance(mask, str) and mask != 'octant' and not os.path.exists(mask):
+            raise ValueError(f"mask path {mask} does not exist.")
         self.nside = nside
         self.dtype = dtype
         self.save_dir = save_dir
         self.base_fname = base_fname
         self.nmaps = nmaps
         self.nside_c = nside_c
-        self.octant_only = octant_only
+        self.footprint = mask
+        self.octant_only = isinstance(mask, str) and mask == 'octant'
         self.save_format = save_format
         self.wsp_dir = wsp_dir if wsp_dir is not None else save_dir
         self.sacc_type = sacc_type
@@ -307,7 +322,7 @@ class MapBuilder:
         self,
         imaps: int | Iterable[int] | None = None,
         **kwargs
-    ) -> healsparse.HealSparseMap | dict[int, healsparse.HealSparseMap]:
+    ) -> hsp.HealSparseMap | dict[int, hsp.HealSparseMap]:
         """Construct maps and return them as HealSparse objects.
 
         Parameters
@@ -319,7 +334,7 @@ class MapBuilder:
 
         Returns
         -------
-        healsparse.HealSparseMap or dict
+        hsp.HealSparseMap or dict
             - If ``imaps`` is a single int: returns a single ``HealSparseMap``.
             - If ``imaps`` is ``None`` or an iterable: returns a dict keyed by
               map index with ``HealSparseMap`` values.
@@ -331,7 +346,7 @@ class MapBuilder:
         """
         raise NotImplementedError
 
-    def check_maps(self, imaps: int | Iterable[int] | None = None, read: bool = False, fname: str | None = None, check_finite: bool = False) -> dict[int, bool | healsparse.HealSparseMap | None] | bool | healsparse.HealSparseMap | None:
+    def check_maps(self, imaps: int | Iterable[int] | None = None, read: bool = False, fname: str | None = None, check_finite: bool = False) -> dict[int, bool | hsp.HealSparseMap | None] | bool | hsp.HealSparseMap | None:
         """Check existence/readability of map files.
 
         Parameters
@@ -350,7 +365,7 @@ class MapBuilder:
 
         Returns
         -------
-        dict or bool or healsparse.HealSparseMap or None
+        dict or bool or hsp.HealSparseMap or None
             - If ``fname`` is provided: returns a single value:
                 - when ``read=False``: ``True`` if file exists else ``False``;
                 - when ``read=True``: loaded ``HealSparseMap`` on success or
@@ -374,7 +389,7 @@ class MapBuilder:
             if os.path.exists(filename):
                 if read:
                     try:
-                        m = healsparse.HealSparseMap.read(filename, nside_coverage=self.nside_c)
+                        m = hsp.HealSparseMap.read(filename, nside_coverage=self.nside_c)
                         if check_finite:
                             a = m[m.valid_pixels]
                             if not (np.all(np.isfinite(a)) and np.any(a)):
@@ -400,7 +415,7 @@ class MapBuilder:
 
         return out[imaps] if type(imaps) is int else out
 
-    def load_maps(self, imaps: int | Iterable[int] | None = None, **fname_kwargs) -> healsparse.HealSparseMap | dict[int, healsparse.HealSparseMap]:
+    def load_maps(self, imaps: int | Iterable[int] | None = None, **fname_kwargs) -> hsp.HealSparseMap | dict[int, hsp.HealSparseMap]:
         """Load one or multiple HealSparse maps from disk.
 
         Parameters
@@ -412,7 +427,7 @@ class MapBuilder:
 
         Returns
         -------
-        healsparse.HealSparseMap or dict
+        hsp.HealSparseMap or dict
             - If ``imaps`` is a single int: returns a single ``HealSparseMap``.
             - If ``imaps`` is ``None`` or an iterable: returns a dict keyed by
               map index with ``HealSparseMap`` values.
@@ -420,11 +435,11 @@ class MapBuilder:
         maps = {}
         for imap in self.tqdm(imaps, desc="[load_maps]"):
             fname = self.get_fname(imap, **fname_kwargs)
-            maps[imap] = healsparse.HealSparseMap.read(fname, nside_coverage=self.nside_c)
+            maps[imap] = hsp.HealSparseMap.read(fname, nside_coverage=self.nside_c)
 
         return maps[imaps] if type(imaps) is int else maps
     
-    def plot_maps(self, maps_or_imaps: int | Iterable[int] | Iterable | None = None, nx: int | None = None, log: bool = False, title_prefix: str | None = None, cbar: bool = True, save: bool = True, **hpview_kwargs) -> None:
+    def plot_maps(self, maps_or_imaps: int | Iterable[int] | Iterable | None = None, nx: int | None = None, log: bool = False, title_prefix: str | None = None, cbar: bool = True, save: bool = True, backend: str = 'skyproj', **kwargs) -> None:
         """Plot one or multiple maps.
 
         Parameters
@@ -437,17 +452,32 @@ class MapBuilder:
         nx : int or None, optional
             Number of columns in the subplot grid. Defaults to ``nmaps``.
         log : bool, optional
-            If True and the map has positive values, plots ``log10(map)``.
+            If True, plot the map on a logarithmic color scale. With
+            ``backend='healpy'``, plots ``log10(map)`` when the map has
+            positive values. With ``backend='skyproj'``, uses ``norm='log'``
+            in :meth:`skyproj.Skyproj.draw_hspmap` if ``log(values)`` are all
+            finite over the valid pixels, otherwise falls back to
+            ``norm='symlog'``.
         title_prefix : str or None, optional
             Prefix used for subplot titles.
         cbar : bool, optional
             If True, display a colorbar.
         save : bool, optional
             If True, save the figure to ``get_fname(format='png')``.
-        **hpview_kwargs
-            Forwarded to :func:`healpy.orthview` (octant mode) or
-            :func:`healpy.mollview` (full sky).
+        backend : {'skyproj', 'healpy'}, optional
+            Plotting backend. With ``'skyproj'`` (default), uses
+            :class:`skyproj.MollweideSkyproj` for full sky and octant
+            footprints, and :class:`skyproj.McBrydeSkyproj` otherwise. With
+            ``'healpy'``, uses :func:`healpy.orthview` (octant footprint) or
+            :func:`healpy.mollview` (full sky or custom mask).
+        **kwargs
+            Forwarded to :func:`healpy.orthview`/:func:`healpy.mollview` (for
+            ``backend='healpy'``) or to
+            :meth:`skyproj.Skyproj.draw_hspmap`/``draw_hpxmap`` (for
+            ``backend='skyproj'``).
         """
+        assert backend in ('healpy', 'skyproj')
+
         match maps_or_imaps:
             case None:
                 nmaps = self.nmaps
@@ -473,7 +503,11 @@ class MapBuilder:
             nx = nmaps
         ny = int(np.ceil(nmaps / nx))
 
-        plt.figure(figsize=(4 * nx, 4 * ny))
+        if backend == 'skyproj':
+            fig, axes = plt.subplots(ny, nx, figsize=(8 * nx, 5 * ny), squeeze=False)
+            axes = axes.flat
+        else:
+            plt.figure(figsize=(4 * nx, 4 * ny))
 
         sub = 1
         for imap in self.tqdm(imaps):
@@ -481,65 +515,96 @@ class MapBuilder:
                 hp_map = self.load_maps(imap)
             else:
                 hp_map = maps[imap]
-            if isinstance(hp_map, healsparse.HealSparseMap):
-                hp_map = hp_map.generate_healpix_map()
-            if log and np.any(hp_map > 0.):
-                hp_map = np.log10(hp_map)
             title = title_prefix + f" {imap}" if title_prefix is not None else None
-            if self.octant_only:
-                hp.orthview(
-                    hp_map,
-                    rot=(35, 20),
-                    half_sky=True,
-                    sub=(ny, nx, sub),
-                    title=title,
-                    cbar=cbar,
-                    min=0. if log else None,
-                    margins=(0., 0., 0., 0.),
-                    nest=True,
-                    **hpview_kwargs)
+
+            if backend == 'skyproj':
+                ax = next(axes)
+                if self.octant_only or self.footprint is None:
+                    sp = skyproj.MollweideSkyproj(ax=ax)
+                else:
+                    sp = skyproj.McBrydeSkyproj(ax=ax)
+
+                draw_kwargs = dict(kwargs)
+                if log:
+                    if isinstance(hp_map, hsp.HealSparseMap):
+                        values = hp_map[hp_map.valid_pixels]
+                    else:
+                        values = hp_map[hp_map != hp.UNSEEN]
+                    with np.errstate(divide='ignore', invalid='ignore'):
+                        log_finite = np.all(np.isfinite(np.log(values)))
+                    draw_kwargs['norm'] = 'log' if log_finite else 'symlog'
+
+                if isinstance(hp_map, hsp.HealSparseMap):
+                    sp.draw_hspmap(hp_map, **draw_kwargs)
+                else:
+                    sp.draw_hpxmap(hp_map, nest=True, **draw_kwargs)
+
+                if title is not None:
+                    ax.set_title(title)
+                if cbar:
+                    sp.draw_colorbar(pad=0.05)
             else:
-                hp.mollview(hp_map, sub=(ny, nx, sub), title=title, cbar=cbar, min=0. if log else None, margins=(0., 0., 0., 0.), nest=True, **hpview_kwargs)
+                if isinstance(hp_map, hsp.HealSparseMap):
+                    hp_map = hp_map.generate_healpix_map()
+                if log and np.any(hp_map > 0.):
+                    hp_map = np.log10(hp_map)
+                if self.octant_only:
+                    hp.orthview(
+                        hp_map,
+                        rot=(35, 20),
+                        half_sky=True,
+                        sub=(ny, nx, sub),
+                        title=title,
+                        cbar=cbar,
+                        min=0. if log else None,
+                        margins=(0., 0., 0., 0.),
+                        nest=True,
+                        **kwargs)
+                else:
+                    hp.mollview(hp_map, sub=(ny, nx, sub), title=title, cbar=cbar, min=0. if log else None, margins=(0., 0., 0., 0.), nest=True, **kwargs)
             sub += 1
 
-        hp.graticule()
+        if backend == 'healpy':
+            hp.graticule()
 
         if save:
             fname = self.get_fname(format='png')
             plt.savefig(fname, bbox_inches='tight', dpi=150, transparent=False)
 
-    def _create_mask(self, nside: int | None = None) -> tuple[np.ndarray, np.ndarray]:
-        """Create a footprint mask and list of valid pixels.
-
-        Parameters
-        ----------
-        nside : int or None, optional
-            If provided, constructs the mask at this nside. Otherwise uses
-            ``self.nside``.
+    def _create_mask(self) -> tuple[np.ndarray, np.ndarray]:
+        """Create a footprint mask and list of valid pixels at ``self.nside``.
 
         Returns
         -------
-        mask : ndarray
-            Dense mask array (float or bool-like, values 0/1).
+        mask : ndarray of bool
+            Dense mask array in NESTED ordering, length ``self.npix``.
         ipix : ndarray of int
             Pixel indices where mask is non-zero, in NESTED ordering.
         """
-        if nside is not None:
-            npix = hp.nside2npix(nside)
-        else:
-            nside = self.nside
-            npix = self.npix
-
-        if self.octant_only:
-            mask = make_mask_radec_cuts(nside, 0, 90, 0, 90, eps=1e-10, nest=True)  # mask fully within the octant
+        if isinstance(self.footprint, str) and self.footprint == 'octant':
+            mask = make_mask_radec_cuts(self.nside, 0, 90, 0, 90, eps=1e-10, nest=True, dtype=bool)
+            ipix = np.where(mask)[0]
+        elif isinstance(self.footprint, str):
+            # path to a NESTED-ordering FITS mask
+            mask, fits_header = hp.read_map(self.footprint, nest=True, h=True)
+            ordering = dict(fits_header)['ORDERING']
+            if ordering.upper() != 'NESTED':
+                raise ValueError(f"mask at {self.footprint} has ORDERING={ordering!r} in its FITS header, expected 'NESTED'.")
+            mask = mask.astype(bool)
+            if len(mask) != self.npix:
+                raise ValueError(
+                    f"mask at {self.footprint} has {len(mask)} pixels but nside={self.nside} requires {self.npix}.")
+            ipix = np.where(mask)[0]
+        elif isinstance(self.footprint, np.ndarray):
+            mask = self.footprint.astype(bool)
             ipix = np.where(mask)[0]
         else:
-            mask = np.ones(npix)
-            ipix = np.arange(npix)
+            mask = np.ones(self.npix, dtype=bool)
+            ipix = np.arange(self.npix)
 
         return mask, ipix
 
-    def get_mask(self, nest: bool = True, return_ipix: bool = False, nside: int | None = None) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
+    def get_mask(self, nest: bool = True, return_ipix: bool = False) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
         """Return (and cache) the analysis mask.
 
         Parameters
@@ -548,38 +613,57 @@ class MapBuilder:
             If True, return mask in NESTED ordering. If False, return RING.
         return_ipix : bool, optional
             If True, also return the valid pixel indices.
-        nside : int or None, optional
-            Currently unused in cached mode; kept for API compatibility.
 
         Returns
         -------
-        mask : ndarray
-            Dense mask array at ``self.nside``.
+        mask : ndarray of bool
+            Dense mask array at ``self.nside`` in the requested ordering.
         ipix : ndarray of int, optional
             Valid pixel indices (only if ``return_ipix=True``).
 
         Notes
         -----
-        The mask is cached on first use as:
-        ``self.mask`` / ``self.ipix`` (NESTED) and
-        ``self.mask_ring`` / ``self.ipix_ring`` (RING).
+        The mask is cached on first use as ``self.mask`` / ``self.ipix``
+        (NESTED) and ``self.mask_ring`` / ``self.ipix_ring`` (RING). The two
+        orderings are built independently and lazily: requesting ``nest=True``
+        never triggers the (memory-heavy, at high nside) RING reorder, and
+        vice versa. The mask is stored as ``bool`` rather than ``float`` to
+        keep the cached footprint 8x smaller; callers that need a numeric
+        mask (e.g. for NaMaster) should cast it explicitly.
         """
-        if self.mask is None:
-            mask, ipix = self._create_mask()
-            self.mask = mask
-            self.ipix = ipix
-            self.mask_ring = hp.reorder(self.mask, n2r=True)
-            self.ipix_ring = hp.nest2ring(self.nside, self.ipix)
         if nest:
+            if self.mask is None:
+                self.mask, self.ipix = self._create_mask()
             if return_ipix:
                 return self.mask, self.ipix
             else:
                 return self.mask
         else:
+            if self.mask_ring is None:
+                if self.mask is None:
+                    self.mask, self.ipix = self._create_mask()
+                self.mask_ring = hp.reorder(self.mask, n2r=True)
+                self.ipix_ring = hp.nest2ring(self.nside, self.ipix)
             if return_ipix:
                 return self.mask_ring, self.ipix_ring
             else:
                 return self.mask_ring
+
+    @property
+    def fsky(self) -> float:
+        """Sky fraction covered by the footprint mask.
+
+        Computed from the actual number of kept pixels and their areas, so it
+        accounts for edge effects (e.g. HEALPix pixels only partially inside
+        the octant boundary that are dropped by :meth:`_create_mask`).
+
+        Returns
+        -------
+        float
+            Fraction of the full sky inside the footprint (between 0 and 1).
+        """
+        _, ipix = self.get_mask(return_ipix=True)
+        return len(ipix) / self.npix
 
     def get_octant_to_fullsky_ipix(self, nest: bool = True) -> np.ndarray:
         """Return a mapping from octant pixels to their full-sky replicas.
@@ -602,9 +686,30 @@ class MapBuilder:
             If ``self.octant_only`` is False.
         """
         assert self.octant_only
+
         if self.ipix_oct_fullsky is None:
+            # geometric mapping: reflect southern hemisphere and reflect phi into first quadrant
+            # (triangle wave, continuous across quadrant boundaries)
             theta, phi = hp.pix2ang(self.nside, np.arange(self.npix), nest=nest)
-            self.ipix_oct_fullsky = hp.ang2pix(self.nside, np.where(theta <= np.pi / 2., theta, np.pi - theta), phi % np.pi / 2., nest=nest)
+            ipix_mapped = hp.ang2pix(
+                self.nside,
+                np.where(theta <= np.pi / 2., theta, np.pi - theta),
+                np.pi / 2. - np.abs((phi % np.pi) - np.pi / 2.),
+                nest=nest)
+
+            # Pixels on the equator and the phi=0/pi/2 meridians are absent from
+            # the octant mask. Replace each with a neighboring pixel in the mask.
+            octant_mask = self.get_mask(nest=nest)
+            bad = np.where(~octant_mask[ipix_mapped].astype(bool))[0]
+            if len(bad) > 0:
+                neighbors = hp.get_all_neighbours(self.nside, ipix_mapped[bad], nest=nest)  # (8, n_bad)
+                for i, nbrs in enumerate(neighbors.T):
+                    valid = nbrs[nbrs >= 0]
+                    in_mask = octant_mask[valid].astype(bool)
+                    if np.any(in_mask):
+                        ipix_mapped[bad[i]] = valid[in_mask][0]
+
+            self.ipix_oct_fullsky = ipix_mapped
 
         return self.ipix_oct_fullsky
 
@@ -647,7 +752,7 @@ class MapBuilder:
                 wsp.read_from(fname)
             else:
                 print("Computing and saving workspace in", fname)
-                mask = self.get_mask(nest=False)
+                mask = self.get_mask(nest=False).astype(np.float64)
                 b = self.get_cls_b()
                 dummy_f = nmt.NmtField(mask, [np.zeros_like(mask)], lite=True)
                 wsp.compute_coupling_matrix(dummy_f, dummy_f, b)
@@ -682,9 +787,9 @@ class MapBuilder:
         nest : bool, optional
             Ordering of the returned map.
         replicate_octant : bool, optional
-            If True and ``octant_only`` is enabled, replicate the octant to a
-            full-sky map before returning (useful for transforms assuming full
-            sky).
+            If True, replicate the octant footprint to a full-sky map before
+            returning (useful for transforms assuming full sky). Requires
+            ``footprint='octant'``.
 
         Returns
         -------
@@ -696,6 +801,8 @@ class MapBuilder:
         If ``self.remove_monopole`` is True, subtracts the mean of the map over
         the masked pixels prior to replication.
         """
+        assert not replicate_octant or self.octant_only, "replicate_octant requires footprint='octant'"
+
         _map = self._field_map(imap, nest=nest)
 
         if self.remove_monopole:
@@ -719,8 +826,9 @@ class MapBuilder:
         save : bool, optional
             If True, saves a_lm to FITS files named by ``what='alms'``.
         replicate_octant : bool, optional
-            If True, compute a_lm from the octant replicated to full sky. Cannot
-            be combined with ``save=True`` in the current implementation.
+            If True, compute a_lm from the octant replicated to full sky.
+            Requires ``footprint='octant'``. Cannot be combined with
+            ``save=True`` in the current implementation.
         **map2am_kwargs
             Forwarded to :func:`healpy.map2alm`.
 
@@ -729,6 +837,7 @@ class MapBuilder:
         dict
             Mapping ``imap -> alm`` (complex ndarray).
         """
+        assert not replicate_octant or self.octant_only, "replicate_octant requires footprint='octant'"
         assert not (save and replicate_octant)
 
         alms = {}
@@ -775,18 +884,18 @@ class MapBuilder:
 
         Returns
         -------
-        healsparse.HealSparseMap
+        hsp.HealSparseMap
             Smoothed map restricted to the survey footprint.
         """
         ell = np.arange(lmax + 1)
         fl = np.exp(-0.5 * (ell * (ell + 1)) * sigma ** 2) / hp.pixwin(self.nside, pol=False, lmax=lmax)
         hp.almxfl(alm, fl, inplace=True)
         values = hp.alm2map(alm, self.nside, lmax=lmax)[ipix]
-        hsp = healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
-        hsp.update_values_pix(ipix, values.astype(self.dtype), nest=False)
-        return hsp
+        hsmap = hsp.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
+        hsmap.update_values_pix(ipix, values.astype(self.dtype), nest=False)
+        return hsmap
 
-    def compute_maps_from_alms(self, imaps: int | Iterable[int] | None = None, save: bool = True) -> healsparse.HealSparseMap | dict[int, healsparse.HealSparseMap]:
+    def compute_maps_from_alms(self, imaps: int | Iterable[int] | None = None, save: bool = True) -> hsp.HealSparseMap | dict[int, hsp.HealSparseMap]:
         """Reconstruct HealSparse maps from saved a_lm coefficients.
 
         Parameters
@@ -798,7 +907,7 @@ class MapBuilder:
 
         Returns
         -------
-        list of healsparse.HealSparseMap
+        list of hsp.HealSparseMap
             Reconstructed maps, one per requested ``imap``.
 
         Notes
@@ -812,7 +921,7 @@ class MapBuilder:
         for imap in self.tqdm(imaps, desc="[compute_maps_from_alms]"):
             alm = hp.read_alm(self.get_fname(imap, what='alms', format='fits'))
             values = hp.alm2map(alm, nside=self.nside, pol=False)
-            tmp = healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
+            tmp = hsp.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
             tmp.update_values_pix(ipix, values[ipix].astype(self.dtype), nest=False)
             if save:
                 fname = self.get_fname(imap)
@@ -899,7 +1008,7 @@ class MapBuilder:
                 cl[i, j] = wsp.decouple_cell([pcl])[0]
                 previous_pair = (i, j)
         else:
-            mask = self.get_mask(nest=False)
+            mask = self.get_mask(nest=False).astype(np.float64)
             fields = {i: None for i in imaps}
             for i, j in self.tqdm(pairs, desc="[compute_cls]"):
                 if fields[i] is None:
@@ -1015,10 +1124,6 @@ class MapBuilder:
         -----
         When ``approximate=False``, this method evaluates raw C_ell up to
         ``b.lmax`` and bins them using NaMaster bandpower windows.
-
-        The sky fraction is approximated as:
-        - ``fsky = 1/8`` for octant-only,
-        - ``fsky = 1`` for full-sky.
         """
         if self.predicted_cls is not None:
             return self.predicted_cls
@@ -1043,7 +1148,7 @@ class MapBuilder:
         else:
             assert approximate
             assert not error_bars
-        fsky = 1 / 8. if self.octant_only else 1.
+
         order = lambda i, j: (max(i, j), min(i, j))
 
         if not approximate:
@@ -1089,7 +1194,7 @@ class MapBuilder:
                     dcl2_num = 2 * (cl[i, i] + self._noise_cls(i))**2
                 else:
                     dcl2_num = (cl[i, i] + self._noise_cls(i)) * (cl[j, j] + self._noise_cls(j)) + cl[order(i, j)]**2
-                dcl[i, j] = np.sqrt(dcl2_num / ((2 * ell + 1.) * fsky * nell))
+                dcl[i, j] = np.sqrt(dcl2_num / ((2 * ell + 1.) * self.fsky * nell))
 
             if stacked:
                 dcl_full = {}
@@ -1105,7 +1210,7 @@ class MapBuilder:
                 # Stack Cl's and covariance blocks
                 if auto_only:
                     for i, j in pairs:
-                        dcl_full[i, j, i, j] = (Dl[i, j] * Dl[j, i] + Dl[i, i] * Dl[j, j]) / ((2 * ell + 1.) * fsky * nell)
+                        dcl_full[i, j, i, j] = (Dl[i, j] * Dl[j, i] + Dl[i, i] * Dl[j, j]) / ((2 * ell + 1.) * self.fsky * nell)
 
                     cl_stacked = np.zeros(len(pairs) * len(ell))
                     cov = np.zeros([len(pairs) * len(ell), len(pairs) * len(ell)])
@@ -1115,7 +1220,7 @@ class MapBuilder:
                 else:
                     for i, j in pairs:
                         for k, l in pairs:
-                            dcl_full[i, j, k, l] = (Dl[i, l] * Dl[j, k] + Dl[i, k] * Dl[j, l]) / ((2 * ell + 1.) * fsky * nell)
+                            dcl_full[i, j, k, l] = (Dl[i, l] * Dl[j, k] + Dl[i, k] * Dl[j, l]) / ((2 * ell + 1.) * self.fsky * nell)
 
                     cl_stacked = np.zeros(len(pairs) * len(ell))
                     cov = np.zeros([len(pairs) * len(ell), len(pairs) * len(ell)])
@@ -1324,8 +1429,10 @@ class MapBuilder:
         kappa = {}
         lmax_out = 2 * nside_small
 
-        # Mask
-        mask, ipix = self._create_mask(nside=nside_small)
+        # Mask (downgraded from self.nside to nside_small for moment computation)
+        mask_full, _ = self._create_mask()
+        mask = hp.ud_grade(mask_full, nside_small, order_in='NESTED', order_out='NESTED') > 0.5
+        ipix = np.where(mask)[0]
 
         # First, let's compute kappa maps for all bins and all theta (smoothing scales)
         for imap in range(self.nmaps):
@@ -1405,13 +1512,13 @@ class MapBuilder:
                 # Generate full-sky Gaussian map
                 out = nmt.utils.synfast_spherical(self.nside, [cls[imap, imap]], spin_arr=[0], seed=seed)[0]
 
-                # Store in healsparse map
-                hsp = healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
-                hsp.update_values_pix(ipix, out[ipix].astype(self.dtype), nest=False)
+                # Store in HealSparse map
+                hsmap = hsp.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
+                hsmap.update_values_pix(ipix, out[ipix].astype(self.dtype), nest=False)
 
                 # Save map
                 fname = self.get_fname(imap)
-                hsp.write(fname, clobber=True, format=self.save_format)
+                hsmap.write(fname, clobber=True, format=self.save_format)
 
         else:
             # Generate full-sky Gaussian map
@@ -1419,10 +1526,10 @@ class MapBuilder:
             outs = nmt.utils.synfast_spherical(self.nside, [cls[p] for p in pairs], spin_arr=[0] * self.nmaps, seed=seed)
 
             for imap, out in zip(imaps, outs):
-                # Store in healsparse map
-                hsp = healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
-                hsp.update_values_pix(ipix, out[ipix].astype(self.dtype), nest=False)
+                # Store in HealSparse map
+                hsmap = hsp.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
+                hsmap.update_values_pix(ipix, out[ipix].astype(self.dtype), nest=False)
 
                 # Save map
                 fname = self.get_fname(imap)
-                hsp.write(fname, clobber=True, format=self.save_format)
+                hsmap.write(fname, clobber=True, format=self.save_format)

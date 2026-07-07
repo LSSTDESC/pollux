@@ -361,7 +361,7 @@ def make_mask_radec_cuts(nside, ramin, ramax, decmin, decmax, eps=0.0, dtype=flo
     assert (0.0 <= ramin <= 360.0) & (0.0 <= ramax <= 360.0) & (ramin < ramax)
     assert (-90.0 <= decmin <= 90.0) & (-90.0 <= decmax <= 90.0) & (decmin < decmax)
 
-    mask = np.zeros(hp.nside2npix(nside))
+    mask = np.zeros(hp.nside2npix(nside), dtype=dtype)
     th, ph = hp.pix2ang(nside, np.arange(hp.nside2npix(nside)), nest=nest)
     ths, phs = radec2thetaphi([ramin, ramax], [decmin, decmax])
     thmin, thmax = min(ths), max(ths)

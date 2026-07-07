@@ -714,6 +714,7 @@ class HACCHaloReader(HACCReader):
 
     def __init__(self, halo_path: str, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
+        self.kind = "hacc_halo"
         self.variables: list[str] = ["fof_halo_center_x", "fof_halo_center_y", "fof_halo_center_z"]
         self.halo_path = halo_path
         assert not self.group_along_x

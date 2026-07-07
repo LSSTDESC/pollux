@@ -1,7 +1,7 @@
 import os
 
 import healpy as hp
-import healsparse
+import healsparse as hsp
 import numpy as np
 import pyccl
 import sacc
@@ -113,6 +113,7 @@ class LensingBuilder(MapBuilder):
         base_fname = 'kappa'
 
         kwargs.setdefault('wsp_dir', shell_builder.wsp_dir)
+        kwargs.setdefault('mask', shell_builder.footprint)
         super().__init__(
             nside=shell_builder.nside, dtype=dtype, save_dir=save_dir, base_fname=base_fname, nmaps=self.nkappas, sacc_type="galaxy_convergence_cl", **kwargs)
 
@@ -231,8 +232,8 @@ class LensingBuilder(MapBuilder):
             # Generate shear map (ring-ordered)
             g1, g2 = hp.sphtfunc.alm2map_spin([glm_E, np.zeros_like(glm_E)], nside=self.nside, spin=2, lmax=lmax)
 
-            gamma1 = healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
-            gamma2 = healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
+            gamma1 = hsp.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
+            gamma2 = hsp.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
 
             gamma1.update_values_pix(ipix, g1[ipix].astype(self.dtype), nest=False)
             gamma2.update_values_pix(ipix, g2[ipix].astype(self.dtype), nest=False)
@@ -350,7 +351,7 @@ class BornLensingBuilder(LensingBuilder):
 
         Returns
         -------
-        healsparse.HealSparseMap or dict
+        hsp.HealSparseMap or dict
             - If ``ikappas`` is a single int: returns a single ``HealSparseMap``.
             - If ``ikappas`` is ``None`` or an iterable: returns a dict keyed
               by kappa index with ``HealSparseMap`` values.
@@ -366,7 +367,7 @@ class BornLensingBuilder(LensingBuilder):
                 return kappas
 
         # Loop over shells and accumulate weighted contributions
-        kappas = {ikappa: healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype) for ikappa in self.iter(ikappas)}
+        kappas = {ikappa: hsp.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype) for ikappa in self.iter(ikappas)}
         for ishell in self.tqdm(range(self.nshells), desc="[construct_maps]"):
             shell = (self.shell_builder.load_maps(ishell)).astype(self.dtype)
             if self.nbar_from_maps:
@@ -382,7 +383,7 @@ class BornLensingBuilder(LensingBuilder):
 
             for ikappa, kappa in kappas.items():
                 w = self.compute_weight(ishell, ikappa)
-                kappas[ikappa] = healsparse.operations.sum_union([density * w, kappa])
+                kappas[ikappa] = hsp.operations.sum_union([density * w, kappa])
 
         for ikappa, kappa in kappas.items():
             fname = self.get_fname(ikappa)

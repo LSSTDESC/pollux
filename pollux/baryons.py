@@ -1,10 +1,9 @@
 import os
 from typing import Any, Iterable
 
-from astropy.io import fits
 import pyccl
 import healpy as hp
-import healsparse
+import healsparse as hsp
 import BaryonForge as bfg
 from .map_builder import MapBuilder
 from .shells import ShellBuilder, SnapshotShellBuilder
@@ -29,7 +28,6 @@ class BaryonifiedShellBuilder(ShellBuilder):
         mass_name: str,
         mass_def: tuple,
         mass_unit: str,
-        read_saved_haloes_props: bool = False,
         tag: str | None = None,
         M_min: float | None = None,
         **interpolator_kwargs: Any,
@@ -45,8 +43,6 @@ class BaryonifiedShellBuilder(ShellBuilder):
             Builder providing halo catalogs per shell.
         dmo, dmb : object
             Dark-matter-only and baryonic profiles compatible with BaryonForge.
-        read_saved_haloes_props : bool, optional
-            If True, read halo properties using ``read_catalogs_props``.
         mass_name : str
             Halo mass field name in the catalogs (e.g. ``'fof_halo_mass'``).
         mass_def : tuple
@@ -70,7 +66,6 @@ class BaryonifiedShellBuilder(ShellBuilder):
         if mass_unit not in ('Msun', 'Msun_over_h'):
             raise ValueError(f"mass_unit must be 'Msun' or 'Msun_over_h', got {mass_unit!r}")
         self.mass_unit = mass_unit
-        self.read_saved_haloes_props = read_saved_haloes_props
         self.tag = tag
         self.M_min = 10 * shell_builder.reader.mass_particles if M_min is None else M_min
 
@@ -86,11 +81,11 @@ class BaryonifiedShellBuilder(ShellBuilder):
             save_dir=os.path.join(shell_builder.save_dir, baryon_dir),
             seed=shell_builder.seed,
             dtype=shell_builder.dtype,
-            apply_grid_isometry=shell_builder.apply_grid_isometry,
-            apply_replicate_rotflip=shell_builder.apply_replicate_rotflip,
+            apply_grid_isometry=(shell_builder.Abs if shell_builder.apply_grid_isometry else False),
+            apply_replicate_rotflip=(shell_builder.replicate_rotflip if shell_builder.apply_replicate_rotflip else False),
             subsample_box=shell_builder.subsample_box,
             nside_c=shell_builder.nside_c,
-            octant_only=shell_builder.octant_only,
+            mask=shell_builder.footprint,
             save_format=shell_builder.save_format,
             wsp_dir=shell_builder.wsp_dir,
             b=shell_builder.b,
@@ -120,7 +115,7 @@ class BaryonifiedShellBuilder(ShellBuilder):
     def construct_maps(
         self,
         ishells: int | Iterable[int] | None = None,
-    ) -> healsparse.HealSparseMap | dict[int, healsparse.HealSparseMap]:
+    ) -> hsp.HealSparseMap | dict[int, hsp.HealSparseMap]:
         """Baryonify shell count maps using the halo catalog.
 
         Parameters
@@ -130,7 +125,7 @@ class BaryonifiedShellBuilder(ShellBuilder):
 
         Returns
         -------
-        healsparse.HealSparseMap or dict
+        hsp.HealSparseMap or dict
             - If ``ishells`` is a single int: returns the baryonified shell map.
             - If ``ishells`` is ``None`` or an iterable: returns a dict keyed by
               shell index with baryonified shell maps.
@@ -161,25 +156,28 @@ class BaryonifiedShellBuilder(ShellBuilder):
             s = bfg.utils.LightconeShell(map=count, cosmo=self.cosmo_dict)
 
             # Load the halo catalog for this shell and apply mass cut
-            if self.read_saved_haloes_props:
-                cat_halo = fits.open(self.halo_builder.get_fname(ishell, what='haloes_props'))[1].data
-            else:
-                cat_halo = self.halo_builder.read_catalogs_props(ishell, variables=['ra', 'dec', 'z', self.mass_name])
-                
+            cat_halo = self.halo_builder.load_catalogs(ishell, variables=['ra', 'dec', 'z', self.mass_name])
+
             # Convert halo mass to Msun if necessary
             M = cat_halo[self.mass_name]
             if self.mass_unit == 'Msun_over_h':
                 M *= self.cosmo['h']
                 
             w = M > self.M_min
-            h = bfg.utils.HaloLightConeCatalog(cat_halo['ra'][w], cat_halo['dec'][w], M[w], cat_halo['z'][w], self.cosmo_dict)
+            if w.any():
+                h = bfg.utils.HaloLightConeCatalog(cat_halo['ra'][w], cat_halo['dec'][w], M[w], cat_halo['z'][w], self.cosmo_dict)
 
-            # Run baryonification
-            runner = bfg.Runners.BaryonifyShell(h, s, epsilon_max=20., model=self.model)
-            baryonified_count = runner.process()
+                # Run baryonification
+                runner = bfg.Runners.BaryonifyShell(h, s, epsilon_max=20., model=self.model)
+                baryonified_count = runner.process()
+            else:
+                # No halos above M_min in this shell (e.g. a thin near-observer
+                # shell with too few objects): nothing to baryonify, so the
+                # dark-matter count map passes through unchanged.
+                baryonified_count = count
 
             # Save the baryonified map
-            shell = healsparse.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
+            shell = hsp.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
             shell.update_values_pix(ipix, baryonified_count[ipix].astype(self.dtype), nest=False)
             shell.write(fname, clobber=True, format=self.save_format, nocompress=self.nocompress)
 

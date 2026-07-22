@@ -112,25 +112,25 @@ class MapBuilder:
         self.save_format = save_format
         self.wsp_dir = wsp_dir if wsp_dir is not None else save_dir
         self.sacc_type = sacc_type
-        self.b = b
+        self._b = b
         self.nlb = nlb
         self.remove_monopole = remove_monopole
         self.nocompress = nocompress
         self.f_ell = f_ell
-        
+
         # Derived attributes
         self.npix = hp.nside2npix(self.nside)
-        self._nlb_cached = self.nlb if self.b is None else None
+        self._nlb_cached = self.nlb if self._b is None else None
         
         # Cached attributes (lazy-initialized)
-        self.tracers = None
-        self.tracers_sacc = None
+        self._tracers = None
+        self._tracers_sacc = None
         self.mask = None
         self.ipix = None
         self.mask_ring = None
         self.ipix_ring = None
         self.ipix_oct_fullsky = None
-        self.wsp = None
+        self._wsp = None
         self.predicted_cls = None
         
         # Make sure folder exists
@@ -279,17 +279,24 @@ class MapBuilder:
         """
         raise NotImplementedError
 
-    def get_tracers_ccl(self) -> list:
-        """Return (and cache) CCL tracer objects used for theory predictions.
+    @property
+    def tracers(self) -> list:
+        """Return (and lazily create) CCL tracer objects used for theory predictions.
 
         Returns
         -------
         list
             List of tracer objects with length ``self.nmaps``.
+
+        Notes
+        -----
+        Implemented as a lazy property (backed by ``self._tracers``) to keep
+        the builder pickle/serialize friendly: CCL tracer objects are not
+        constructed until first accessed.
         """
-        if self.tracers is None:
-            self.tracers = self._create_tracers_ccl()
-        return self.tracers
+        if self._tracers is None:
+            self._tracers = self._create_tracers_ccl()
+        return self._tracers
 
     def _create_tracers_sacc(self) -> list:
         """Create SACC tracer objects.
@@ -306,17 +313,24 @@ class MapBuilder:
         """
         raise NotImplementedError
 
-    def get_tracers_sacc(self) -> list:
-        """Return (and cache) SACC tracers used to store measured spectra.
+    @property
+    def tracers_sacc(self) -> list:
+        """Return (and lazily create) SACC tracers used to store measured spectra.
 
         Returns
         -------
         list
             List of SACC tracer objects with length ``self.nmaps``.
+
+        Notes
+        -----
+        Implemented as a lazy property (backed by ``self._tracers_sacc``) to
+        keep the builder pickle/serialize friendly: SACC tracer objects are
+        not constructed until first accessed.
         """
-        if self.tracers_sacc is None:
-            self.tracers_sacc = self._create_tracers_sacc()
-        return self.tracers_sacc
+        if self._tracers_sacc is None:
+            self._tracers_sacc = self._create_tracers_sacc()
+        return self._tracers_sacc
 
     def construct_maps(
         self,
@@ -713,7 +727,8 @@ class MapBuilder:
 
         return self.ipix_oct_fullsky
 
-    def get_cls_b(self) -> 'nmt.NmtBin':
+    @property
+    def b(self) -> 'nmt.NmtBin':
         """Return (and lazily create) the NaMaster binning scheme.
 
         Returns
@@ -723,14 +738,16 @@ class MapBuilder:
 
         Notes
         -----
-        This is implemented as a lazy getter to keep the builder pickle/serialize
-        friendly.
+        Implemented as a lazy property (backed by ``self._b``) to keep the
+        builder pickle/serialize friendly: the ``NmtBin`` is not constructed
+        until first accessed.
         """
-        if self.b is None:
-            self.b = make_nmtbin_logspaced(self.nside, 8, 2 * self.nside, self._nlb_cached or self.nlb, f_ell=self.f_ell)
-        return self.b
+        if self._b is None:
+            self._b = make_nmtbin_logspaced(self.nside, 8, 2 * self.nside, self._nlb_cached or self.nlb, f_ell=self.f_ell)
+        return self._b
 
-    def get_cls_wsp(self) -> 'nmt.NmtWorkspace':
+    @property
+    def wsp(self) -> 'nmt.NmtWorkspace':
         """Return (and lazily create) the NaMaster workspace.
 
         The workspace stores the mode-coupling matrix and bandpower windows for
@@ -740,25 +757,30 @@ class MapBuilder:
         -------
         pymaster.NmtWorkspace
             Workspace containing the coupling matrix and bandpower windows.
-        """
 
-        if self.wsp is not None:
-            return self.wsp
+        Notes
+        -----
+        Implemented as a lazy property (backed by ``self._wsp``) to keep the
+        builder pickle/serialize friendly: the ``NmtWorkspace`` is not
+        constructed until first accessed.
+        """
+        if self._wsp is not None:
+            return self._wsp
+
+        fname = os.path.join(self.wsp_dir, f'wsp_nside{self.nside}.wsp')
+        wsp = nmt.NmtWorkspace()
+        if os.path.exists(fname):
+            print("Loading workspace in", fname)
+            wsp.read_from(fname)
         else:
-            fname = os.path.join(self.wsp_dir, f'wsp_nside{self.nside}.wsp')
-            wsp = nmt.NmtWorkspace()
-            if os.path.exists(fname):
-                print("Loading workspace in", fname)
-                wsp.read_from(fname)
-            else:
-                print("Computing and saving workspace in", fname)
-                mask = self.get_mask(nest=False).astype(np.float64)
-                b = self.get_cls_b()
-                dummy_f = nmt.NmtField(mask, [np.zeros_like(mask)], lite=True)
-                wsp.compute_coupling_matrix(dummy_f, dummy_f, b)
-                wsp.write_to(fname)
-            self.wsp = wsp
-            return self.wsp
+            print("Computing and saving workspace in", fname)
+            mask = self.get_mask(nest=False).astype(np.float64)
+            b = self.b
+            dummy_f = nmt.NmtField(mask, [np.zeros_like(mask)], lite=True)
+            wsp.compute_coupling_matrix(dummy_f, dummy_f, b)
+            wsp.write_to(fname)
+        self._wsp = wsp
+        return self._wsp
 
     def _field_map(self, imap: int, nest: bool = True) -> np.ndarray:
         """Load a map and return a dense Healpix array.
@@ -942,7 +964,7 @@ class MapBuilder:
             ``ell``.
         """
         s = sacc.Sacc()
-        tracers = self.get_tracers_sacc()
+        tracers = self.tracers_sacc
         for t in tracers:
             s.add_tracer_object(t)
         for i, j in cl.keys():
@@ -988,8 +1010,8 @@ class MapBuilder:
             pairs = [(i1, i2) for i, i2 in enumerate(imaps) for i1 in imaps[i:]]  # with this order, i2 is preserved
 
         cl = {}
-        b = self.get_cls_b()
-        wsp = self.get_cls_wsp()
+        b = self.b
+        wsp = self.wsp
 
         if use_precomputed_alms:
             previous_pair = (-1, -1)
@@ -1137,10 +1159,10 @@ class MapBuilder:
             # pairs = [(i1, i2) for i, i1 in enumerate(imaps) for i2 in imaps[:i + 1]]
             pairs = [(i1, i2) for i, i2 in enumerate(imaps) for i1 in imaps[i:]]  # with this order, i2 is preserved
 
-        tracers = self.get_tracers_ccl()
+        tracers = self.tracers
         tracers_ = {imap: tracers[imap] for imap in imaps}
 
-        b = self.get_cls_b()
+        b = self.b
 
         if ell is None:
             ell = b.get_effective_ells()
@@ -1152,7 +1174,7 @@ class MapBuilder:
         order = lambda i, j: (max(i, j), min(i, j))
 
         if not approximate:
-            wsp = self.get_cls_wsp()
+            wsp = self.wsp
             bpws = wsp.get_bandpower_windows()[0, :, 0, :]
 
         def angular_cl(*args):

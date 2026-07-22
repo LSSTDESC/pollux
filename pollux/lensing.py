@@ -289,7 +289,7 @@ class BornLensingBuilder(LensingBuilder):
             self.mpart_over_area = mpart / area
 
             zmax = self.shell_builder.shell_edges_redshift()[-1]
-            self.dndz_norm = [quad(lambda z: t.get_dndz(z), 0., zmax) if isinstance(t, pyccl.tracers.NzTracer) else np.nan for t in self.get_tracers_ccl()]
+            self.dndz_norm = [quad(lambda z: t.get_dndz(z), 0., zmax) if isinstance(t, pyccl.tracers.NzTracer) else np.nan for t in self.tracers]
             self.zlens = [self.shell_builder.mean_z(ishell) for ishell in range(self.nshells)]
 
     def compute_weight(self, ishell, ikappa):
@@ -308,7 +308,7 @@ class BornLensingBuilder(LensingBuilder):
             Scalar weight applied to the shell density/contrast when summing into
             the convergence map.
         """
-        tracer = self.get_tracers_ccl()[ikappa]
+        tracer = self.tracers[ikappa]
 
         if self.multiple_planes:
             zmax = self.shell_builder.shell_edges_redshift()[-1]

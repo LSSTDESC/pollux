@@ -57,7 +57,10 @@ class BaryonifiedShellBuilder(ShellBuilder):
             Minimum halo mass used in baryonification. Defaults to
             ``10 * reader.mass_particles`` when None.
         **interpolator_kwargs
-            Forwarded to ``model.setup_interpolator``.
+            Forwarded to ``model.setup_interpolator`` for every shell. ``z_min``,
+            ``z_max``, and ``N_samples_z`` are computed per-shell (see
+            ``_setup_interpolator``) but can be overridden here to fix them
+            explicitly for all shells.
         """
         self.shell_builder_ref = shell_builder
         self.halo_builder = halo_builder
@@ -68,6 +71,7 @@ class BaryonifiedShellBuilder(ShellBuilder):
         self.mass_unit = mass_unit
         self.tag = tag
         self.M_min = 10 * shell_builder.reader.mass_particles if M_min is None else M_min
+        self._interpolator_kwargs = {**interpolator_kwargs, 'M_min': self.M_min}
 
         baryon_dir = f'baryons_{tag}' if tag is not None else 'baryons'
 
@@ -106,11 +110,32 @@ class BaryonifiedShellBuilder(ShellBuilder):
         dmb = bfg.ConvolvedProfile(dmb, pix)
         self.model = bfg.Profiles.Baryonification2D(dmo, dmb, self.cosmo_linear, mass_def=pyccl.halos.massdef.MassDef(*mass_def))
 
-        self._interpolator_setup = False
-        self._interpolator_kwargs = interpolator_kwargs
-        self._interpolator_kwargs['M_min'] = self.M_min
-        if 'N_samples_z' not in self._interpolator_kwargs:
-            self._interpolator_kwargs['N_samples_z'] = 2 * self.nshells + 1
+        self._interpolator_ishell = None  # shell index currently tabulated in self.model
+
+    def _setup_interpolator(self, ishell: int) -> None:
+        """(Re)build the interpolator for a single shell.
+
+        Sets ``proj_cutoff`` to half this shell's comoving thickness (Anbajagane,
+        Pandey & Chang 2024, Eq. 25) instead of a fixed value, since the
+        projection depth must match the shell's own line-of-sight extent.
+        Rebuilt per shell since ``proj_cutoff`` is shell-specific.
+        """
+        if self._interpolator_ishell == ishell:
+            return
+
+        z_shell_bins = self.shell_edges_redshift()
+        chi_shell_bins = self.shell_edges_comoving_distance()
+        proj_cutoff = (chi_shell_bins[ishell + 1] - chi_shell_bins[ishell]) / 2.
+        self.model.DMO.set_parameter('proj_cutoff', proj_cutoff)
+        self.model.DMB.set_parameter('proj_cutoff', proj_cutoff)
+
+        interpolator_kwargs = dict(self._interpolator_kwargs)
+        interpolator_kwargs.setdefault('N_samples_z', 2)
+        interpolator_kwargs.setdefault('z_linear_sampling', True)
+        interpolator_kwargs.setdefault('z_min', max(1e-3, z_shell_bins[ishell]))  # Avoid z=0 because binning is log-spaced in z
+        interpolator_kwargs.setdefault('z_max', max(z_shell_bins[ishell + 1], z_shell_bins[ishell] + 1e-3))
+        self.model.setup_interpolator(**interpolator_kwargs)
+        self._interpolator_ishell = ishell
 
     def construct_maps(
         self,
@@ -123,6 +148,9 @@ class BaryonifiedShellBuilder(ShellBuilder):
         ishells : int or array_like of int or None, optional
             Shell indices to process. If None, processes all shells.
 
+            The interpolator is rebuilt per shell (see ``_setup_interpolator``),
+            skipped only for shells already cached on disk.
+
         Returns
         -------
         hsp.HealSparseMap or dict
@@ -130,16 +158,6 @@ class BaryonifiedShellBuilder(ShellBuilder):
             - If ``ishells`` is ``None`` or an iterable: returns a dict keyed by
               shell index with baryonified shell maps.
         """
-        # Set up interpolator on first call
-        if not self._interpolator_setup:
-            z_shell_bins = self.shell_edges_redshift()
-            self.model.setup_interpolator(
-                z_min=max(1e-3, z_shell_bins[0]),  # Avoid z=0 to prevent numerical issues
-                z_max=z_shell_bins[self.nshells],
-                **self._interpolator_kwargs,
-            )
-            self._interpolator_setup = True
-
         shells = {}
 
         _, ipix = self.get_mask(nest=False, return_ipix=True)
@@ -150,6 +168,8 @@ class BaryonifiedShellBuilder(ShellBuilder):
                 shells[ishell] = shell
                 continue
 
+            self._setup_interpolator(ishell)
+
             # Load the shell, turn into count map (in RING ordering), and set unseen/empty pixels to 0.
             count = self.shell_builder_ref.load_maps(ishell).generate_healpix_map(nest=False)
             count[count == hp.UNSEEN] = 0.
@@ -159,21 +179,21 @@ class BaryonifiedShellBuilder(ShellBuilder):
             cat_halo = self.halo_builder.load_catalogs(ishell, variables=['ra', 'dec', 'z', self.mass_name])
 
             # Convert halo mass to Msun if necessary
-            M = cat_halo[self.mass_name]
             if self.mass_unit == 'Msun_over_h':
-                M *= self.cosmo['h']
+                M = cat_halo[self.mass_name] / self.cosmo['h']
+            else:
+                M = cat_halo[self.mass_name]
                 
             w = M > self.M_min
             if w.any():
+                # Build halo lightcone catalog for halos above M_min
                 h = bfg.utils.HaloLightConeCatalog(cat_halo['ra'][w], cat_halo['dec'][w], M[w], cat_halo['z'][w], self.cosmo_dict)
 
                 # Run baryonification
                 runner = bfg.Runners.BaryonifyShell(h, s, epsilon_max=20., model=self.model)
                 baryonified_count = runner.process()
             else:
-                # No halos above M_min in this shell (e.g. a thin near-observer
-                # shell with too few objects): nothing to baryonify, so the
-                # dark-matter count map passes through unchanged.
+                # No halos above M_min in this shell
                 baryonified_count = count
 
             # Save the baryonified map

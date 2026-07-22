@@ -5,6 +5,7 @@ import healpy as hp
 import healsparse as hsp
 import pymaster as nmt
 import sacc
+import treecorr
 from astropy.io import fits
 
 from .utils import radec2thetaphi, quad, sample_pdf
@@ -192,7 +193,7 @@ class CatalogSourceGenerator:
         rng = np.random.default_rng(self.lensing.shell_builder.seed + ikappa * self.nshells)
 
         # Generate redshifts according to lensing object redshift distributions (using cdf sampling)
-        t = self.lensing.get_tracers_ccl()[ikappa]
+        t = self.lensing.tracers[ikappa]
         zz = np.linspace(0, z_bins_edges[-1], 1000)
         nz = t.get_dndz(zz)
 
@@ -350,7 +351,7 @@ class CatalogSourceGenerator:
             fname = self.get_fname(ikappa, format='fits')
             fits.HDUList(hdul).writeto(fname, overwrite=True)
 
-    def load_catalogs(self, ikappas=None, return_header=False):
+    def load_catalogs(self, ikappas=None, return_header=False, subsample=None, seed=None):
         """Load saved FITS catalog(s) for one or more tomographic bins.
 
         Parameters
@@ -359,6 +360,16 @@ class CatalogSourceGenerator:
             Tomographic-bin indices to load. If None, loads all bins.
         return_header : bool, optional
             If True, also return the FITS header(s).
+        subsample : float or None, optional
+            If not None, randomly draw (without replacement, seeded by
+            ``seed + ikappa``) this fraction of galaxies from each loaded
+            catalog, with ``0 < subsample < 1``. A random draw is used rather
+            than a fixed stride, since galaxies are stored in a fixed
+            (non-random) order and a stride would sample a specific,
+            non-representative pattern. Default is None (no subsampling).
+        seed : int or None, optional
+            Seed for the subsampling RNG. Only used when ``subsample`` is not
+            None. Defaults to the shell builder's seed.
 
         Returns
         -------
@@ -369,6 +380,8 @@ class CatalogSourceGenerator:
             Table data from the binary table HDU if ``ikappas`` is a single int,
             otherwise a dict keyed by bin index.
         """
+        rng_seed = self.lensing.shell_builder.seed if seed is None else seed
+
         headers = {}
         tables = {}
         for ikappa in self.lensing.tqdm(ikappas, desc="[load_catalogs]"):
@@ -376,7 +389,10 @@ class CatalogSourceGenerator:
             hdul = fits.open(fname)
             try:
                 headers[ikappa] = hdul[1].header
-                tables[ikappa] = hdul[1].data
+                table = hdul[1].data
+                if subsample is not None:
+                    table = self._subsample_catalog(table, subsample, np.random.default_rng(rng_seed + ikappa))
+                tables[ikappa] = table
             finally:
                 hdul.close()
 
@@ -390,13 +406,74 @@ class CatalogSourceGenerator:
         else:
             return table
 
-    def compute_cls(self, ikappas=None, what='all', auto_only=False, shear_cols=('gamma1', 'gamma2'), nran_factor=5, seed=None, approximate=False, save=True):
+    def _random_radec(self, ipix_mask, n, rng):
+        """Draw ``n`` random (RA, DEC) positions uniformly within the footprint.
+
+        Parameters
+        ----------
+        ipix_mask : ndarray of int
+            Valid pixel indices of the footprint (NESTED, at ``self.nside``).
+        n : int
+            Number of random positions to draw.
+        rng : numpy.random.Generator
+            Random number generator.
+
+        Returns
+        -------
+        ra, dec : ndarray
+            Longitudes and latitudes in degrees.
+        """
+        ipix_rand = rng.choice(ipix_mask, size=n, replace=True)
+        return generate_radec_in_pix(self.nside, ipix_rand, rng)
+
+    @staticmethod
+    def _subsample_catalog(cat, subsample, rng):
+        """Draw a random subsample of a loaded catalog, without replacement.
+
+        Galaxies are stored in a fixed order (e.g. by shell/generation order),
+        so a fixed stride would sample a specific, non-representative pattern
+        rather than a fair subset; drawing a random subset avoids this.
+
+        Parameters
+        ----------
+        cat : numpy.ndarray
+            Catalog record array, as returned by :meth:`load_catalogs`.
+        subsample : float
+            Fraction of galaxies to keep, with ``0 < subsample < 1``.
+        rng : numpy.random.Generator
+            Random number generator.
+
+        Returns
+        -------
+        numpy.ndarray
+            The subsampled catalog.
+        """
+        assert 0. < subsample < 1., "subsample must satisfy 0 < subsample < 1"
+        n_keep = int(subsample * len(cat))
+        # Sorting avoids a random-order gather over the (possibly memmapped,
+        # disk-backed) catalog array, which is much slower than a sequential
+        # one; the drawn subset is unaffected, only its order.
+        idx = np.sort(rng.choice(len(cat), size=n_keep, replace=False))
+        return cat[idx]
+
+    def compute_cls(
+            self,
+            ikappas=None,
+            what='all',
+            auto_only=False,
+            shear_cols=('gamma1', 'gamma2'),
+            nran_factor=5,
+            seed=None,
+            approximate=False,
+            subsample=None,
+            shared_randoms=True,
+            save=True):
         """Measure angular power spectra directly from the generated catalog(s),
         including all cross-tomographic-bin combinations.
 
         Uses NaMaster's catalog-based pseudo-C_ell estimators (``NmtFieldCatalog``
         for shear, ``NmtFieldCatalogClustering`` for clustering), binned with the
-        shell builder's own NmtBin (:meth:`ShellBuilder.get_cls_b`) so that the
+        shell builder's own NmtBin (:attr:`ShellBuilder.b`) so that the
         resulting ``ell`` matches other C_ell products in the codebase for direct
         comparability. The pixel-window deconvolution folded into the shell
         builder's binning (appropriate for map-based estimators) is stripped out,
@@ -438,6 +515,21 @@ class CatalogSourceGenerator:
             approximation when catalogs are dense (many galaxies/randoms) but
             can be biased for sparse bins. If False (default), a fresh
             workspace is computed for every pair (exact, slower).
+        subsample : float or None, optional
+            If not None, randomly draw (without replacement, seeded by
+            ``seed + ikappa``) this fraction of galaxies from each loaded
+            catalog before building fields, with ``0 < subsample < 1``. A
+            random draw is used rather than a fixed stride, since galaxies
+            are stored in a fixed (non-random) order and a stride would
+            sample a specific, non-representative pattern. Default is None
+            (no subsampling).
+        shared_randoms : bool, optional
+            If True (default), draw a single random-point realization (sized
+            from the first processed bin) and reuse it for every bin's
+            density field, rather than drawing independent randoms per bin.
+            This matches the fact that all bins share the same survey
+            footprint, and is cheaper since randoms are only drawn once. If
+            False, each bin gets its own randoms, seeded by ``seed + ikappa``.
         save : bool, optional
             If True (default), save the spectra to a SACC FITS file via
             :meth:`_save_cls`, at ``{self._catalog_dir}/cls.fits``.
@@ -458,7 +550,7 @@ class CatalogSourceGenerator:
             what = ['clustering', 'shear', 'shear_clustering'] if what == 'all' else [what]
 
         builder = self.lensing.shell_builder
-        b_ref = builder.get_cls_b()  # whatever binning scheme this builder actually uses
+        b_ref = builder.b  # whatever binning scheme this builder actually uses
 
         # rebuild the identical per-ell bin assignment/weights, but without f_ell (pixwin)
         n_bands = b_ref.get_n_bands()
@@ -481,22 +573,27 @@ class CatalogSourceGenerator:
 
         # Build each bin's catalog field(s) once, reused across all pairs below
         f_dens, f_shear = {}, {}
+        shared_radec = None
         for ikappa in self.lensing.tqdm(ikappas, desc="[compute_cls] building fields"):
-            cat = self.load_catalogs(ikappa)
+            cat = self.load_catalogs(ikappa, subsample=subsample, seed=rng_seed)
             positions = [cat['ra'], cat['dec']]
             weights_gal = np.ones(cat['ra'].size)
 
             if need_density:
-                rng = np.random.default_rng(rng_seed + ikappa)
-                nran = int(nran_factor * cat['ra'].size)
-                ipix_rand = rng.choice(ipix_mask, size=nran, replace=True)
-                ra_rand, dec_rand = generate_radec_in_pix(self.nside, ipix_rand, rng)
-                f_dens[ikappa] = nmt.NmtFieldCatalogClustering(
-                    positions, weights_gal, [ra_rand, dec_rand], np.ones(nran), lmax=lmax, lonlat=True)
+                if shared_randoms:
+                    if shared_radec is None:
+                        rng = np.random.default_rng(rng_seed)
+                        nran = int(nran_factor * cat['ra'].size)
+                        shared_radec = self._random_radec(ipix_mask, nran, rng)
+                    ra_rand, dec_rand = shared_radec
+                else:
+                    rng = np.random.default_rng(rng_seed + ikappa)
+                    nran = int(nran_factor * cat['ra'].size)
+                    ra_rand, dec_rand = self._random_radec(ipix_mask, nran, rng)
+                f_dens[ikappa] = nmt.NmtFieldCatalogClustering(positions, weights_gal, [ra_rand, dec_rand], np.ones(len(ra_rand)), lmax=lmax, lonlat=True)
 
             if need_shear:
-                f_shear[ikappa] = nmt.NmtFieldCatalog(
-                    positions, weights_gal, [cat[col1], cat[col2]], spin=2, lmax=lmax, lonlat=True)
+                f_shear[ikappa] = nmt.NmtFieldCatalog(positions, weights_gal, [cat[col1], cat[col2]], spin=2, lmax=lmax, lonlat=True)
 
         cl = {}
 
@@ -575,7 +672,7 @@ class CatalogSourceGenerator:
             Path to the saved SACC FITS file.
         """
         s = sacc.Sacc()
-        shear_tracers = self.lensing.get_tracers_sacc()
+        shear_tracers = self.lensing.tracers_sacc
         density_tracers = [sacc.tracers.NZTracer(f"density_{i}", t.z, t.nz) for i, t in enumerate(shear_tracers)]
         for t in shear_tracers + density_tracers:
             s.add_tracer_object(t)
@@ -630,6 +727,340 @@ class CatalogSourceGenerator:
             cl[data_type] = pairs
 
         return ell, cl
+
+    def compute_2pt(
+            self,
+            ikappas=None,
+            what='all',
+            auto_only=False,
+            shear_cols=('gamma1', 'gamma2'),
+            theta_min=1.,
+            theta_max=100.,
+            ntheta=20,
+            sep_units='arcmin',
+            bin_slop=None,
+            nran_factor=5,
+            seed=None,
+            subsample=None,
+            shared_randoms=True,
+            error_bars=False,
+            theta_per_pair=False,
+            save=True):
+        """Measure real-space two-point correlation functions directly from the
+        generated catalog(s), including all cross-tomographic-bin combinations.
+
+        Uses TreeCorr's angular correlation estimators (``NNCorrelation`` for
+        clustering, ``GGCorrelation`` for shear, ``NGCorrelation`` for the
+        shear-density cross-correlation), binned in angular separation between
+        ``theta_min`` and ``theta_max``. This is the real-space analog of
+        :meth:`compute_cls`; ``ikappas``, ``what``, ``auto_only``,
+        ``shear_cols``, ``nran_factor``, ``seed`` and ``subsample`` have the
+        same meaning there.
+
+        Parameters
+        ----------
+        ikappas : int or array_like of int or None, optional
+            Tomographic bin indices to process. If None, uses all bins.
+        what : {'shear', 'clustering', 'shear_clustering', 'all'} or list of str, optional
+            Which correlations to compute:
+            - 'clustering': galaxy density autocorrelation ``w(theta)``, symmetric i<=j pairs.
+            - 'shear': shear autocorrelation ``xi_+/-(theta)``, symmetric i<=j pairs.
+            - 'shear_clustering': density-shear cross-correlation ``gamma_t/x(theta)``,
+              all (i, j) ordered pairs since lens-bin i / source-bin j is not symmetric.
+            - 'all': compute all three. Default.
+        auto_only : bool, optional
+            If True, restrict to same-bin pairs (i, i) only, skipping cross-bin
+            correlations. Default is False.
+        shear_cols : tuple of str, optional
+            Names of the two catalog columns to use as the spin-2 shear field.
+            See :meth:`compute_cls`.
+        theta_min, theta_max : float, optional
+            Angular separation range, in ``sep_units``. Defaults are 1 and 100 arcmin.
+        ntheta : int, optional
+            Number of log-spaced angular bins. Default is 20.
+        sep_units : str, optional
+            Units of ``theta_min``/``theta_max`` and of the returned ``theta``.
+            Default is 'arcmin'.
+        bin_slop : float or None, optional
+            TreeCorr ``bin_slop`` (binning approximation tolerance). If None,
+            uses TreeCorr's own default.
+        nran_factor : int, optional
+            Ratio of random points to galaxies for each bin's random catalog,
+            used for the Landy-Szalay ``w(theta)`` estimator and for
+            subtracting additive bias in ``gamma_t/x(theta)``. Default is 5.
+        seed : int or None, optional
+            Seed for the random catalogs' RNG. Defaults to the shell builder's seed.
+        subsample : float or None, optional
+            If not None, randomly draw (without replacement, seeded by
+            ``seed + ikappa``) this fraction of galaxies from each loaded
+            catalog before building fields, with ``0 < subsample < 1``. A
+            random draw is used rather than a fixed stride, since galaxies
+            are stored in a fixed (non-random) order and a stride would
+            sample a specific, non-representative pattern. Default is None
+            (no subsampling).
+        shared_randoms : bool, optional
+            If True (default), draw a single random-point realization (sized
+            from the first processed bin) and reuse it for every bin's
+            random catalog (used both for the ``w(theta)`` estimator and for
+            the ``gamma_t/x(theta)`` random-lens subtraction), rather than
+            drawing independent randoms per bin. This matches the fact that
+            all bins share the same survey footprint, and is cheaper since
+            randoms (and their TreeCorr catalog/tree) are only built once.
+            If False, each bin gets its own randoms, seeded by ``seed + ikappa``.
+        error_bars : bool, optional
+            If True, also return ``dxi``: standard deviations (shot-noise
+            error bars from TreeCorr), with the same structure as ``xi``.
+            Default is False.
+        theta_per_pair : bool, optional
+            If True, return ``theta`` as a dict with the same structure as
+            ``xi`` (each pair's own mean separation from its correlation
+            object's ``meanlogr``) instead of a single shared array. The
+            exact mean separation is catalog-dependent and can differ
+            slightly from one pair to another; this is always what gets
+            written to the SACC file regardless of this flag. Default is
+            False (return a single array, taken from the first pair computed).
+        save : bool, optional
+            If True (default), save the correlation functions to a SACC FITS
+            file via :meth:`_save_2pt`, at ``{self._catalog_dir}/cat_2pt.fits``.
+
+        Returns
+        -------
+        theta : ndarray or dict
+            Mean angular separation, in ``sep_units``. A single shared array,
+            or a dict keyed like ``xi`` if ``theta_per_pair=True``.
+        xi : dict
+            Keyed by SACC data type (e.g. ``'galaxy_density_xi'``,
+            ``'galaxy_shear_xi_plus'``, ``'galaxy_shear_xi_minus'``,
+            ``'galaxy_shearDensity_xi_t'``, ``'galaxy_shearDensity_xi_x'``,
+            depending on ``what``), each mapping to a dict keyed by ``(i, j)``.
+
+        Other Parameters
+        ----------------
+        error_bars : bool
+            If True, also returns ``dxi`` (dict keyed like ``xi``).
+        """
+        if isinstance(what, str):
+            what = ['clustering', 'shear', 'shear_clustering'] if what == 'all' else [what]
+
+        builder = self.lensing.shell_builder
+        rng_seed = builder.seed if seed is None else seed
+
+        _, ipix_mask = builder.get_mask(nest=True, return_ipix=True)
+
+        ikappas = list(self.lensing.iter(ikappas))
+
+        need_density = 'clustering' in what or 'shear_clustering' in what
+        need_shear = 'shear' in what or 'shear_clustering' in what
+        col1, col2 = shear_cols
+
+        corr_kwargs = dict(min_sep=theta_min, max_sep=theta_max, nbins=ntheta, sep_units=sep_units, bin_slop=bin_slop)
+
+        # Build each bin's catalog(s) once, reused across all pairs below.
+        # A single galaxy catalog serves as both the density tracer (for NN)
+        # and the shear tracer (for GG/NG): NNCorrelation only looks at
+        # positions and simply ignores the g1/g2 fields when present.
+        cat_gal, cat_rand = {}, {}
+        shared_cat_rand = None
+        for ikappa in self.lensing.tqdm(ikappas, desc="[compute_2pt] building catalogs"):
+            cat = self.load_catalogs(ikappa, subsample=subsample, seed=rng_seed)
+
+            gal_kwargs = dict(ra=cat['ra'], dec=cat['dec'], ra_units='deg', dec_units='deg')
+            if need_shear:
+                gal_kwargs.update(g1=cat[col1], g2=cat[col2], flip_g2=True)
+            cat_gal[ikappa] = treecorr.Catalog(**gal_kwargs)
+
+            if need_density:
+                if shared_randoms:
+                    if shared_cat_rand is None:
+                        rng = np.random.default_rng(rng_seed)
+                        nran = int(nran_factor * cat['ra'].size)
+                        ra_rand, dec_rand = self._random_radec(ipix_mask, nran, rng)
+                        shared_cat_rand = treecorr.Catalog(ra=ra_rand, dec=dec_rand, ra_units='deg', dec_units='deg')
+                    cat_rand[ikappa] = shared_cat_rand
+                else:
+                    rng = np.random.default_rng(rng_seed + ikappa)
+                    nran = int(nran_factor * cat['ra'].size)
+                    ra_rand, dec_rand = self._random_radec(ipix_mask, nran, rng)
+                    cat_rand[ikappa] = treecorr.Catalog(ra=ra_rand, dec=dec_rand, ra_units='deg', dec_units='deg')
+
+        xi = {}
+        dxi = {}
+        theta_pairs = {}
+        theta = None
+
+        # symmetric pairs (i <= j): valid for same-type correlations (NN, GG)
+        if auto_only:
+            sym_pairs = [(i, i) for i in ikappas]
+        else:
+            sym_pairs = [(i1, i2) for i, i2 in enumerate(ikappas) for i1 in ikappas[i:]]
+
+        if 'clustering' in what:
+            xi_nn = xi[sacc.standard_types.galaxy_density_xi] = {}
+            dxi_nn = dxi[sacc.standard_types.galaxy_density_xi] = {}
+            theta_nn = theta_pairs[sacc.standard_types.galaxy_density_xi] = {}
+            for i, j in self.lensing.tqdm(sym_pairs, desc="[compute_2pt] clustering"):
+                dd = treecorr.NNCorrelation(**corr_kwargs)
+                rr = treecorr.NNCorrelation(**corr_kwargs)
+                dr = treecorr.NNCorrelation(**corr_kwargs)
+                if i == j:
+                    dd.process(cat_gal[i])
+                    rr.process(cat_rand[i])
+                    dr.process(cat_gal[i], cat_rand[i])
+                    xi_nn[i, j], var_nn = dd.calculateXi(rr=rr, dr=dr)
+                else:
+                    rd = treecorr.NNCorrelation(**corr_kwargs)
+                    dd.process(cat_gal[i], cat_gal[j])
+                    rr.process(cat_rand[i], cat_rand[j])
+                    dr.process(cat_gal[i], cat_rand[j])
+                    rd.process(cat_rand[i], cat_gal[j])
+                    xi_nn[i, j], var_nn = dd.calculateXi(rr=rr, dr=dr, rd=rd)
+                dxi_nn[i, j] = np.sqrt(var_nn)
+                theta_nn[i, j] = np.exp(dd.meanlogr)
+                if theta is None:
+                    theta = theta_nn[i, j]
+
+        if 'shear' in what:
+            xi_p = xi[sacc.standard_types.galaxy_shear_xi_plus] = {}
+            xi_m = xi[sacc.standard_types.galaxy_shear_xi_minus] = {}
+            dxi_p = dxi[sacc.standard_types.galaxy_shear_xi_plus] = {}
+            dxi_m = dxi[sacc.standard_types.galaxy_shear_xi_minus] = {}
+            theta_p = theta_pairs[sacc.standard_types.galaxy_shear_xi_plus] = {}
+            theta_m = theta_pairs[sacc.standard_types.galaxy_shear_xi_minus] = {}
+            for i, j in self.lensing.tqdm(sym_pairs, desc="[compute_2pt] shear"):
+                gg = treecorr.GGCorrelation(**corr_kwargs)
+                if i == j:
+                    gg.process(cat_gal[i])
+                else:
+                    gg.process(cat_gal[i], cat_gal[j])
+                xi_p[i, j] = gg.xip
+                xi_m[i, j] = gg.xim
+                dxi_p[i, j] = np.sqrt(gg.varxip)
+                dxi_m[i, j] = np.sqrt(gg.varxim)
+                theta_p[i, j] = theta_m[i, j] = np.exp(gg.meanlogr)
+                if theta is None:
+                    theta = theta_p[i, j]
+
+        if 'shear_clustering' in what:
+            # not symmetric under bin exchange (lens bin i, source bin j) -> all ordered pairs
+            de_pairs = [(i, i) for i in ikappas] if auto_only else [(i, j) for i in ikappas for j in ikappas]
+            xi_t = xi[sacc.standard_types.galaxy_shearDensity_xi_t] = {}
+            xi_x = xi[sacc.standard_types.galaxy_shearDensity_xi_x] = {}
+            dxi_t = dxi[sacc.standard_types.galaxy_shearDensity_xi_t] = {}
+            dxi_x = dxi[sacc.standard_types.galaxy_shearDensity_xi_x] = {}
+            theta_t = theta_pairs[sacc.standard_types.galaxy_shearDensity_xi_t] = {}
+            theta_x = theta_pairs[sacc.standard_types.galaxy_shearDensity_xi_x] = {}
+            for i, j in self.lensing.tqdm(de_pairs, desc="[compute_2pt] shear x clustering"):
+                ng = treecorr.NGCorrelation(**corr_kwargs)
+                rg = treecorr.NGCorrelation(**corr_kwargs)
+                ng.process(cat_gal[i], cat_gal[j])
+                rg.process(cat_rand[i], cat_gal[j])
+                xi_t[i, j], xi_x[i, j], var_ng = ng.calculateXi(rg=rg)
+                dxi_t[i, j] = dxi_x[i, j] = np.sqrt(var_ng)
+                theta_t[i, j] = theta_x[i, j] = np.exp(ng.meanlogr)
+                if theta is None:
+                    theta = theta_t[i, j]
+
+        if save:
+            self._save_2pt(theta_pairs, xi)
+
+        theta_out = theta_pairs if theta_per_pair else theta
+
+        if error_bars:
+            return theta_out, xi, dxi
+        else:
+            return theta_out, xi
+
+    # which tracer role (density or shear) each SACC data type's (i, j) legs refer to
+    _SACC_TYPE_LEGS_XI = {
+        sacc.standard_types.galaxy_density_xi: ('density', 'density'),
+        sacc.standard_types.galaxy_shear_xi_plus: ('shear', 'shear'),
+        sacc.standard_types.galaxy_shear_xi_minus: ('shear', 'shear'),
+        sacc.standard_types.galaxy_shearDensity_xi_t: ('density', 'shear'),
+        sacc.standard_types.galaxy_shearDensity_xi_x: ('density', 'shear'),
+    }
+
+    def _save_2pt(self, theta, xi):
+        """Save catalog-based real-space two-point functions to a SACC FITS file.
+
+        Mirrors :meth:`_save_cls`: the catalog's density and shear fields
+        share the same underlying n(z) per bin but are registered under
+        distinct tracer names (``density_{i}`` vs. the lensing builder's
+        ``kappa_{i}``).
+
+        Parameters
+        ----------
+        theta : dict
+            Angular separations, keyed by SACC data type then by ``(i, j)``
+            (the ``theta_pairs`` structure computed internally by
+            :meth:`compute_2pt`, i.e. each pair's own mean separation, since
+            it is catalog-dependent and can differ slightly between pairs).
+        xi : dict
+            Dictionary keyed by SACC data type, each mapping to a dict keyed
+            by ``(i, j)`` (as returned by :meth:`compute_2pt`).
+
+        Returns
+        -------
+        str
+            Path to the saved SACC FITS file.
+        """
+        s = sacc.Sacc()
+        shear_tracers = self.lensing.tracers_sacc
+        density_tracers = [sacc.tracers.NZTracer(f"density_{i}", t.z, t.nz) for i, t in enumerate(shear_tracers)]
+        for t in shear_tracers + density_tracers:
+            s.add_tracer_object(t)
+
+        tracers_by_role = {'density': density_tracers, 'shear': shear_tracers}
+
+        for data_type, pairs in xi.items():
+            role_i, role_j = self._SACC_TYPE_LEGS_XI[data_type]
+            tracers_i, tracers_j = tracers_by_role[role_i], tracers_by_role[role_j]
+            for (i, j), _xi in pairs.items():
+                _theta = theta[data_type][i, j]
+                for _theta_k, _xi_k in zip(_theta, _xi):
+                    s.add_data_point(data_type, [tracers_i[i].name, tracers_j[j].name], _xi_k, theta=_theta_k)
+        fname = os.path.join(self._catalog_dir, 'cat_2pt.fits')
+        s.save_fits(fname, overwrite=True)
+        return fname
+
+    def load_2pt(self, return_dict: bool = False) -> sacc.Sacc | tuple[np.ndarray, dict[str, dict[tuple[int, int], np.ndarray]]]:
+        """Load catalog-based two-point functions previously saved by :meth:`_save_2pt`.
+
+        Parameters
+        ----------
+        return_dict : bool, optional
+            If True, return ``(theta, xi)``. Otherwise, return the SACC object.
+
+        Returns
+        -------
+        sacc.Sacc or (dict, dict)
+            If ``return_dict=False``, returns the loaded SACC object.
+            If ``return_dict=True``, returns ``(theta, xi)``, both dicts keyed
+            by SACC data type then by ``(i, j)`` (same structure as
+            ``theta_pairs``/``xi`` in :meth:`compute_2pt`; each pair's own
+            mean separation is preserved, since it is catalog-dependent).
+            Reads only the data types and tracer pairs actually present in
+            the file (:meth:`compute_2pt` may not have computed all of them),
+            with no dependency on ``self.lensing`` beyond the file path.
+        """
+        fname = os.path.join(self._catalog_dir, 'cat_2pt.fits')
+        s = sacc.Sacc.load_fits(fname)
+        if not return_dict:
+            return s
+
+        def tracer_index(name):
+            return int(name.rsplit('_', 1)[-1])
+
+        theta = {}
+        xi = {}
+        for data_type in s.get_data_types():
+            theta_pairs, xi_pairs = {}, {}
+            for name_i, name_j in s.get_tracer_combinations(data_type):
+                key = tracer_index(name_i), tracer_index(name_j)
+                theta_pairs[key], xi_pairs[key] = s.get_theta_xi(data_type, name_i, name_j)
+            theta[data_type] = theta_pairs
+            xi[data_type] = xi_pairs
+
+        return theta, xi
 
 
 class CatalogSourceUniform(CatalogSourceGenerator):
@@ -772,7 +1203,7 @@ class CatalogSourceClustered(CatalogSourceGenerator):
         elif bias_arr.size != self.lensing.nmaps:
             raise ValueError(f"bias must be a scalar or array of length {self.lensing.nmaps}, got {bias_arr.size}")
         self.bias = bias_arr
-        
+
         # Store bias values in augmentor kwargs
         for ikappa in self.lensing.iter():
             self.augmentor_kwargs[ikappa]['bias'] = self.bias[ikappa]
@@ -848,7 +1279,7 @@ class CatalogSourceClusteredMultinomial(CatalogSourceClustered):
             density_masked = self.snap_lensing.shell_builder.get_field_map(ishell, nest=True)[ipix_mask]
         else:
             density_masked = self.snap_lensing.shell_builder.load_maps(ishell, what='density', smooth_Mpc=self.smooth_Mpc)[ipix_mask]
-        
+
         # Loop over tomographic bins
         for ikappa in self.lensing.tqdm(ikappas, leave=False):
             rng = np.random.default_rng(self.lensing.shell_builder.seed + ishell + ikappa * self.nshells)
@@ -923,7 +1354,7 @@ class CatalogSourceClusteredPoisson(CatalogSourceClustered):
 
         # First compute mean density per shell for each tracer's n(z) (all bins needed for nbar)
         nbar_per_pix_per_bin = []
-        for ikappa, t in enumerate(self.lensing.get_tracers_ccl()):
+        for ikappa, t in enumerate(self.lensing.tracers):
             nz_int = np.array([quad(lambda z: t.get_dndz(z), z_bins_edges[ishell], z_bins_edges[ishell + 1]) for ishell in range(self.snap_lensing.nmaps)])
             nbar_per_pix_per_bin.append(nz_int / np.sum(nz_int) * self.nbar_per_pix[ikappa])
         self.nbar_per_pix_per_bin = np.array(nbar_per_pix_per_bin)
@@ -969,7 +1400,7 @@ class CatalogSourceClusteredPoisson(CatalogSourceClustered):
             density_masked = self.snap_lensing.shell_builder.get_field_map(ishell, nest=True)[ipix_mask]
         else:
             density_masked = self.snap_lensing.shell_builder.load_maps(ishell, what='density', smooth_Mpc=self.smooth_Mpc)[ipix_mask]
-            
+
         # Loop over tomographic bins
         for ikappa in self.lensing.tqdm(ikappas, leave=False):
             rng = np.random.default_rng(self.lensing.shell_builder.seed + ishell + ikappa * self.nshells)
@@ -1004,7 +1435,7 @@ class CatalogSourceClusteredPoisson(CatalogSourceClustered):
         builder = self.lensing.shell_builder
         z_bins_edges = builder.shell_edges_redshift()
 
-        t = self.lensing.get_tracers_ccl()[ikappa]
+        t = self.lensing.tracers[ikappa]
         for ishell in self.lensing.shell_builder.tqdm(None, disable=True):
             rng = np.random.default_rng(self.lensing.shell_builder.seed + ishell + ikappa * self.nshells)
 

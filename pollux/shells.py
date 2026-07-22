@@ -1,6 +1,8 @@
 import itertools
+import logging
 import warnings
 import os
+from functools import cached_property
 
 import healpy as hp
 import healsparse as hsp
@@ -20,6 +22,8 @@ from .map_builder import MapBuilder
 from .utils import quad, split_bins, arange_endpoint
 from .reader import DummyReader
 from .lensing import BornLensingBuilder, SnapshotBornLensingBuilder
+
+logger = logging.getLogger(__name__)
 
 
 class ShellBuilder(MapBuilder):
@@ -184,8 +188,8 @@ class ShellBuilder(MapBuilder):
         elif self.apply_replicate_rotflip:
             # draw random replicate rotation/flips
             ## first get number of replicates per direction
-            rmax = self.shell_edges_comoving_distance()[-1]
-            boxsize = self.reader.boxsize()
+            rmax = self.shell_edges_comoving_distance[-1]
+            boxsize = self.reader.boxsize
             nreplicate = int(np.ceil(rmax / boxsize)) + 2  # not too sure about that 2, but it's fast to check...
 
             ## then draw random rotation/flips (6 rotations, 8 flips, so max 48)
@@ -204,44 +208,40 @@ class ShellBuilder(MapBuilder):
         # Try getting shell information from reader, if not dummy.
         try:
             # make sure snapshots are larger than the shells
-            z_shell_bins = self.shell_edges_redshift()
-            chi_shell_bins = self.shell_edges_comoving_distance()
-            boxsize = self.reader.boxsize()
-            diff = np.diff(chi_shell_bins)
-            print(f"  - Box size = {boxsize:.2f} Mpc")
+            z_edges = self.shell_edges_redshift
+            boxsize = self.reader.boxsize
+            diff = np.diff(self.shell_edges_comoving_distance)
+            logger.info("  - Box size = %.2f Mpc.", boxsize)
             if not np.all(diff < boxsize):
                 message = "Some shells are deeper than the simulation box!\n"
                 for ishell in range(self.nshells):
                     if diff[ishell] > boxsize:
-                        message += f"Shell {ishell} ({z_shell_bins[ishell]:.2f}<z<{z_shell_bins[ishell+1]:.2f}) has width {diff[ishell]:.2f} Mpc\n"
+                        message += f"Shell {ishell} ({z_edges[ishell]:.2f}<z<{z_edges[ishell+1]:.2f}) has width {diff[ishell]:.2f} Mpc\n"
                 warnings.warn(message)
         except NotImplementedError:
             warnings.warn("Reader does not implement `shell_edges_redshift` or `shell_edges_comoving_distance` or `boxsize.")
             assert isinstance(reader, DummyReader)
 
         # Dump useful metadata
-        if self.save_dir is not None:
-            try:
-                self.save_info()
-            except Exception:
-                warnings.warn("Could not save the metadata info.")
+        try:
+            self.save_info()
+        except Exception:
+            warnings.warn("Could not save the metadata info.")
 
+    @cached_property
     def shell_edges_comoving_distance(self):
-        """Return comoving distances to shell edges.
+        """Comoving distances to shell edges.
 
-        Returns
-        -------
         ndarray
             Comoving radial distances (Mpc) of all shell edges.
             Length is ``nshells + 1``.
         """
-        return pyccl.comoving_radial_distance(self.cosmo, 1. / (1 + self.shell_edges_redshift()))
+        return pyccl.comoving_radial_distance(self.cosmo, 1. / (1 + self.shell_edges_redshift))
 
+    @cached_property
     def shell_edges_redshift(self):
-        """Return redshifts of shell edges.
+        """Redshifts of shell edges.
 
-        Returns
-        -------
         ndarray
             Redshifts of all shell edges. Length is ``nshells + 1`` for
             ``kind='snapshot'`` and depends on the reader for ``kind='lightcone'``.
@@ -252,25 +252,22 @@ class ShellBuilder(MapBuilder):
             If ``self.kind`` is not recognized, or if ``shell_edges_match`` is invalid.
         """
         if self.kind == 'snapshot':
-            if not hasattr(self, 'z_shell_bins'):
-                if self.shell_edges_match == 'center_redshift':
-                    func = lambda z: z
-                    ifunc = func
-                elif self.shell_edges_match == 'center_scale_factor':
-                    func = lambda z: 1. / (1. + z)
-                    ifunc = lambda a: 1. / a - 1.
-                elif self.shell_edges_match == 'center_comoving_distance':
-                    func = lambda z: 1e-3 * pyccl.comoving_radial_distance(self.cosmo, 1. / (1. + z))
-                    ifunc = None
-                elif self.shell_edges_match == 'center_comoving_volume':
-                    func = lambda z: (1e-3 * pyccl.comoving_radial_distance(self.cosmo, 1. / (1. + z)))**3
-                    ifunc = None
-                else:
-                    raise ValueError
+            if self.shell_edges_match == 'center_redshift':
+                func = lambda z: z
+                ifunc = func
+            elif self.shell_edges_match == 'center_scale_factor':
+                func = lambda z: 1. / (1. + z)
+                ifunc = lambda a: 1. / a - 1.
+            elif self.shell_edges_match == 'center_comoving_distance':
+                func = lambda z: 1e-3 * pyccl.comoving_radial_distance(self.cosmo, 1. / (1. + z))
+                ifunc = None
+            elif self.shell_edges_match == 'center_comoving_volume':
+                func = lambda z: (1e-3 * pyccl.comoving_radial_distance(self.cosmo, 1. / (1. + z)))**3
+                ifunc = None
+            else:
+                raise ValueError
 
-                self.z_shell_bins = split_bins(self.reader.zsnapshots, func=func, ifunc=ifunc, zmax=self.reader.zmax)
-
-            return self.z_shell_bins
+            return split_bins(self.reader.zsnapshots, func=func, ifunc=ifunc, zmax=self.reader.zmax)
 
         elif self.kind == 'lightcone':
             return self.reader.zsnapshots
@@ -294,21 +291,22 @@ class ShellBuilder(MapBuilder):
             Structured numpy array with fields including shell index, edge
             redshifts, comoving distances, and snapshot identifiers.
         """
-        z_shell_bins = self.shell_edges_redshift()
+        z_edges = self.shell_edges_redshift
         names = ['ishell', 'zsnapshot', 'zmin', 'zmax', 'chisnapshot', 'chimin', 'chimax', 'snapshot_id']
         dtypes = ['int', 'float', 'float', 'float', 'float', 'float', 'float', 'int']
         out = np.array(
             list(
                 zip(
-                    np.arange(self.nshells), self.reader.zsnapshots, z_shell_bins[:-1], z_shell_bins[1:],
-                    self.cosmo.comoving_radial_distance(1 / (1 + self.reader.zsnapshots)), self.cosmo.comoving_radial_distance(1 / (1 + z_shell_bins[:-1])),
-                    self.cosmo.comoving_radial_distance(1 / (1 + z_shell_bins[1:])), self.reader.snapshots)),
+                    np.arange(self.nshells), self.reader.zsnapshots, z_edges[:-1], z_edges[1:],
+                    self.cosmo.comoving_radial_distance(1 / (1 + self.reader.zsnapshots)), self.cosmo.comoving_radial_distance(1 / (1 + z_edges[:-1])),
+                    self.cosmo.comoving_radial_distance(1 / (1 + z_edges[1:])), self.reader.snapshots)),
             dtype=list(zip(names, dtypes)))
         if fname is not None:
             if '.txt' in fname:
                 np.savetxt(fname, out, header=' '.join(names), fmt='%8i %16.8f %16.8f %16.8f %16.8f %16.8f %16.8f %8i')
             else:
                 np.save(fname, out)
+            logger.debug("Saved to file %s.", fname)
         return out
 
     def save_info(self, ext='npy'):
@@ -328,7 +326,7 @@ class ShellBuilder(MapBuilder):
         assert ext in ['npy', 'txt']
         fname = os.path.join(self.save_dir, self.base_fname + '_info.' + ext)
 
-        z_shell_bins = self.shell_edges_redshift()
+        z_edges = self.shell_edges_redshift
         pixel_density = [self.pixel_density(ishell) for ishell in range(self.nshells)]
         sky_density = [self.sky_density(ishell) for ishell in range(self.nshells)]
         if self.kind == 'snapshot':
@@ -337,16 +335,16 @@ class ShellBuilder(MapBuilder):
             shell_info = np.array(
                 list(
                     zip(
-                        np.arange(self.nshells), self.reader.zsnapshots, z_shell_bins[:-1], z_shell_bins[1:],
-                        self.cosmo.comoving_radial_distance(1 / (1 + self.reader.zsnapshots)), self.cosmo.comoving_radial_distance(1 / (1 + z_shell_bins[:-1])),
-                        self.cosmo.comoving_radial_distance(1 / (1 + z_shell_bins[1:])), self.reader.snapshots, pixel_density, sky_density)),
+                        np.arange(self.nshells), self.reader.zsnapshots, z_edges[:-1], z_edges[1:],
+                        self.cosmo.comoving_radial_distance(1 / (1 + self.reader.zsnapshots)), self.cosmo.comoving_radial_distance(1 / (1 + z_edges[:-1])),
+                        self.cosmo.comoving_radial_distance(1 / (1 + z_edges[1:])), self.reader.snapshots, pixel_density, sky_density)),
                 dtype=list(zip(names, dtypes)))
             fmt = '%8i %16.8f %16.8f %16.8f %16.8f %16.8f %16.8f %8i %16.8f %16.8f'
         elif self.kind == 'lightcone':
             names = ['ishell', 'zmin', 'zmax', 'pixel_density', 'sky_density']
             dtypes = ['int', 'float', 'float', 'float', 'float']
             shell_info = np.array(
-                list(zip(np.arange(self.nshells), z_shell_bins[:-1], z_shell_bins[1:], pixel_density, sky_density)), dtype=list(zip(names, dtypes)))
+                list(zip(np.arange(self.nshells), z_edges[:-1], z_edges[1:], pixel_density, sky_density)), dtype=list(zip(names, dtypes)))
             fmt = '%8i %16.8f %16.8f %16.8f %16.8f'
         else:
             raise ValueError
@@ -354,6 +352,7 @@ class ShellBuilder(MapBuilder):
         if ext == 'npy':
             if os.path.exists(fname):
                 shell_info_existing = np.load(fname)
+                logger.debug("Found and loaded existing shell info at %s.", fname)
                 try:
                     for name, dtype in zip(names, dtypes):
                         if dtype == 'int':
@@ -363,26 +362,31 @@ class ShellBuilder(MapBuilder):
                             np.testing.assert_allclose(
                                 shell_info[name], shell_info_existing[name], rtol=1e-5, err_msg=f"Shell info {name} does not match existing file {fname}.")
                 except (TypeError, AssertionError) as e:
-                    warnings.warn(f'Shell info file exists but does not match current config: {e}')
+                    warnings.warn(f'Shell info file exists but does not match current config: {e}.')
             else:
                 np.save(fname, shell_info)
+                logger.debug("Saved to file %s.", fname)
         else:
             np.savetxt(fname, shell_info, header=' '.join(names), fmt=fmt)
+            logger.debug("Saved to file %s.", fname)
 
         # Save cosmology
         fname = os.path.join(self.save_dir, "cosmo_ccl.yaml")
         if not os.path.exists(fname):
             try:
                 self.reader.cosmo.write_yaml(os.path.join(self.save_dir, "cosmo_ccl.yaml"))
+                logger.debug("Saved to file %s.", fname)
             except ValueError:
                 warnings.warn("Cannot write cosmo yaml file, likely due to using non-serializable options (eg P(k)).")
+        else:
+            logger.debug("Found existing cosmology file at %s, skipping.", fname)
 
         # Save simulation and maps info
         data = {
             "nparticles": self.reader.nparticles,
-            "boxsize": self.reader.boxsize(),
+            "boxsize": self.reader.boxsize,
             "mass_particles": self.reader.mass_particles,
-            "box_comoving_density": self.reader.box_comoving_density(),
+            "box_comoving_density": self.reader.box_comoving_density,
             "kind": self.reader.kind,
             "snapshots": self.reader.snapshots.tolist(),
             "nsnapshots": self.reader.nsnapshots,
@@ -395,6 +399,9 @@ class ShellBuilder(MapBuilder):
         fname = os.path.join(self.save_dir, 'sim_info.yaml')
         if not os.path.exists(fname):
             yaml.dump(data, open(fname, "w"))
+            logger.debug("Saved to file %s.", fname)
+        else:
+            logger.debug("Found existing simulation info file at %s, skipping.", fname)
 
     def snapshot_lensing_builder(self, tag='zsnapshots'):
         """Return a lensing builder with one convergence map per shell snapshot.
@@ -446,11 +453,11 @@ class ShellBuilder(MapBuilder):
         list
             List of :class:`pyccl.NumberCountsTracer` objects of length ``nshells``.
         """
-        z_shell_bins = self.shell_edges_redshift()
+        z_edges = self.shell_edges_redshift
 
         tracers = []
         for ishell in range(self.nshells):
-            zz = np.linspace(z_shell_bins[ishell], z_shell_bins[ishell + 1], Nz)
+            zz = np.linspace(z_edges[ishell], z_edges[ishell + 1], Nz)
             dndz = self._dndz(zz)
             tracers.append(pyccl.NumberCountsTracer(self.cosmo, has_rsd=False, dndz=(zz, dndz), bias=(zz, np.ones_like(zz))))
 
@@ -469,11 +476,11 @@ class ShellBuilder(MapBuilder):
         list
             List of :class:`sacc.tracers.NZTracer` objects of length ``nshells``.
         """
-        z_shell_bins = self.shell_edges_redshift()
+        z_edges = self.shell_edges_redshift
 
         tracers = []
         for ishell in range(self.nshells):
-            zz = np.linspace(z_shell_bins[ishell], z_shell_bins[ishell + 1], Nz)
+            zz = np.linspace(z_edges[ishell], z_edges[ishell + 1], Nz)
             dndz = self._dndz(zz)
             tracers.append(sacc.tracers.NZTracer(f"density_{ishell}", zz, dndz))
 
@@ -492,9 +499,9 @@ class ShellBuilder(MapBuilder):
         float
             Mean redshift in the shell, weighted by the comoving volume element.
         """
-        z_shell_bins = self.shell_edges_redshift()
-        zmin = z_shell_bins[ishell]
-        zmax = z_shell_bins[ishell + 1]
+        z_edges = self.shell_edges_redshift
+        zmin = z_edges[ishell]
+        zmax = z_edges[ishell + 1]
 
         dVdz = lambda z: pyccl.comoving_angular_distance(self.cosmo, 1. / (1. + z))**2 / pyccl.background.h_over_h0(self.cosmo, 1. / (1. + z))
 
@@ -521,8 +528,8 @@ class ShellBuilder(MapBuilder):
             Only if ``get_shell_identifier=True``. Maps ``ishell -> iso_id``.
         """
         rng = np.random.default_rng(self.seed)
-        boxsize = self.reader.boxsize()
-        chi_shell_bins = self.shell_edges_comoving_distance()
+        boxsize = self.reader.boxsize
+        chi_edges = self.shell_edges_comoving_distance
 
         # maximum width a given isometry can be applied to
         if group_isometries is not None:
@@ -542,7 +549,7 @@ class ShellBuilder(MapBuilder):
         shell_identifier = {}
 
         for ishell in range(self.nshells):
-            dchi_shell = chi_shell_bins[ishell + 1] - chi_shell_bins[ishell]
+            dchi_shell = chi_edges[ishell + 1] - chi_edges[ishell]
             if dchi_iso + dchi_shell > dchi_iso_max:
                 # if grouped shell width is larger than maximum width for isometry, draw a new one
                 A, b = random_isometry(rng, boxsize)
@@ -553,9 +560,9 @@ class ShellBuilder(MapBuilder):
             shell_identifier[ishell] = n_isometries
 
         if group_isometries is not None:
-            print(f"  - Using {n_isometries} isometries grouped within {dchi_iso_max:.2f} Mpc.")
+            logger.info("  - Using %d isometries grouped within %.2f Mpc.", n_isometries, dchi_iso_max)
         else:
-            print(f"  - Using {n_isometries} isometries.")
+            logger.info("  - Using %d isometries.", n_isometries)
 
         if get_shell_identifier:
             return Abs, shell_identifier
@@ -576,10 +583,10 @@ class ShellBuilder(MapBuilder):
             Approximate number of box volumes required to fill the shell volume,
             accounting for octant-only mode if enabled.
         """
-        chi_shell_bins = self.shell_edges_comoving_distance()
-        box_volume = self.reader.boxsize()**3
+        chi_edges = self.shell_edges_comoving_distance
+        box_volume = self.reader.boxsize**3
 
-        shell_volume = 4. / 3. * np.pi * (chi_shell_bins[ishell + 1]**3 - chi_shell_bins[ishell]**3) * self.fsky
+        shell_volume = 4. / 3. * np.pi * (chi_edges[ishell + 1]**3 - chi_edges[ishell]**3) * self.fsky
 
         return shell_volume / box_volume
 
@@ -625,14 +632,14 @@ class ShellBuilder(MapBuilder):
         list of tuple
             Valid replica indices as (ix, iy, iz) integer triples.
         """
-        chi_shell_bins = self.shell_edges_comoving_distance()
-        rmin2 = chi_shell_bins[ishell]**2
-        rmax2 = chi_shell_bins[ishell + 1]**2
-        boxsize = self.reader.boxsize()
+        chi_edges = self.shell_edges_comoving_distance
+        rmin2 = chi_edges[ishell]**2
+        rmax2 = chi_edges[ishell + 1]**2
+        boxsize = self.reader.boxsize
         dtype = box_edges_original.dtype
         nreplicate = int(np.ceil(np.sqrt(rmax2) / boxsize)) + 2
         replicas = list(itertools.product(range(-nreplicate, nreplicate + 1), repeat=3))
-        print("Shell %d: checking %d^3 = %d replicates." % (ishell, 2 * nreplicate + 1, (2 * nreplicate + 1)**3))
+        logger.debug("Shell %d: checking %d^3 = %d replicates.", ishell, 2 * nreplicate + 1, (2 * nreplicate + 1)**3)
 
         A, b = self.Abs[ishell]
         # precompute isometry on box edges (replicates are then only a shift away)
@@ -693,8 +700,8 @@ class ShellBuilder(MapBuilder):
                     continue
 
             valid.append((ix, iy, iz))
-            
-        print(f"Shell {ishell}: {len(valid)} valid replicates out of {len(replicas)}.")
+
+        logger.debug("Shell %d: %d valid replicates out of %d.", ishell, len(valid), len(replicas))
 
         return valid
 
@@ -739,9 +746,9 @@ class ShellBuilder(MapBuilder):
             if not hasattr(self, 'subsample_ratios'):
                 # particles per full-sky pixel: fsky in estimate_replicates cancels fsky in
                 # the per-footprint-pixel denominator, leaving pure geometry with no mask needed
-                chi = self.shell_edges_comoving_distance()
-                shell_volumes = 4./3. * np.pi * (chi[1:]**3 - chi[:-1]**3)
-                ngal_pix = shell_volumes * self.reader.nparticles / (self.reader.boxsize()**3 * self.npix)
+                chi_edges = self.shell_edges_comoving_distance
+                shell_volumes = 4./3. * np.pi * (chi_edges[1:]**3 - chi_edges[:-1]**3)
+                ngal_pix = shell_volumes * self.reader.nparticles / (self.reader.boxsize**3 * self.npix)
                 if 'densitymax_z' in self.subsample_box.keys():
                     snr_pix = 1. / np.sqrt(ngal_pix)  # S/N per pixel
                     # S/N at redshift subsample_box_auto_z
@@ -766,7 +773,7 @@ class ShellBuilder(MapBuilder):
         else:
             raise ValueError
 
-    def _subsample(self, ishell, *arrays, verbose=False):
+    def _subsample(self, ishell, *arrays):
         """Subsample particles for a given shell, applying the same draw to all arrays.
 
         Parameters
@@ -777,8 +784,6 @@ class ShellBuilder(MapBuilder):
             One or more particle arrays sharing the same leading length (e.g.
             ``xyz``, or ``xyz_i`` and ``xyz_f`` for worldline interpolation).
             The same index selection is applied to every array.
-        verbose : bool, optional
-            If True, print the number of particles kept.
 
         Returns
         -------
@@ -789,8 +794,7 @@ class ShellBuilder(MapBuilder):
         ratio = self.subsample_ratio(ishell)
         n = len(arrays[0])
         nkept = int(n * ratio)
-        if verbose:
-            print(f"Keeping {nkept} particles, ie a fraction {ratio}.")
+        logger.debug("Keeping %d particles, ie a fraction %s.", nkept, ratio)
         if nkept >= n:
             return arrays[0] if len(arrays) == 1 else arrays
         rng = np.random.default_rng(self.seed + ishell)
@@ -811,7 +815,7 @@ class ShellBuilder(MapBuilder):
         float
             Effective comoving particle density (Mpc^-3).
         """
-        return self.reader.box_comoving_density() * self.subsample_ratio(ishell)
+        return self.reader.box_comoving_density * self.subsample_ratio(ishell)
 
     def pixel_density(self, ishell):
         """Return the expected mean number of particles per pixel in a shell.
@@ -826,10 +830,10 @@ class ShellBuilder(MapBuilder):
         float
             Mean particles per pixel expected from comoving density and shell volume.
         """
-        chi_shell_bins = self.shell_edges_comoving_distance()
+        chi_edges = self.shell_edges_comoving_distance
 
-        chi_max = chi_shell_bins[ishell + 1]
-        chi_min = chi_shell_bins[ishell]
+        chi_max = chi_edges[ishell + 1]
+        chi_min = chi_edges[ishell]
         pixel_volume = 4. * np.pi / 3. * (chi_max**3 - chi_min**3) / self.npix
 
         return pixel_volume * self.box_comoving_density(ishell)
@@ -901,13 +905,16 @@ class ShellBuilder(MapBuilder):
                     if not allow_missing_subs:
                         raise
             if allow_missing_subs:
-                print(f'Sub files found for shell number {ishell} : {n_subs_added} / {len(isubs)}')
+                logger.info("Sub files found for shell number %d: %d / %d.", ishell, n_subs_added, len(isubs))
 
             if self.add_orphans:
-                tmp_shell = hsp.HealSparseMap.read(self.get_fname(ishell, sub='orphan'))
+                orphan_fname = self.get_fname(ishell, sub='orphan')
+                tmp_shell = hsp.HealSparseMap.read(orphan_fname)
+                logger.debug("Found and loaded map at %s.", orphan_fname)
                 shell = hsp.operations.sum_union([shell, tmp_shell])
 
             shell.write(fname, clobber=True, format=self.save_format, nocompress=self.nocompress)
+            logger.debug("Saved to file %s.", fname)
 
             shells[ishell] = shell
 
@@ -1017,7 +1024,7 @@ class ShellBuilder(MapBuilder):
         if lmax is None:
             lmax = 3 * self.nside - 1
 
-        chi_bins = self.shell_edges_comoving_distance()
+        chi_edges = self.shell_edges_comoving_distance
         _, ipix = self.get_mask(nest=False, return_ipix=True)
 
         maps = {}
@@ -1029,9 +1036,10 @@ class ShellBuilder(MapBuilder):
                 maps[ishell] = existing
                 continue
 
-            alm = self.compute_alms(ishell, save=not replicate_octant, replicate_octant=replicate_octant, pol=False, lmax=lmax)
-            maps[ishell] = self._smooth_alms(alm, smooth_Mpc / chi_bins[ishell + 1], ipix, lmax)
+            alm = self.compute_alms(ishell, replicate_octant=replicate_octant, pol=False, lmax=lmax)
+            maps[ishell] = self._smooth_alms(alm, smooth_Mpc / chi_edges[ishell + 1], ipix, lmax)
             maps[ishell].write(fname, clobber=True, format=self.save_format, nocompress=self.nocompress)
+            logger.debug("Saved to file %s.", fname)
 
         return maps[ishells] if type(ishells) is int else maps
 
@@ -1068,7 +1076,7 @@ class ShellBuilder(MapBuilder):
         if lmax is None:
             lmax = 3 * self.nside - 1
 
-        chi_bins = self.shell_edges_comoving_distance()
+        chi_edges = self.shell_edges_comoving_distance
         _, ipix = self.get_mask(nest=False, return_ipix=True)
         whats = ['t11', 't22', 't12']
 
@@ -1081,12 +1089,13 @@ class ShellBuilder(MapBuilder):
                 ts[ishell] = [t11, t22, t12]
                 continue
 
-            alm = self.compute_alms(ishell, save=not replicate_octant, replicate_octant=replicate_octant, pol=False, lmax=lmax)
+            alm = self.compute_alms(ishell, replicate_octant=replicate_octant, pol=False, lmax=lmax)
 
             if smooth_Mpc is not None:
-                density_hsp = self._smooth_alms(alm, smooth_Mpc / chi_bins[ishell + 1], ipix, lmax)
-                density_hsp.write(
-                    self.get_fname(ishell, what='density', smooth_Mpc=smooth_Mpc), clobber=True, format=self.save_format, nocompress=self.nocompress)
+                density_hsp = self._smooth_alms(alm, smooth_Mpc / chi_edges[ishell + 1], ipix, lmax)
+                density_fname = self.get_fname(ishell, what='density', smooth_Mpc=smooth_Mpc)
+                density_hsp.write(density_fname, clobber=True, format=self.save_format, nocompress=self.nocompress)
+                logger.debug("Saved to file %s.", density_fname)
                 density = density_hsp.get_values_pix(ipix, nest=False)
                 # alm is now smoothed inplace — reuse for spin-2 transform below
             else:
@@ -1113,7 +1122,9 @@ class ShellBuilder(MapBuilder):
             for what, val in zip(whats, vals):
                 hsmap = hsp.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
                 hsmap.update_values_pix(ipix, val.astype(self.dtype), nest=False)
-                hsmap.write(self.get_fname(ishell, what=what, smooth_Mpc=smooth_Mpc), clobber=True, format=self.save_format)
+                tensor_fname = self.get_fname(ishell, what=what, smooth_Mpc=smooth_Mpc)
+                hsmap.write(tensor_fname, clobber=True, format=self.save_format)
+                logger.debug("Saved to file %s.", tensor_fname)
                 ts[ishell].append(hsmap)
 
         return ts[ishells] if type(ishells) is int else ts
@@ -1151,7 +1162,7 @@ class SnapshotShellBuilder(ShellBuilder):
 
         super().__init__(reader.nsnapshots, reader, nside, save_dir=save_dir, root_dir=root_dir, **kwargs)
 
-    def construct_maps_sub(self, ishell, isub, ijob=None, verbose=False):
+    def construct_maps_sub(self, ishell, isub, ijob=None):
         """Construct a single shell map for one snapshot/sub-volume.
 
         Parameters
@@ -1162,8 +1173,6 @@ class SnapshotShellBuilder(ShellBuilder):
             Sub-volume index.
         ijob : int or None, optional
             If provided, overrides (ishell, isub) using ``reader.get_job_args(ijob)``.
-        verbose : bool, optional
-            If True, prints additional diagnostic output.
 
         Returns
         -------
@@ -1182,14 +1191,12 @@ class SnapshotShellBuilder(ShellBuilder):
 
         shell = self.check_maps(read=True, fname=fname)
         if shell is not None:
-            if verbose:
-                print(f"Found and loaded map at {fname}.")
             return shell
 
         # get shell radii
-        chi_shell_bins = self.shell_edges_comoving_distance()
-        rmin2, rmax2 = chi_shell_bins[ishell]**2, chi_shell_bins[ishell + 1]**2
-        boxsize = self.reader.boxsize()
+        chi_edges = self.shell_edges_comoving_distance
+        rmin2, rmax2 = chi_edges[ishell]**2, chi_edges[ishell + 1]**2
+        boxsize = self.reader.boxsize
 
         # precompute valid replicas (reads only box edges) before loading particles
         valid_replicas = np.array(self._valid_replicas_sub(ishell, isub), dtype=np.int64).reshape(-1, 3)
@@ -1204,11 +1211,10 @@ class SnapshotShellBuilder(ShellBuilder):
         if len(valid_replicas) > 0:
             # read box
             xyz, _ = self.reader.read_sub(ishell, isub)
-            if verbose:
-                print(f"Loaded box {isub} (shell {ishell}) with {len(xyz)} particles.")
+            logger.debug("Loaded box %d (shell %d) with %d particles.", isub, ishell, len(xyz))
 
             # particle sub-sampling
-            xyz = self._subsample(ishell, xyz, verbose=verbose)
+            xyz = self._subsample(ishell, xyz)
 
             A, b = self.Abs[ishell]
 
@@ -1250,21 +1256,18 @@ class SnapshotShellBuilder(ShellBuilder):
             if len(uipix) > 0:
                 c = count_map.get_values_pix(uipix, nest=True)
                 shell.update_values_pix(uipix, c.astype(self.dtype), nest=True)
-                if verbose:
-                    print(f"Found {int(c.sum())} particles in the shell.")
-            elif verbose:
-                print("Found no particle in the shell.")
-        elif verbose:
-            print("No valid replica — skipping particle load.")
+                logger.debug("Found %d particles in the shell.", int(c.sum()))
+            else:
+                logger.debug("Found no particle in the shell.")
+        else:
+            logger.debug("No valid replica — skipping particle load.")
 
-        if self.save_dir is not None:
-            shell.write(fname, clobber=True, format=self.save_format, nocompress=self.nocompress)
-            if verbose:
-                print(f"Saved to file {fname}")
+        shell.write(fname, clobber=True, format=self.save_format, nocompress=self.nocompress)
+        logger.debug("Saved to file %s.", fname)
 
         return shell
 
-    def construct_catalogs_sub(self, ishell, isub, verbose=False, **kwargs):
+    def construct_catalogs_sub(self, ishell, isub, **kwargs):
         """Construct a particle catalog for a given shell/sub-volume.
 
         Parameters
@@ -1273,8 +1276,6 @@ class SnapshotShellBuilder(ShellBuilder):
             Shell index.
         isub : int
             Sub-volume index.
-        verbose : bool, optional
-            If True, prints additional diagnostic output.
         **kwargs
             Forwarded to ``reader.read_sub``.
 
@@ -1290,9 +1291,9 @@ class SnapshotShellBuilder(ShellBuilder):
             Comoving radial distance (Mpc).
         """
         # get shell radii
-        chi_shell_bins = self.shell_edges_comoving_distance()
-        rmin2, rmax2 = chi_shell_bins[ishell]**2, chi_shell_bins[ishell + 1]**2
-        boxsize = self.reader.boxsize()
+        chi_edges = self.shell_edges_comoving_distance
+        rmin2, rmax2 = chi_edges[ishell]**2, chi_edges[ishell + 1]**2
+        boxsize = self.reader.boxsize
 
         # precompute valid replicas (reads only box edges) before loading particles
         valid_replicas = np.array(self._valid_replicas_sub(ishell, isub), dtype=np.int64).reshape(-1, 3)
@@ -1301,11 +1302,10 @@ class SnapshotShellBuilder(ShellBuilder):
 
         # read box
         xyz, _ = self.reader.read_sub(ishell, isub, **kwargs)
-        if verbose:
-            print(f"Loaded box {isub} (shell {ishell}) with {len(xyz)} particles.")
+        logger.debug("Loaded box %d (shell %d) with %d particles.", isub, ishell, len(xyz))
 
         # particle sub-sampling
-        xyz = self._subsample(ishell, xyz, verbose=verbose)
+        xyz = self._subsample(ishell, xyz)
 
         A, b = self.Abs[ishell]
 
@@ -1385,9 +1385,10 @@ class SnapshotShellBuilder(ShellBuilder):
             if os.path.exists(fname):
                 try:
                     out[ishell] = fits.open(fname)
+                    logger.debug("Found and loaded catalog at %s.", fname)
                     continue
-                except Exception:
-                    pass
+                except Exception as e:
+                    warnings.warn(f"Cannot read catalog at {fname}: {e}.")
 
             hdul = [fits.PrimaryHDU()]
 
@@ -1417,6 +1418,7 @@ class SnapshotShellBuilder(ShellBuilder):
                 hdul.append(fits.BinTableHDU.from_columns(cols, header))
 
             fits.HDUList(hdul).writeto(fname, overwrite=True)
+            logger.debug("Saved to file %s.", fname)
 
             out[ishell] = hdul
 
@@ -1448,7 +1450,9 @@ class SnapshotShellBuilder(ShellBuilder):
         out = {}
 
         for ishell in self.tqdm(ishells, desc="[load_catalogs]"):
-            hdul = fits.open(self.get_fname(ishell, what='catalog'))
+            fname = self.get_fname(ishell, what='catalog')
+            hdul = fits.open(fname)
+            logger.debug("Found and loaded catalog at %s.", fname)
             columns = hdul[1].columns.names
             cat = {k: np.concatenate([hdu.data[k] for hdu in hdul[1:]]) for k in columns}
 
@@ -1457,7 +1461,7 @@ class SnapshotShellBuilder(ShellBuilder):
             else:
                 missing = [v for v in variables if v not in cat]
                 if missing:
-                    print(f"[load_catalogs] shell {ishell}: {missing} not in saved catalog, fetching from reader.")
+                    logger.info("Shell %d: %s not in saved catalog, fetching from reader.", ishell, missing)
                     cat.update(self._read_props(ishell, missing))
                 out[ishell] = {k: cat[k] for k in variables}
 
@@ -1479,9 +1483,11 @@ class SnapshotShellBuilder(ShellBuilder):
         variables : list of str
             Variable names to load via :meth:`reader.read_props`.
         save : bool, optional
-            If True, saves the returned variables as a new FITS file with
-            ``what='catalog_props'`` under :meth:`get_fname`, to avoid
-            re-reading the original simulation files on subsequent calls.
+            If True, checks for and reuses a cached ``what='catalog_props'``
+            FITS file (per shell) instead of re-reading the original
+            simulation files, and updates that cache with any variables
+            fetched from the reader on this call. If False, always reads
+            fresh from the reader and never touches the cache file.
 
         Returns
         -------
@@ -1494,23 +1500,36 @@ class SnapshotShellBuilder(ShellBuilder):
         out = {}
 
         for ishell in self.tqdm(ishells, desc="[_read_props]"):
-            fname = self.get_fname(ishell, what='catalog')
-            hdul = fits.open(fname)
+            props_fname = self.get_fname(ishell, what='catalog_props')
+            cached = {}
+            if save and os.path.exists(props_fname):
+                props_hdul = fits.open(props_fname)
+                cached = {k: props_hdul[1].data[k] for k in props_hdul[1].columns.names}
+                logger.debug("Found and loaded catalog_props at %s.", props_fname)
 
-            out[ishell] = {k: [] for k in variables}
+            missing = [v for v in variables if v not in cached]
+            if missing:
+                fname = self.get_fname(ishell, what='catalog')
+                hdul = fits.open(fname)
+                logger.debug("Found and loaded catalog at %s.", fname)
 
-            for hdu in self.tqdm(hdul[1:], desc=f"[_read_props: shell {ishell}]"):
-                isub = hdu.header['ISUB']
-                tmp = self.reader.read_props(ishell, isub, variables, ihaloes=hdu.data['ihaloes'])
-                for k in variables:
-                    out[ishell][k].append(tmp[k])
+                fetched = {k: [] for k in missing}
+                for hdu in self.tqdm(hdul[1:], desc=f"[_read_props: shell {ishell}]"):
+                    isub = hdu.header['ISUB']
+                    tmp = self.reader.read_props(ishell, isub, missing, ihaloes=hdu.data['ihaloes'])
+                    for k in missing:
+                        fetched[k].append(tmp[k])
+                for k in missing:
+                    fetched[k] = np.concatenate(fetched[k])
 
-            for k in variables:
-                out[ishell][k] = np.concatenate(out[ishell][k])
+                cached.update(fetched)
 
-            if save:
-                fname = self.get_fname(ishell, what='catalog_props')
-                fits.HDUList([fits.PrimaryHDU(out[ishell])]).writeto(fname, overwrite=True)
+                if save:
+                    cols = [fits.Column(name=k, format='E', array=v) for k, v in cached.items()]
+                    fits.HDUList([fits.PrimaryHDU(), fits.BinTableHDU.from_columns(cols)]).writeto(props_fname, overwrite=True)
+                    logger.debug("Saved to file %s.", props_fname)
+
+            out[ishell] = {k: cached[k] for k in variables}
 
         return out[ishells] if type(ishells) is int else out
 
@@ -1548,7 +1567,7 @@ class LightconeSlicingBuilder(ShellBuilder):
 
         super().__init__(reader.nsnapshots, reader, nside, save_dir=save_dir, root_dir=root_dir, **kwargs)
 
-    def construct_maps_sub(self, ishell, isub, ijob=None, verbose=False):
+    def construct_maps_sub(self, ishell, isub, ijob=None):
         """Construct a single shell map for one lightcone sub-volume.
 
         Parameters
@@ -1559,8 +1578,6 @@ class LightconeSlicingBuilder(ShellBuilder):
             Sub-volume index.
         ijob : int or None, optional
             If provided, overrides (ishell, isub) using ``reader.get_job_args(ijob)``.
-        verbose : bool, optional
-            If True, prints additional diagnostic output.
 
         Returns
         -------
@@ -1574,15 +1591,13 @@ class LightconeSlicingBuilder(ShellBuilder):
         # check if shell has already been created
         shell = self.check_maps(read=True, fname=fname)
         if shell is not None:
-            if verbose:
-                print(f"Found and loaded map at {fname}.")
             return shell
 
         # get shell radii and redshifts
-        chi_shell_bins = self.shell_edges_comoving_distance()
-        rmin2, rmax2 = chi_shell_bins[ishell]**2, chi_shell_bins[ishell + 1]**2
-        z_shell_bins = self.shell_edges_redshift()
-        zmin, zmax = z_shell_bins[ishell], z_shell_bins[ishell + 1]
+        chi_edges = self.shell_edges_comoving_distance
+        rmin2, rmax2 = chi_edges[ishell]**2, chi_edges[ishell + 1]**2
+        z_edges = self.shell_edges_redshift
+        zmin, zmax = z_edges[ishell], z_edges[ishell + 1]
 
         # get lightcone snapshot redshifts
         zsnapshot_fulllist = self.reader.zsnapshots_fulllist
@@ -1597,14 +1612,14 @@ class LightconeSlicingBuilder(ShellBuilder):
             xyz.append(self.reader.read_sub(isnapshot, isub))
         xyz = np.vstack(xyz)
 
-        if verbose:
+        if logger.isEnabledFor(logging.DEBUG):
             r2_xyz = xyz[:, 0]**2 + xyz[:, 1]**2 + xyz[:, 2]**2
             rmin2_xyz = r2_xyz.min()
             rmax2_xyz = r2_xyz.max()
-            print(f"Shell {ishell} (z=[{zmin:.3f},{zmax:.3f}]):")
-            print(f"  - Particle radial distance range in box: [{np.sqrt(rmin2_xyz):.3f}, {np.sqrt(rmax2_xyz):.3f}] Mpc")
-            print(f"  - Shell radial distance range: [{np.sqrt(rmin2):.3f}, {np.sqrt(rmax2):.3f}] Mpc")
-            print(f"  - Number of particles in box: {len(xyz)}")
+            logger.debug(
+                "Shell %d (z=[%.3f,%.3f]): particle radial distance range in box [%.3f, %.3f] Mpc, "
+                "shell radial distance range [%.3f, %.3f] Mpc, %d particles in box.",
+                ishell, zmin, zmax, np.sqrt(rmin2_xyz), np.sqrt(rmax2_xyz), np.sqrt(rmin2), np.sqrt(rmax2), len(xyz))
 
         # initialize shell
         shell = hsp.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
@@ -1639,15 +1654,12 @@ class LightconeSlicingBuilder(ShellBuilder):
             uipix = count_map.valid_pixels
             c = count_map.get_values_pix(uipix, nest=True)
             shell.update_values_pix(uipix, c.astype(self.dtype), nest=True)
-            if verbose:
-                print(f"Found {int(c.sum())} particles in the shell.")
-        elif verbose:
-            print("Found no particle in the shell.")
+            logger.debug("Found %d particles in the shell.", int(c.sum()))
+        else:
+            logger.debug("Found no particle in the shell.")
 
-        if self.save_dir is not None:
-            shell.write(fname, clobber=True, format=self.save_format, nocompress=self.nocompress)
-            if verbose:
-                print(f"Saved to file {fname}")
+        shell.write(fname, clobber=True, format=self.save_format, nocompress=self.nocompress)
+        logger.debug("Saved to file %s.", fname)
 
         return shell
 
@@ -1688,7 +1700,7 @@ class SnapshotInterpBuilder(ShellBuilder):
 
         super().__init__(reader.nsnapshots - 1, reader, nside, save_dir=save_dir, root_dir=root_dir, **kwargs)
 
-    def construct_maps_sub(self, isnap, isub, ijob=None, verbose=False, do_orphan_ishell=None):
+    def construct_maps_sub(self, isnap, isub, ijob=None, do_orphan_ishell=None):
         """Construct one interpolated lightcone shell map for a sub-volume.
 
         Parameters
@@ -1699,8 +1711,6 @@ class SnapshotInterpBuilder(ShellBuilder):
             Sub-volume index.
         ijob : int or None, optional
             If provided, overrides (isnap, isub) using ``reader.get_job_args(ijob)``.
-        verbose : bool, optional
-            If True, prints diagnostic information about particles found.
         do_orphan_ishell : int or None, optional
             If provided, build the orphan shell (stored under ``sub='orphan'``)
             by loading previously dumped orphan particle arrays.
@@ -1725,28 +1735,24 @@ class SnapshotInterpBuilder(ShellBuilder):
 
         shell = self.check_maps(read=True, fname=fname)
         if shell is not None:
-            if verbose:
-                print(f"Found and loaded map at {fname}.")
             return shell
 
         # get lightcone line
-        z_shell_bins = self.shell_edges_redshift()
-        a_i = 1. / (1. + z_shell_bins[isnap + 1])
-        a_f = 1. / (1. + z_shell_bins[isnap])
+        z_edges = self.shell_edges_redshift
+        a_i = 1. / (1. + z_edges[isnap + 1])
+        a_f = 1. / (1. + z_edges[isnap])
         a_lc = arange_endpoint(a_i, a_f, 0.005)
         chi2_lc = self.cosmo.comoving_radial_distance(a_lc)**2
         rmin2, rmax2 = chi2_lc[-1], chi2_lc[0]
-        boxsize = self.reader.boxsize()
+        boxsize = self.reader.boxsize
 
         # precompute valid replicas for the non-orphan case before loading particles
         if do_orphan_ishell is None:
             valid_replicas = np.array(self._valid_replicas_sub(isnap, isub), dtype=np.int64).reshape(-1, 3)
             if len(valid_replicas) == 0:
                 shell = hsp.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
-                if self.save_dir is not None:
-                    shell.write(fname, clobber=True, format=self.save_format, nocompress=self.nocompress)
-                    if verbose:
-                        print(f"Saved to file {fname}")
+                shell.write(fname, clobber=True, format=self.save_format, nocompress=self.nocompress)
+                logger.debug("Saved to file %s.", fname)
                 return shell
 
         # read particles
@@ -1756,17 +1762,16 @@ class SnapshotInterpBuilder(ShellBuilder):
                 [np.load(self.get_fname(isnap, sub=isub, what='orphan_i', format='npy')) for isub in self.reader.get_isubs_for_snapshot(isnap)])
             xyzf = np.concatenate(
                 [np.load(self.get_fname(isnap, sub=isub, what='orphan_f', format='npy')) for isub in self.reader.get_isubs_for_snapshot(isnap)])
-            if verbose:
-                print(f"Loaded {len(xyzi)} orphan particles.")
+            logger.debug("Loaded %d orphan particles.", len(xyzi))
 
             # sort id's and match particles
             sidxi = np.argsort(xyzi['id'])
             sidxf = np.argsort(xyzf['id'])
             xyz_i = np.vstack([xyzi[sidxi][k] for k in keys]).T
             xyz_f = np.vstack([xyzf[sidxf][k] for k in keys]).T
-            if verbose:
+            if logger.isEnabledFor(logging.DEBUG):
                 np.testing.assert_array_equal(xyzi['id'][sidxi], xyzf['id'][sidxf])
-                print("Matched particles.")
+                logger.debug("Matched particles.")
 
             # move particles that went through box faces
             part_boundary_fix(xyz_i, xyz_f, boxsize, fixed='i')
@@ -1783,31 +1788,32 @@ class SnapshotInterpBuilder(ShellBuilder):
             xyz_i, box_edges_original, idx_i = self.reader.read_sub(isnap, isub, extra_variables=['id'])
             xyz_f, box_edges_original, idx_f = self.reader.read_sub(isnap + 1, isub, extra_variables=['id'])
 
-            if verbose:
-                print(f"Loaded box {isub} (snapshot {isnap}) with {len(xyz_i)} particles.")
-                print(f"Loaded box {isub} (snapshot {isnap + 1}) with {len(xyz_f)} particles.")
+            logger.debug("Loaded box %d (snapshot %d) with %d particles.", isub, isnap, len(xyz_i))
+            logger.debug("Loaded box %d (snapshot %d) with %d particles.", isub, isnap + 1, len(xyz_f))
 
             # match the indices of particles
             idx_i_in, idx_f_in, idx_i_out, idx_f_out = inter_diff(idx_i['id'], idx_f['id'])
             assert len(idx_i_in) == len(idx_f_in)
 
             # dump orphan particles
-            np.save(
-                self.get_fname(isnap, sub=isub, what='orphan_i', format='npy'),
-                np.rec.array((*xyz_i[idx_i_out].T, idx_i['id'][idx_i_out]), names=['x', 'y', 'z', 'id']))
-            np.save(
-                self.get_fname(isnap, sub=isub, what='orphan_f', format='npy'),
-                np.rec.array((*xyz_f[idx_f_out].T, idx_f['id'][idx_f_out]), names=['x', 'y', 'z', 'id']))
+            orphan_i_fname = self.get_fname(isnap, sub=isub, what='orphan_i', format='npy')
+            np.save(orphan_i_fname, np.rec.array((*xyz_i[idx_i_out].T, idx_i['id'][idx_i_out]), names=['x', 'y', 'z', 'id']))
+            logger.debug("Saved to file %s.", orphan_i_fname)
+
+            orphan_f_fname = self.get_fname(isnap, sub=isub, what='orphan_f', format='npy')
+            np.save(orphan_f_fname, np.rec.array((*xyz_f[idx_f_out].T, idx_f['id'][idx_f_out]), names=['x', 'y', 'z', 'id']))
+            logger.debug("Saved to file %s.", orphan_f_fname)
 
             # keep matched particles
             xyz_i = xyz_i[idx_i_in]
             xyz_f = xyz_f[idx_f_in]
 
-            if verbose:
-                print(f"Found {len(idx_i_in)} particles in both boxes, {len(idx_i_out)}/{len(idx_f_out)} orphans in initial/final boxes saved.")
+            logger.debug(
+                "Found %d particles in both boxes, %d/%d orphans in initial/final boxes saved.",
+                len(idx_i_in), len(idx_i_out), len(idx_f_out))
 
         # particle sub-sampling
-        xyz_i, xyz_f = self._subsample(isnap, xyz_i, xyz_f, verbose=verbose)
+        xyz_i, xyz_f = self._subsample(isnap, xyz_i, xyz_f)
 
         # initialize shell
         shell = hsp.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
@@ -1862,15 +1868,12 @@ class SnapshotInterpBuilder(ShellBuilder):
         if len(uipix) > 0:
             c = count_map.get_values_pix(uipix, nest=True)
             shell.update_values_pix(uipix, c.astype(self.dtype), nest=True)
-            if verbose:
-                print(f"Found {int(c.sum())} particles in the shell.")
-        elif verbose:
-            print("Found no particle in the shell.")
+            logger.debug("Found %d particles in the shell.", int(c.sum()))
+        else:
+            logger.debug("Found no particle in the shell.")
 
-        if self.save_dir is not None:
-            shell.write(fname, clobber=True, format=self.save_format, nocompress=self.nocompress)
-            if verbose:
-                print(f"Saved to file {fname}")
+        shell.write(fname, clobber=True, format=self.save_format, nocompress=self.nocompress)
+        logger.debug("Saved to file %s.", fname)
 
         return shell
 

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import itertools
+import logging
 import os
 import warnings
+from abc import ABC, abstractmethod
 from time import time
 from typing import Any
 
@@ -13,14 +15,16 @@ from pynverse import inversefunc
 
 from .utils import read_params, subsample_ppf, trim, trunc_norm
 
+logger = logging.getLogger(__name__)
+
 os.environ["GENERICIO_NO_MPI"] = "y"
 try:
     import pygio
 except Exception:
-    print("Unable to import pygio")
+    warnings.warn("Unable to import pygio.")
 
 
-class Reader:
+class Reader(ABC):
     """Abstract base class for particle readers.
 
     A reader provides a uniform interface to access particle positions and
@@ -64,8 +68,9 @@ class Reader:
 
     Notes
     -----
-    Subclasses must implement :meth:`boxsize` and :meth:`read_sub`. Some
-    subclasses also implement :meth:`read_props`.
+    Subclasses must implement :attr:`boxsize` and :meth:`read_sub` (abstract).
+    :meth:`read_props` is optional and only needed to support ``extra_columns``
+    in catalog construction.
     """
 
     def __init__(
@@ -90,7 +95,7 @@ class Reader:
 
         # Derived particle mass (assumes boxsize is in Mpc, not Mpc/h)
         rho_m = pyccl.background.rho_x(self.cosmo, 1.0, "matter", is_comoving=True)  # Msun / Mpc^3
-        vol = self.boxsize()**3  # Mpc^3
+        vol = self.boxsize**3  # Mpc^3
         self.mass_particles = rho_m * vol / self.nparticles if self.nparticles > 0 else np.nan
 
         self.zsnapshots = np.asarray(zsnapshots)
@@ -154,21 +159,17 @@ class Reader:
         """
         return np.array([i for i, x in enumerate(self._job_args) if x[0] == isnapshot])  # in case self._jobs_args is overwritten in subclasses
 
+    @property
+    @abstractmethod
     def boxsize(self) -> float:
-        """Return the (comoving) box side length in Mpc.
+        """Comoving box side length in Mpc."""
 
-        Returns
-        -------
-        float
-            Box side length in Mpc.
+    @property
+    def box_comoving_density(self) -> float:
+        """Comoving particle number density in Mpc^-3, consistent with :attr:`boxsize`."""
+        return self.nparticles / self.boxsize**3
 
-        Raises
-        ------
-        NotImplementedError
-            Must be implemented by subclasses.
-        """
-        raise NotImplementedError
-
+    @abstractmethod
     def read_sub(
         self,
         isnapshot: int,
@@ -176,7 +177,6 @@ class Reader:
         assert_xyz_in_box: bool = False,
         read_box_edges_only: bool = False,
         extra_variables: list[str] | None = None,
-        verbose: bool = False,
     ) -> tuple[NDArray, NDArray] | tuple[NDArray, NDArray, dict[str, NDArray]]:
         """Read a snapshot sub-volume and return particle positions.
 
@@ -194,8 +194,6 @@ class Reader:
         extra_variables : list of str, optional
             Additional fields to return (reader-specific). If None, no extra
             fields are returned.
-        verbose : bool, optional
-            If True, print I/O and summary information.
 
         Returns
         -------
@@ -206,13 +204,7 @@ class Reader:
         extra : dict, optional
             Returned only if ``extra_variables`` is not empty. maps variable name
             to a 1D array aligned with the returned particles.
-
-        Raises
-        ------
-        NotImplementedError
-            Must be implemented by subclasses.
         """
-        raise NotImplementedError
 
     def read_props(
             self,
@@ -220,9 +212,12 @@ class Reader:
             isub: int,
             props_variables: list[str],
             ihaloes: slice | NDArray = slice(-1),
-            verbose: bool = False,
     ) -> dict[str, NDArray]:
         """Read extra per-object properties for a snapshot sub-volume.
+
+        Optional: only needed by readers used with ``extra_columns`` in
+        catalog construction. Subclasses that don't support it can leave this
+        unimplemented; it raises ``NotImplementedError`` if called.
 
         Parameters
         ----------
@@ -234,8 +229,6 @@ class Reader:
             Names of variables to read.
         ihaloes : slice or array_like, optional
             Row selection applied by the reader implementation.
-        verbose : bool, optional
-            If True, print I/O and summary information.
 
         Returns
         -------
@@ -245,19 +238,9 @@ class Reader:
         Raises
         ------
         NotImplementedError
-            Must be implemented by subclasses.
+            If this reader does not support reading extra properties.
         """
         raise NotImplementedError
-
-    def box_comoving_density(self) -> float:
-        """Return the comoving particle number density.
-
-        Returns
-        -------
-        float
-            Number density in Mpc^-3, consistent with :meth:`boxsize`.
-        """
-        return self.nparticles / self.boxsize()**3
 
 
 class SLICSReader(Reader):
@@ -312,8 +295,9 @@ class SLICSReader(Reader):
 
         super().__init__(cosmo, "slics", "Mpc", nparticles, zsnapshots, zmax, nsubs, dtype=np.float32)
 
+    @property
     def boxsize(self) -> float:
-        """Return the simulation box side length in Mpc."""
+        """Simulation box side length in Mpc."""
         return self._boxsize
 
     def read_sub(
@@ -323,7 +307,6 @@ class SLICSReader(Reader):
         assert_xyz_in_box: bool = False,
         read_box_edges_only: bool = False,
         extra_variables: list[str] | None = None,
-        verbose: bool = False,
     ) -> tuple[NDArray, NDArray]:
         """Read a SLICS snapshot sub-volume.
 
@@ -340,8 +323,6 @@ class SLICSReader(Reader):
             If True, return only box edges.
         extra_variables : list of str, optional
             Not supported by this reader. Must be None or empty.
-        verbose : bool, optional
-            If True, print file name.
 
         Returns
         -------
@@ -382,8 +363,7 @@ class SLICSReader(Reader):
             return np.zeros((17, 3), dtype=np.float32), box_edges
 
         with open(filename, "rb") as file:
-            if verbose:
-                print("Reading", filename)
+            logger.debug("Reading %s.", filename)
             data = np.fromfile(file, dtype=np.float32)[12:]
             data = data.reshape((data.size // 6, 6))
 
@@ -445,12 +425,10 @@ class HACCReader(Reader):
         self.group_along_x = group_along_x
         self.variables: list[str] = ["x", "y", "z"]
 
-        print("*** HACC reader ***")
+        logger.info("*** HACC reader ***")
 
         # Read run parameters and build cosmology
-        cosmo, params, snapshots_all, boxsize_h, sim_zmax, sim_zmin = _read_hacc_params(
-            path, run_params, matter_power_spectrum=matter_power_spectrum
-        )
+        cosmo, params, snapshots_all, boxsize_h, sim_zmax, sim_zmin = _read_hacc_params(path, run_params, matter_power_spectrum=matter_power_spectrum)
 
         nsteps = int(params["N_STEPS"])
         get_asnapshots_func = _get_asnapshots(snapshots_all, nsteps, sim_zmax, sim_zmin)
@@ -485,14 +463,15 @@ class HACCReader(Reader):
         nsub = 16 if self.group_along_x else 64
         super().__init__(cosmo, "hacc", "Mpc_over_h", nparticles, zsnapshots, snap_sub_zmax, nsub, dtype=dtype)
 
+    @property
     def boxsize(self) -> float:
-        """Return the simulation box side length in Mpc."""
+        """Simulation box side length in Mpc."""
         return self.boxsize_h / self.cosmo["h"]
 
     def _read_sub_helper(self, isnapshot: int, isub: int) -> tuple[NDArray, int]:
         """Return (box_edges, step) for a given snapshot/sub-volume."""
         snapshot = self.snapshots[isnapshot]
-        boxsize = self.boxsize()
+        boxsize = self.boxsize
 
         if self.group_along_x:
             box_lims = np.array([[0, 4], self.lims[isub][1], self.lims[isub][2]]) * boxsize / 4.0
@@ -517,7 +496,6 @@ class HACCReader(Reader):
         assert_xyz_in_box: bool = False,
         read_box_edges_only: bool = False,
         extra_variables: list[str] | None = None,
-        verbose: bool = False,
     ) -> tuple[NDArray, NDArray] | tuple[NDArray, NDArray, dict[str, NDArray]]:
         """Read a HACC snapshot sub-volume.
 
@@ -533,8 +511,6 @@ class HACCReader(Reader):
             If True, return only ``box_edges`` and skip particle I/O.
         extra_variables : list of str or None, optional
             Additional GenericIO variables to load and return.
-        verbose : bool, optional
-            If True, print file names during reads.
 
         Returns
         -------
@@ -562,8 +538,7 @@ class HACCReader(Reader):
         for ix in range(nx):
             ifile = ix * 16 + isub
             name = self._get_name(snapshot, ifile)
-            if verbose:
-                print("Reading", name)
+            logger.debug("Reading %s.", name)
             data = pygio.read_genericio(name, variables=self.variables + extra_variables)
             for k in (self.variables + extra_variables):
                 out[k].append(data[k])
@@ -627,12 +602,10 @@ class HACCLightconeReader(Reader):
         self.lightcone_path = lightcone_path
         self.variables: list[str] = ["x", "y", "z"]
 
-        print("*** HACC lightcone reader ***")
+        logger.info("*** HACC lightcone reader ***")
 
         # Read run parameters and build cosmology
-        cosmo, params, snapshots_param, boxsize_h, sim_zmax, sim_zmin = _read_hacc_params(
-            path, run_params, matter_power_spectrum=matter_power_spectrum
-        )
+        cosmo, params, snapshots_param, boxsize_h, sim_zmax, sim_zmin = _read_hacc_params(path, run_params, matter_power_spectrum=matter_power_spectrum)
 
         nsteps = int(params["N_STEPS"])
 
@@ -650,7 +623,7 @@ class HACCLightconeReader(Reader):
         # Subsample by every n-th snapshot
         self.snapshots = snapshots_param_list[::-snap_sub_every_n]
         if snap_sub_every_n > 1:
-            print(f"  - Subsampling: keeping every {snap_sub_every_n} snapshots, returns {len(self.snapshots)} snapshots")
+            logger.info("  - Subsampling: keeping every %d snapshots, returns %d snapshots.", snap_sub_every_n, len(self.snapshots))
 
         zsnapshots = 1.0 / get_asnapshots_func(self.snapshots) - 1.0
 
@@ -668,8 +641,9 @@ class HACCLightconeReader(Reader):
 
         super().__init__(cosmo, "hacc", "Mpc_over_h", nparticles, zsnapshots, snap_sub_zmax, int(nsub), dtype=dtype)
 
+    @property
     def boxsize(self) -> float:
-        """Return the simulation box side length in Mpc."""
+        """Simulation box side length in Mpc."""
         return self.boxsize_h / self.cosmo["h"]
 
     def _get_name(self, step: int, isub: int) -> str:
@@ -729,7 +703,6 @@ class HACCHaloReader(HACCReader):
             isub: int,
             props_variables: list[str],
             ihaloes: slice | NDArray = slice(-1),
-            verbose: bool = False,
     ) -> dict[str, NDArray]:
         """Read halo properties for one snapshot sub-volume.
 
@@ -743,8 +716,6 @@ class HACCHaloReader(HACCReader):
             Variable names to load from the halo properties files.
         ihaloes : slice or array_like, optional
             Row selection applied on the loaded arrays.
-        verbose : bool, optional
-            If True, print file name.
 
         Returns
         -------
@@ -756,8 +727,7 @@ class HACCHaloReader(HACCReader):
 
         snapshot = self.snapshots[isnapshot]
         name = self._get_name(snapshot, isub)
-        if verbose:
-            print("Reading", name)
+        logger.debug("Reading %s.", name)
         data = pygio.read_genericio(name, variables=props_variables)
         return {k: data[k][ihaloes] for k in props_variables}
 
@@ -810,7 +780,7 @@ class SkySimReader(Reader):
 
         asnapshots, idx = trim(asnapshots_all, self.aminstep, return_indices=True)
         if len(idx) < len(snapshots):
-            print(f"Subsampling snapshots with aminstep={aminstep} returns {len(idx)} snapshots")
+            logger.info("Subsampling snapshots with aminstep=%s returns %d snapshots.", aminstep, len(idx))
         zsnapshots = 1.0 / asnapshots[::-1] - 1.0
         self.snapshots = snapshots[list(reversed(idx))]
 
@@ -869,8 +839,9 @@ class MockReader(Reader):
 
         super().__init__(cosmo, "dummy", "Mpc", nparticles, zsnapshots, zmax, nsubs, dtype=np.float64)
 
+    @property
     def boxsize(self) -> float:
-        """Return the mock box side length in Mpc."""
+        """Mock box side length in Mpc."""
         return self._boxsize
 
     def read_sub(
@@ -880,7 +851,6 @@ class MockReader(Reader):
         assert_xyz_in_box: bool = False,
         read_box_edges_only: bool = False,
         extra_variables: list[str] | None = None,
-        verbose: bool = False,
     ) -> tuple[NDArray, NDArray]:
         """Return mock particles for one job.
 
@@ -896,8 +866,6 @@ class MockReader(Reader):
             If True, return only box edges and an empty particle array.
         extra_variables : list of str, optional
             Not supported by this reader.
-        verbose : bool, optional
-            Unused.
 
         Returns
         -------
@@ -974,7 +942,7 @@ def _read_hacc_params(
         Final redshift.
     """
     fname = os.path.join(path, run_params)
-    print(f"  - Reading parameter file at {fname}")
+    logger.info("  - Reading parameter file at %s.", fname)
     params = read_params(fname)
 
     cosmo_dict = dict(
@@ -992,7 +960,7 @@ def _read_hacc_params(
     if matter_power_spectrum is not None:
         cosmo_dict["matter_power_spectrum"] = matter_power_spectrum
     cosmo = pyccl.Cosmology(**cosmo_dict)
-    print(f"  - Cosmology {cosmo}")
+    logger.info("  - Cosmology %s.", cosmo)
 
     nsteps = int(params["N_STEPS"])
     sim_zmax = float(params["Z_IN"])
@@ -1009,7 +977,7 @@ def _read_hacc_params(
         except AssertionError:
             snapshots = snapshots_output
             warnings.warn("Using snapshots found in the `output` folder, which do not match those in the parameter file.")
-    print(f"  - Found {len(snapshots)} snapshots: {snapshots}")
+    logger.info("  - Found %d snapshots: %s.", len(snapshots), snapshots)
 
     return cosmo, params, snapshots, boxsize_h, sim_zmax, sim_zmin
 
@@ -1076,7 +1044,7 @@ def _subsample_hacc_snapshots(
     # Subsample: minimum step in scale factor
     if snap_sub_aminstep > 0.0:
         _, idx = trim(get_asnapshots(snapshots), snap_sub_aminstep, return_indices=True)
-        print(f"  - Subsampling: minimum a step {snap_sub_aminstep}, returns {len(idx)} snapshots")
+        logger.info("  - Subsampling: minimum a step %s, returns %d snapshots.", snap_sub_aminstep, len(idx))
         snapshots = snapshots[idx]
 
     # Subsample: maximum redshift
@@ -1084,7 +1052,7 @@ def _subsample_hacc_snapshots(
         w = np.argwhere(get_asnapshots(snapshots) > 1.0 / (1.0 + snap_sub_zmax))
         if len(w) > 0:
             snapshots = snapshots[w[0, 0]:]
-            print(f"  - Subsampling: max redshift {snap_sub_zmax}, returns {len(snapshots)} snapshots")
+            logger.info("  - Subsampling: max redshift %s, returns %d snapshots.", snap_sub_zmax, len(snapshots))
 
     # Subsample: match inferred bimodal distribution
     if snap_sub_match_dist_n:
@@ -1100,12 +1068,12 @@ def _subsample_hacc_snapshots(
 
         idx, _ = subsample_ppf(aa, snap_sub_match_dist_n, ppf)
         if len(idx) < len(snapshots):
-            print(f"  - Subsampling: match distribution, returns {len(idx)} snapshots")
+            logger.info("  - Subsampling: match distribution, returns %d snapshots.", len(idx))
         snapshots = snapshots[idx]
 
     # Subsample: keep every n-th snapshot
     snapshots = snapshots[::-snap_sub_every_n]
     if snap_sub_every_n > 1:
-        print(f"  - Subsampling: keeping every {snap_sub_every_n} snapshots, returns {len(snapshots)} snapshots")
+        logger.info("  - Subsampling: keeping every %d snapshots, returns %d snapshots.", snap_sub_every_n, len(snapshots))
 
     return snapshots

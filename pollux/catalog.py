@@ -1,4 +1,6 @@
+import logging
 import os
+import warnings
 import numpy as np
 from typing import Any
 import healpy as hp
@@ -9,6 +11,8 @@ import treecorr
 from astropy.io import fits
 
 from .utils import radec2thetaphi, quad, sample_pdf
+
+logger = logging.getLogger(__name__)
 
 
 class CatalogSourceGenerator:
@@ -94,7 +98,7 @@ class CatalogSourceGenerator:
         for augmentor in self.augmentors:
             for field_name in augmentor.required_interp_fields:
                 if field_name not in self.interp_list:
-                    print(f"Warning: adding field '{field_name}' to interp_list for augmentor '{augmentor.name}'")
+                    warnings.warn(f"Adding field '{field_name}' to interp_list for augmentor '{augmentor.name}'.")
                     self.interp_list.append(field_name)
         self.augmentor_kwargs = {ikappa: {} for ikappa in self.lensing.iter()}
 
@@ -117,12 +121,12 @@ class CatalogSourceGenerator:
         self.nbar_per_pix = self.nbar * self.area_pix
         self.header_dict = {f'NBAR_{i}': n for i, n in enumerate(self.nbar)}
 
-        print(f"*** Catalog ({self.tag if self.tag is not None else 'default'}) ***")
-        print(f"  - Catalog class = {self.__class__.__name__}")
-        print(f"  - Lensing class = {self.lensing.__class__.__name__}")
-        print(f"  - Shell builder class = {self.lensing.shell_builder.__class__.__name__}")
-        print(f"  - Number of catalogs = {self.ncats}")
-        print(f"  - Catalogs saved to {self._catalog_dir}")
+        logger.info("*** Catalog (%s) ***", self.tag if self.tag is not None else 'default')
+        logger.info("  - Catalog class = %s.", self.__class__.__name__)
+        logger.info("  - Lensing class = %s.", self.lensing.__class__.__name__)
+        logger.info("  - Shell builder class = %s.", self.lensing.shell_builder.__class__.__name__)
+        logger.info("  - Number of catalogs = %d.", self.ncats)
+        logger.info("  - Catalogs saved to %s.", self._catalog_dir)
 
     def generate(self, ikappas=None):
         """Generate mock catalogs and interpolate requested map quantities.
@@ -185,16 +189,16 @@ class CatalogSourceGenerator:
         Notes
         -----
         Shell membership is set by digitizing redshifts onto the shell edges
-        returned by ``shell_builder.shell_edges_redshift()``.
+        returned by ``shell_builder.shell_edges_redshift``.
         """
         builder = self.lensing.shell_builder
-        z_bins_edges = builder.shell_edges_redshift()
+        z_edges = builder.shell_edges_redshift
 
         rng = np.random.default_rng(self.lensing.shell_builder.seed + ikappa * self.nshells)
 
         # Generate redshifts according to lensing object redshift distributions (using cdf sampling)
         t = self.lensing.tracers[ikappa]
-        zz = np.linspace(0, z_bins_edges[-1], 1000)
+        zz = np.linspace(0, z_edges[-1], 1000)
         nz = t.get_dndz(zz)
 
         z = sample_pdf(zz, nz, self.Ngal[ikappa], rng)
@@ -202,7 +206,7 @@ class CatalogSourceGenerator:
 
         catalog[ikappa]['z'] = z
         catalog[ikappa]['chi'] = chi
-        catalog[ikappa]['idx_shell'] = np.digitize(z, z_bins_edges) - 1
+        catalog[ikappa]['idx_shell'] = np.digitize(z, z_edges) - 1
 
     def _interpolate_maps(self, catalog, ikappas=None):
         """Interpolate map quantities at galaxy positions.
@@ -223,7 +227,7 @@ class CatalogSourceGenerator:
         from snapshot-lensing density shells.
         """
         builder = self.lensing.shell_builder
-        chi_bins_edges = builder.shell_edges_comoving_distance()
+        chi_edges = builder.shell_edges_comoving_distance
 
         # Fields that live in the shell builder (density/tidal), vs the snapshot lensing builder
         _SHELL_FIELDS = frozenset({'density', 't11', 't22', 't12'})
@@ -256,7 +260,7 @@ class CatalogSourceGenerator:
                     values -= values.mean()
                     map_high.update_values_pix(valid_pixels, values)
 
-                chi_low, chi_high = chi_bins_edges[[ishell, ishell + 1]]
+                chi_low, chi_high = chi_edges[[ishell, ishell + 1]]
 
                 # Loop over tomographic bins
                 for ikappa in self.lensing.tqdm(ikappas, disable=True):
@@ -350,6 +354,7 @@ class CatalogSourceGenerator:
 
             fname = self.get_fname(ikappa, format='fits')
             fits.HDUList(hdul).writeto(fname, overwrite=True)
+            logger.debug("Saved to file %s.", fname)
 
     def load_catalogs(self, ikappas=None, return_header=False, subsample=None, seed=None):
         """Load saved FITS catalog(s) for one or more tomographic bins.
@@ -387,6 +392,7 @@ class CatalogSourceGenerator:
         for ikappa in self.lensing.tqdm(ikappas, desc="[load_catalogs]"):
             fname = self.get_fname(ikappa, format='fits')
             hdul = fits.open(fname)
+            logger.debug("Found and loaded catalog at %s.", fname)
             try:
                 headers[ikappa] = hdul[1].header
                 table = hdul[1].data
@@ -687,6 +693,7 @@ class CatalogSourceGenerator:
                     s.add_data_point(data_type, [tracers_i[i].name, tracers_j[j].name], _cl_ell, ell=_ell)
         fname = os.path.join(self._catalog_dir, 'cat_cls.fits')
         s.save_fits(fname, overwrite=True)
+        logger.debug("Saved to file %s.", fname)
         return fname
 
     def load_cls(self, return_dict: bool = False) -> sacc.Sacc | tuple[np.ndarray, dict[str, dict[tuple[int, int], np.ndarray]]]:
@@ -711,6 +718,7 @@ class CatalogSourceGenerator:
         """
         fname = os.path.join(self._catalog_dir, 'cat_cls.fits')
         s = sacc.Sacc.load_fits(fname)
+        logger.debug("Found and loaded file at %s.", fname)
         if not return_dict:
             return s
 
@@ -1020,6 +1028,7 @@ class CatalogSourceGenerator:
                     s.add_data_point(data_type, [tracers_i[i].name, tracers_j[j].name], _xi_k, theta=_theta_k)
         fname = os.path.join(self._catalog_dir, 'cat_2pt.fits')
         s.save_fits(fname, overwrite=True)
+        logger.debug("Saved to file %s.", fname)
         return fname
 
     def load_2pt(self, return_dict: bool = False) -> sacc.Sacc | tuple[np.ndarray, dict[str, dict[tuple[int, int], np.ndarray]]]:
@@ -1044,6 +1053,7 @@ class CatalogSourceGenerator:
         """
         fname = os.path.join(self._catalog_dir, 'cat_2pt.fits')
         s = sacc.Sacc.load_fits(fname)
+        logger.debug("Found and loaded file at %s.", fname)
         if not return_dict:
             return s
 
@@ -1350,12 +1360,12 @@ class CatalogSourceClusteredPoisson(CatalogSourceClustered):
         3) samples redshifts within each shell for each bin.
         """
         builder = self.lensing.shell_builder
-        z_bins_edges = builder.shell_edges_redshift()
+        z_edges = builder.shell_edges_redshift
 
         # First compute mean density per shell for each tracer's n(z) (all bins needed for nbar)
         nbar_per_pix_per_bin = []
         for ikappa, t in enumerate(self.lensing.tracers):
-            nz_int = np.array([quad(lambda z: t.get_dndz(z), z_bins_edges[ishell], z_bins_edges[ishell + 1]) for ishell in range(self.snap_lensing.nmaps)])
+            nz_int = np.array([quad(lambda z: t.get_dndz(z), z_edges[ishell], z_edges[ishell + 1]) for ishell in range(self.snap_lensing.nmaps)])
             nbar_per_pix_per_bin.append(nz_int / np.sum(nz_int) * self.nbar_per_pix[ikappa])
         self.nbar_per_pix_per_bin = np.array(nbar_per_pix_per_bin)
 
@@ -1433,13 +1443,13 @@ class CatalogSourceClusteredPoisson(CatalogSourceClustered):
         that shell's redshift interval.
         """
         builder = self.lensing.shell_builder
-        z_bins_edges = builder.shell_edges_redshift()
+        z_edges = builder.shell_edges_redshift
 
         t = self.lensing.tracers[ikappa]
         for ishell in self.lensing.shell_builder.tqdm(None, disable=True):
             rng = np.random.default_rng(self.lensing.shell_builder.seed + ishell + ikappa * self.nshells)
 
-            zz = np.linspace(z_bins_edges[ishell], z_bins_edges[ishell + 1], 100)
+            zz = np.linspace(z_edges[ishell], z_edges[ishell + 1], 100)
             nz = t.get_dndz(zz)
             ngal = len(catalog[ikappa]['ra'][ishell])
 

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import logging
 import os
+import warnings
+from abc import ABC, abstractmethod
 from typing import Iterable
 
 import healpy as hp
@@ -16,8 +19,10 @@ from tqdm.auto import tqdm, trange
 
 from .utils import *
 
+logger = logging.getLogger(__name__)
 
-class MapBuilder:
+
+class MapBuilder(ABC):
     """Base class to build, store, and analyze Healpix/HealSparse maps.
 
     This class centralizes:
@@ -26,6 +31,10 @@ class MapBuilder:
     - alm computation (Healpy),
     - pseudo-C_ell and decoupled bandpowers (NaMaster),
     - SACC export and plotting.
+
+    Subclasses must implement :meth:`_create_tracers_ccl`,
+    :meth:`_create_tracers_sacc`, and :meth:`construct_maps` (abstract).
+    :meth:`_noise_cls` is optional, needed only for noise-aware predictions.
 
     Parameters
     ----------
@@ -136,10 +145,10 @@ class MapBuilder:
         # Make sure folder exists
         os.makedirs(self.save_dir, exist_ok=True)
         
-        print(f"*** Map builder ({self.base_fname}) ***")
-        print(f"  - Builder class = {self.__class__.__name__}")
-        print(f"  - Number of maps = {self.nmaps}")
-        print(f"  - Maps saved to", self.save_dir)
+        logger.info("*** Map builder (%s) ***", self.base_fname)
+        logger.info("  - Builder class = %s.", self.__class__.__name__)
+        logger.info("  - Number of maps = %d.", self.nmaps)
+        logger.info("  - Maps saved to %s.", self.save_dir)
 
     def iter(self, it: Iterable[int] | int | None = None) -> range | Iterable[int] | list[int]:
         """Return an iterator over the requested indices.
@@ -264,6 +273,7 @@ class MapBuilder:
             os.makedirs(subs_dir, exist_ok=True)
             return os.path.join(subs_dir, fname)
 
+    @abstractmethod
     def _create_tracers_ccl(self) -> list:
         """Create CCL tracer objects.
 
@@ -271,13 +281,7 @@ class MapBuilder:
         -------
         list
             List of tracer objects with length ``self.nmaps``.
-
-        Raises
-        ------
-        NotImplementedError
-            Must be implemented by subclasses.
         """
-        raise NotImplementedError
 
     @property
     def tracers(self) -> list:
@@ -298,6 +302,7 @@ class MapBuilder:
             self._tracers = self._create_tracers_ccl()
         return self._tracers
 
+    @abstractmethod
     def _create_tracers_sacc(self) -> list:
         """Create SACC tracer objects.
 
@@ -305,13 +310,7 @@ class MapBuilder:
         -------
         list
             List of SACC tracer objects with length ``self.nmaps``.
-
-        Raises
-        ------
-        NotImplementedError
-            Must be implemented by subclasses.
         """
-        raise NotImplementedError
 
     @property
     def tracers_sacc(self) -> list:
@@ -332,6 +331,7 @@ class MapBuilder:
             self._tracers_sacc = self._create_tracers_sacc()
         return self._tracers_sacc
 
+    @abstractmethod
     def construct_maps(
         self,
         imaps: int | Iterable[int] | None = None,
@@ -352,13 +352,7 @@ class MapBuilder:
             - If ``imaps`` is a single int: returns a single ``HealSparseMap``.
             - If ``imaps`` is ``None`` or an iterable: returns a dict keyed by
               map index with ``HealSparseMap`` values.
-
-        Raises
-        ------
-        NotImplementedError
-            Must be implemented by subclasses.
         """
-        raise NotImplementedError
 
     def check_maps(self, imaps: int | Iterable[int] | None = None, read: bool = False, fname: str | None = None, check_finite: bool = False) -> dict[int, bool | hsp.HealSparseMap | None] | bool | hsp.HealSparseMap | None:
         """Check existence/readability of map files.
@@ -407,16 +401,18 @@ class MapBuilder:
                         if check_finite:
                             a = m[m.valid_pixels]
                             if not (np.all(np.isfinite(a)) and np.any(a)):
+                                logger.debug("Map at %s failed the finite check, ignoring cached file.", filename)
                                 return None
+                        logger.debug("Found and loaded map at %s.", filename)
                         return m
                     except Exception as e:
-                        print(f"Cannot read map at {filename}: {e}")
+                        warnings.warn(f"Cannot read map at {filename}: {e}.")
                         return None
                 else:
+                    logger.debug("Found map at %s.", filename)
                     return True
             else:
-                if not read:
-                    print(f"Cannot find map at {filename}.")
+                logger.debug("Cannot find map at %s.", filename)
                 return None if read else False
 
         if fname is not None:
@@ -450,6 +446,7 @@ class MapBuilder:
         for imap in self.tqdm(imaps, desc="[load_maps]"):
             fname = self.get_fname(imap, **fname_kwargs)
             maps[imap] = hsp.HealSparseMap.read(fname, nside_coverage=self.nside_c)
+            logger.debug("Found and loaded map at %s.", fname)
 
         return maps[imaps] if type(imaps) is int else maps
     
@@ -770,15 +767,15 @@ class MapBuilder:
         fname = os.path.join(self.wsp_dir, f'wsp_nside{self.nside}.wsp')
         wsp = nmt.NmtWorkspace()
         if os.path.exists(fname):
-            print("Loading workspace in", fname)
             wsp.read_from(fname)
+            logger.info("Found and loaded workspace at %s.", fname)
         else:
-            print("Computing and saving workspace in", fname)
             mask = self.get_mask(nest=False).astype(np.float64)
             b = self.b
             dummy_f = nmt.NmtField(mask, [np.zeros_like(mask)], lite=True)
             wsp.compute_coupling_matrix(dummy_f, dummy_f, b)
             wsp.write_to(fname)
+            logger.info("Computed and saved workspace to file %s.", fname)
         self._wsp = wsp
         return self._wsp
 
@@ -838,19 +835,19 @@ class MapBuilder:
 
         return _map
 
-    def compute_alms(self, imaps: int | Iterable[int] | None = None, save: bool = True, replicate_octant: bool = False, **map2am_kwargs) -> np.ndarray | dict[int, np.ndarray]:
+    def compute_alms(self, imaps: int | Iterable[int] | None = None, replicate_octant: bool = False, **map2am_kwargs) -> np.ndarray | dict[int, np.ndarray]:
         """Compute spherical harmonic coefficients a_lm from maps.
 
         Parameters
         ----------
         imaps : int or array_like of int or None, optional
             Map indices. If None, uses all maps.
-        save : bool, optional
-            If True, saves a_lm to FITS files named by ``what='alms'``.
         replicate_octant : bool, optional
             If True, compute a_lm from the octant replicated to full sky.
-            Requires ``footprint='octant'``. Cannot be combined with
-            ``save=True`` in the current implementation.
+            Requires ``footprint='octant'``. This is a different array from
+            the canonical (non-replicated) alm, so it is always computed
+            fresh and never read from or written to the ``what='alms'``
+            cache.
         **map2am_kwargs
             Forwarded to :func:`healpy.map2alm`.
 
@@ -858,29 +855,35 @@ class MapBuilder:
         -------
         dict
             Mapping ``imap -> alm`` (complex ndarray).
+
+        Notes
+        -----
+        Unless ``replicate_octant=True``, results are always cached to
+        ``what='alms'`` FITS files: a pre-existing file is loaded instead of
+        recomputing, and a freshly computed alm is saved for later calls.
         """
         assert not replicate_octant or self.octant_only, "replicate_octant requires footprint='octant'"
-        assert not (save and replicate_octant)
 
         alms = {}
         for imap in self.tqdm(imaps, desc="[compute_alms]"):
-            if save:
+            if not replicate_octant:
                 fname = self.get_fname(imap, what='alms', format='fits')
                 if os.path.exists(fname):
                     try:
                         alms[imap] = hp.read_alm(fname)
+                        logger.debug("Found and loaded alms at %s.", fname)
                         continue
                     except Exception as e:
-                        print(f"Cannot read alm at {fname}: {e}")
-                        pass
+                        warnings.warn(f"Cannot read alms at {fname}: {e}.")
 
             mask = self.get_mask(nest=False)
             _map = self.get_field_map(imap, nest=False, replicate_octant=replicate_octant)
 
             alms[imap] = hp.map2alm(_map * mask, **map2am_kwargs)
 
-            if save:
+            if not replicate_octant:
                 hp.write_alm(fname, alms[imap], overwrite=True)
+                logger.debug("Saved alms to file %s.", fname)
 
         return alms[imaps] if type(imaps) is int else alms
 
@@ -917,15 +920,13 @@ class MapBuilder:
         hsmap.update_values_pix(ipix, values.astype(self.dtype), nest=False)
         return hsmap
 
-    def compute_maps_from_alms(self, imaps: int | Iterable[int] | None = None, save: bool = True) -> hsp.HealSparseMap | dict[int, hsp.HealSparseMap]:
+    def compute_maps_from_alms(self, imaps: int | Iterable[int] | None = None) -> hsp.HealSparseMap | dict[int, hsp.HealSparseMap]:
         """Reconstruct HealSparse maps from saved a_lm coefficients.
 
         Parameters
         ----------
         imaps : int or array_like of int or None, optional
             Map indices to reconstruct. If None, uses all maps.
-        save : bool, optional
-            If True, saves reconstructed maps to the default map filenames.
 
         Returns
         -------
@@ -934,20 +935,19 @@ class MapBuilder:
 
         Notes
         -----
-        Reconstruction is done in RING ordering and then written into a HealSparse
-        map on the mask pixels.
+        Reconstruction is done in RING ordering. Reconstructed maps are
+        returned in-memory only and are never written to disk.
         """
         _, ipix = self.get_mask(nest=False, return_ipix=True)
 
         maps = {}
         for imap in self.tqdm(imaps, desc="[compute_maps_from_alms]"):
-            alm = hp.read_alm(self.get_fname(imap, what='alms', format='fits'))
+            alm_fname = self.get_fname(imap, what='alms', format='fits')
+            alm = hp.read_alm(alm_fname)
+            logger.debug("Found and loaded alms at %s.", alm_fname)
             values = hp.alm2map(alm, nside=self.nside, pol=False)
             tmp = hsp.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
             tmp.update_values_pix(ipix, values[ipix].astype(self.dtype), nest=False)
-            if save:
-                fname = self.get_fname(imap)
-                tmp.write(fname, clobber=True)
             maps[imap] = tmp
 
         return maps[imaps] if type(imaps) is int else maps
@@ -972,6 +972,7 @@ class MapBuilder:
                 s.add_data_point(self.sacc_type, [tracers[i].name, tracers[j].name], _cl, ell=_ell)
         fname = self.get_fname(what='cls', format='fits')
         s.save_fits(fname, overwrite=True)
+        logger.debug("Saved to file %s.", fname)
 
     def compute_cls(self, imaps: int | Iterable[int] | None = None, auto_only: bool = False, save: bool = True, use_precomputed_alms: bool = True, pair_job: int | None = None) -> tuple[np.ndarray, dict[tuple[int, int], np.ndarray]]:
         """Compute binned pseudo-C_ell bandpowers for requested map pairs.
@@ -1020,12 +1021,16 @@ class MapBuilder:
                     if not pair_count == pair_job:
                         continue
                 if not i == previous_pair[0]:
-                    almi = hp.read_alm(self.get_fname(i, what='alms', format='fits'))
+                    almi_fname = self.get_fname(i, what='alms', format='fits')
+                    almi = hp.read_alm(almi_fname)
+                    logger.debug("Found and loaded alms at %s.", almi_fname)
                 if i == j:
                     almj = almi
                 else:
                     if not j == previous_pair[1]:
-                        almj = hp.read_alm(self.get_fname(j, what='alms', format='fits'))
+                        almj_fname = self.get_fname(j, what='alms', format='fits')
+                        almj = hp.read_alm(almj_fname)
+                        logger.debug("Found and loaded alms at %s.", almj_fname)
                 pcl = hp.alm2cl(almi, almj)
                 cl[i, j] = wsp.decouple_cell([pcl])[0]
                 previous_pair = (i, j)
@@ -1069,6 +1074,7 @@ class MapBuilder:
         """
         fname = self.get_fname(what='cls', format='fits')
         s = sacc.Sacc.load_fits(fname)
+        logger.debug("Found and loaded file at %s.", fname)
         if return_dict:
             tracers = list(s.tracers.keys())
             tc = s.get_tracer_combinations(self.sacc_type)
@@ -1084,6 +1090,11 @@ class MapBuilder:
     def _noise_cls(self, imap: int) -> float | np.ndarray:
         """Return the noise angular power spectrum for one map.
 
+        Optional: only needed when calling :meth:`predict_cls` with
+        ``add_noise=True`` or ``error_bars=True``. Subclasses that don't model
+        noise can leave this unimplemented; it raises ``NotImplementedError``
+        if called.
+
         Parameters
         ----------
         imap : int
@@ -1097,7 +1108,7 @@ class MapBuilder:
         Raises
         ------
         NotImplementedError
-            Must be implemented by subclasses if noise is needed.
+            If this builder does not implement a noise model.
         """
         raise NotImplementedError
 
@@ -1407,7 +1418,9 @@ class MapBuilder:
             fname = self.get_fname(what='cls', format='png')
             fig.savefig(fname, bbox_inches='tight')
 
-    def compute_map_moments(self, theta_smooth: np.ndarray | Iterable[float], nside_small: int = 512) -> tuple[np.ndarray, dict, dict, dict]:
+    def compute_map_moments(
+        self, theta_smooth: np.ndarray | Iterable[float], nside_small: int = 512, save: bool = True
+    ) -> tuple[np.ndarray, dict, dict, dict]:
         """Compute 2nd/3rd/4th moments of smoothed maps.
 
         Parameters
@@ -1416,6 +1429,8 @@ class MapBuilder:
             Gaussian smoothing scales in arcmin.
         nside_small : int, optional
             Nside used for the smoothed maps and moment evaluation.
+        save : bool, optional
+            If True, saves results to ``what='2nd_3rd_4th_moments', format='npy'``.
 
         Returns
         -------
@@ -1437,16 +1452,9 @@ class MapBuilder:
         2) resizes them to ``lmax_out = 2*nside_small``,
         3) makes smoothed maps for each ``theta``,
         4) computes raw moments on the masked pixels,
-        5) caches results to ``what='2nd_3rd_4th_moments', format='npy'``.
+        5) saves results to ``what='2nd_3rd_4th_moments', format='npy'`` if ``save=True``.
         """
         assert min(theta_smooth) > hp.nside2resol(nside_small, arcmin=True), "Smoothing scale should be larger than pixel size to avoid pixel effects."
-        
-        fname = self.get_fname(what='2nd_3rd_4th_moments', format='npy')
-
-        if os.path.exists(fname):
-            print('Loading pre-existing file: ' + fname)
-            moments = np.load(fname, allow_pickle=True).item()
-            return moments['theta_smooth'], moments['second_moment'], moments['third_moment'], moments['fourth_moment']
 
         kappa = {}
         lmax_out = 2 * nside_small
@@ -1497,11 +1505,38 @@ class MapBuilder:
             for i, j, k, l in product(range(self.nmaps), repeat=4):
                 moments['fourth_moment'][theta][i, j, k, l] = np.mean(data[i] * data[j] * data[k] * data[l])
 
-        # Let's save them all
-        print('Saving output as:' + fname)
-        np.save(fname, moments)
+        if save:
+            fname = self.get_fname(what='2nd_3rd_4th_moments', format='npy')
+            np.save(fname, moments)
+            logger.info("Saved to file %s.", fname)
 
         return theta_smooth, moments['second_moment'], moments['third_moment'], moments['fourth_moment']
+
+    def load_map_moments(self) -> tuple[np.ndarray, dict, dict, dict]:
+        """Load previously saved 2nd/3rd/4th moments of smoothed maps.
+
+        Returns
+        -------
+        theta_smooth : ndarray
+            Smoothing scales (arcmin).
+        second_moment : dict
+            Covariance matrices keyed by smoothing scale (theta -> (nmaps,nmaps)).
+        third_moment : dict
+            Third-order moments keyed by smoothing scale
+            (theta -> (nmaps,nmaps,nmaps)).
+        fourth_moment : dict
+            Fourth-order moments keyed by smoothing scale
+            (theta -> (nmaps,nmaps,nmaps,nmaps)).
+
+        Raises
+        ------
+        FileNotFoundError
+            If the moments file does not exist.
+        """
+        fname = self.get_fname(what='2nd_3rd_4th_moments', format='npy')
+        moments = np.load(fname, allow_pickle=True).item()
+        logger.debug("Found and loaded file at %s.", fname)
+        return moments['theta_smooth'], moments['second_moment'], moments['third_moment'], moments['fourth_moment']
 
     def generate_gaussian_maps(self, imaps: int | Iterable[int] | None = None, auto_only: bool = False, seed: int = -1) -> None:
         """Generate Gaussian random maps consistent with predicted spectra.
@@ -1541,6 +1576,7 @@ class MapBuilder:
                 # Save map
                 fname = self.get_fname(imap)
                 hsmap.write(fname, clobber=True, format=self.save_format)
+                logger.debug("Saved to file %s.", fname)
 
         else:
             # Generate full-sky Gaussian map
@@ -1555,3 +1591,4 @@ class MapBuilder:
                 # Save map
                 fname = self.get_fname(imap)
                 hsmap.write(fname, clobber=True, format=self.save_format)
+                logger.debug("Saved to file %s.", fname)

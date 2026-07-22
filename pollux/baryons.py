@@ -1,3 +1,4 @@
+import logging
 import os
 from typing import Any, Iterable
 
@@ -7,6 +8,8 @@ import healsparse as hsp
 import BaryonForge as bfg
 from .map_builder import MapBuilder
 from .shells import ShellBuilder, SnapshotShellBuilder
+
+logger = logging.getLogger(__name__)
 
 
 class BaryonifiedShellBuilder(ShellBuilder):
@@ -123,17 +126,17 @@ class BaryonifiedShellBuilder(ShellBuilder):
         if self._interpolator_ishell == ishell:
             return
 
-        z_shell_bins = self.shell_edges_redshift()
-        chi_shell_bins = self.shell_edges_comoving_distance()
-        proj_cutoff = (chi_shell_bins[ishell + 1] - chi_shell_bins[ishell]) / 2.
+        z_edges = self.shell_edges_redshift
+        chi_edges = self.shell_edges_comoving_distance
+        proj_cutoff = (chi_edges[ishell + 1] - chi_edges[ishell]) / 2.
         self.model.DMO.set_parameter('proj_cutoff', proj_cutoff)
         self.model.DMB.set_parameter('proj_cutoff', proj_cutoff)
 
         interpolator_kwargs = dict(self._interpolator_kwargs)
         interpolator_kwargs.setdefault('N_samples_z', 2)
         interpolator_kwargs.setdefault('z_linear_sampling', True)
-        interpolator_kwargs.setdefault('z_min', max(1e-3, z_shell_bins[ishell]))  # Avoid z=0 because binning is log-spaced in z
-        interpolator_kwargs.setdefault('z_max', max(z_shell_bins[ishell + 1], z_shell_bins[ishell] + 1e-3))
+        interpolator_kwargs.setdefault('z_min', max(1e-3, z_edges[ishell]))  # Avoid z=0 because binning is log-spaced in z
+        interpolator_kwargs.setdefault('z_max', max(z_edges[ishell + 1], z_edges[ishell] + 1e-3))
         self.model.setup_interpolator(**interpolator_kwargs)
         self._interpolator_ishell = ishell
 
@@ -186,6 +189,8 @@ class BaryonifiedShellBuilder(ShellBuilder):
                 
             w = M > self.M_min
             if w.any():
+                logger.debug("Shell %d: using masses in range [%.3e, %.3e] Msun.", ishell, M[w].min(), M[w].max())
+
                 # Build halo lightcone catalog for halos above M_min
                 h = bfg.utils.HaloLightConeCatalog(cat_halo['ra'][w], cat_halo['dec'][w], M[w], cat_halo['z'][w], self.cosmo_dict)
 
@@ -200,6 +205,7 @@ class BaryonifiedShellBuilder(ShellBuilder):
             shell = hsp.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
             shell.update_values_pix(ipix, baryonified_count[ipix].astype(self.dtype), nest=False)
             shell.write(fname, clobber=True, format=self.save_format, nocompress=self.nocompress)
+            logger.debug("Saved to file %s.", fname)
 
             shells[ishell] = shell
 

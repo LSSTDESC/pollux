@@ -1,3 +1,4 @@
+import logging
 import os
 
 import healpy as hp
@@ -9,6 +10,8 @@ from tqdm.auto import trange
 
 from .map_builder import MapBuilder
 from .utils import quad
+
+logger = logging.getLogger(__name__)
 
 
 class MyCMBLensingTracer(pyccl.Tracer):
@@ -91,6 +94,9 @@ class LensingBuilder(MapBuilder):
             os.makedirs(save_dir, exist_ok=True)
             if not os.path.exists(fname):
                 np.save(fname, nzs)
+                logger.debug("Saved to file %s.", fname)
+            else:
+                logger.debug("Found existing n(z) file at %s, skipping.", fname)
 
         # normalize sigma_e: accept scalar or per-bin array
         sigma_arr = np.atleast_1d(sigma_e).astype(float)
@@ -130,12 +136,12 @@ class LensingBuilder(MapBuilder):
         list
             List of CCL tracers (length ``self.nmaps``).
         """
-        z_shell_bins = self.shell_builder.shell_edges_redshift()
+        z_edges = self.shell_builder.shell_edges_redshift
 
         tracers = []
         for nz in self.nzs:
             if callable(nz):
-                zz = np.linspace(0, z_shell_bins[-1], Nz)
+                zz = np.linspace(0, z_edges[-1], Nz)
                 tracers.append(pyccl.WeakLensingTracer(self.cosmo, dndz=(zz, nz(zz))))
             else:
                 tracers.append(pyccl.WeakLensingTracer(self.cosmo, dndz=(nz[0], nz[1])))
@@ -155,12 +161,12 @@ class LensingBuilder(MapBuilder):
         list
             List of SACC tracers (length ``self.nmaps``).
         """
-        z_shell_bins = self.shell_builder.shell_edges_redshift()
+        z_edges = self.shell_builder.shell_edges_redshift
 
         tracers = []
         for i, nz in enumerate(self.nzs):
             if callable(nz):
-                zz = np.linspace(0, z_shell_bins[-1], Nz)
+                zz = np.linspace(0, z_edges[-1], Nz)
                 tracers.append(sacc.tracers.NZTracer(f"kappa_{i}", zz, nz(zz)))
             else:
                 tracers.append(sacc.tracers.NZTracer(f"kappa_{i}", nz[0], nz[1]))
@@ -209,7 +215,7 @@ class LensingBuilder(MapBuilder):
                     "smooth_Mpc is only meaningful for snapshot lensing (nzs='zsnapshots'); "
                     "for n(z) bins there is no single comoving distance to convert Mpc to an angle."
                 )
-            chi_bins = self.shell_builder.shell_edges_comoving_distance()
+            chi_edges = self.shell_builder.shell_edges_comoving_distance
 
         gammas = {}
         for ikappa in self.tqdm(ikappas, desc="[compute_shear_maps]"):
@@ -220,10 +226,12 @@ class LensingBuilder(MapBuilder):
                 continue
 
             # Get harmonic coefficients of convergence map
-            klm = self.compute_alms(ikappa, save=not (replicate_octant), replicate_octant=replicate_octant, pol=False, lmax=lmax)
+            klm = self.compute_alms(ikappa, replicate_octant=replicate_octant, pol=False, lmax=lmax)
             if smooth_Mpc is not None:
-                kappa_hsp = self._smooth_alms(klm, smooth_Mpc / chi_bins[ikappa + 1], ipix, lmax)
-                kappa_hsp.write(self.get_fname(ikappa, smooth_Mpc=smooth_Mpc), clobber=True, format=self.save_format, nocompress=self.nocompress)
+                kappa_hsp = self._smooth_alms(klm, smooth_Mpc / chi_edges[ikappa + 1], ipix, lmax)
+                kappa_fname = self.get_fname(ikappa, smooth_Mpc=smooth_Mpc)
+                kappa_hsp.write(kappa_fname, clobber=True, format=self.save_format, nocompress=self.nocompress)
+                logger.debug("Saved to file %s.", kappa_fname)
                 # klm is now smoothed inplace
 
             # Convert to shear
@@ -238,8 +246,12 @@ class LensingBuilder(MapBuilder):
             gamma1.update_values_pix(ipix, g1[ipix].astype(self.dtype), nest=False)
             gamma2.update_values_pix(ipix, g2[ipix].astype(self.dtype), nest=False)
 
-            gamma1.write(self.get_fname(ikappa, what='gamma1', smooth_Mpc=smooth_Mpc), clobber=True)
-            gamma2.write(self.get_fname(ikappa, what='gamma2', smooth_Mpc=smooth_Mpc), clobber=True)
+            gamma1_fname = self.get_fname(ikappa, what='gamma1', smooth_Mpc=smooth_Mpc)
+            gamma2_fname = self.get_fname(ikappa, what='gamma2', smooth_Mpc=smooth_Mpc)
+            gamma1.write(gamma1_fname, clobber=True)
+            gamma2.write(gamma2_fname, clobber=True)
+            logger.debug("Saved to file %s.", gamma1_fname)
+            logger.debug("Saved to file %s.", gamma2_fname)
 
             gammas[ikappa] = [gamma1, gamma2]
 
@@ -288,7 +300,7 @@ class BornLensingBuilder(LensingBuilder):
 
             self.mpart_over_area = mpart / area
 
-            zmax = self.shell_builder.shell_edges_redshift()[-1]
+            zmax = self.shell_builder.shell_edges_redshift[-1]
             self.dndz_norm = [quad(lambda z: t.get_dndz(z), 0., zmax) if isinstance(t, pyccl.tracers.NzTracer) else np.nan for t in self.tracers]
             self.zlens = [self.shell_builder.mean_z(ishell) for ishell in range(self.nshells)]
 
@@ -311,7 +323,7 @@ class BornLensingBuilder(LensingBuilder):
         tracer = self.tracers[ikappa]
 
         if self.multiple_planes:
-            zmax = self.shell_builder.shell_edges_redshift()[-1]
+            zmax = self.shell_builder.shell_edges_redshift[-1]
             zlens = self.zlens[ishell]
 
             if zlens is None:
@@ -338,7 +350,7 @@ class BornLensingBuilder(LensingBuilder):
 
             return w * self.mpart_over_area / d_A_lens**2
         else:
-            chi_min, chi_max = self.shell_builder.shell_edges_comoving_distance()[ishell:ishell + 2]
+            chi_min, chi_max = self.shell_builder.shell_edges_comoving_distance[ishell:ishell + 2]
             return quad(lambda chi: tracer.get_kernel(chi), chi_min, chi_max)
 
     def construct_maps(self, ikappas=None):
@@ -388,6 +400,7 @@ class BornLensingBuilder(LensingBuilder):
         for ikappa, kappa in kappas.items():
             fname = self.get_fname(ikappa)
             kappa.write(fname, clobber=True)
+            logger.debug("Saved to file %s.", fname)
 
         return kappas[ikappas] if type(ikappas) is int else kappas
 
@@ -414,9 +427,7 @@ class SnapshotBornLensingBuilder(BornLensingBuilder):
         super().__init__(shell_builder, nzs='zsnapshots', tag=tag, **kwargs)
 
     def _create_tracers_ccl(self, Nz=None):
-        z_shell_bins = self.shell_builder.shell_edges_redshift()
-        return [MyCMBLensingTracer(self.cosmo, z_source) for z_source in z_shell_bins[1:]]
+        return [MyCMBLensingTracer(self.cosmo, z_source) for z_source in self.shell_builder.shell_edges_redshift[1:]]
 
     def _create_tracers_sacc(self, Nz=None):
-        z_shell_bins = self.shell_builder.shell_edges_redshift()
-        return [sacc.tracers.MiscTracer(f"kappa_{i}") for i, _ in enumerate(z_shell_bins[1:])]
+        return [sacc.tracers.MiscTracer(f"kappa_{i}") for i, _ in enumerate(self.shell_builder.shell_edges_redshift[1:])]

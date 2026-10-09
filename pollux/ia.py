@@ -144,7 +144,9 @@ class CatalogAugmentorShear(CatalogAugmentor):
     sigma_e : float, optional
         Standard deviation of the intrinsic ellipticity distribution. Default is 0.3.
     rng_seed : int, optional
-        Random number generator seed for reproducibility. Default is 42.
+        Seed of the intrinsic shapes: the galaxies of tomographic bin ``ikappa``
+        in shell ``ishell`` use ``np.random.default_rng([rng_seed, ikappa, ishell])``,
+        so shapes do not depend on how the catalog is split into shells. Default is 42.
     """
 
     def __init__(
@@ -181,8 +183,19 @@ class CatalogAugmentorShear(CatalogAugmentor):
             new_columns += ['e1_obs', 'e2_obs']
         self.new_columns = new_columns
 
-    def augment_catalog(self, cosmo, catalog, **kwargs):
-        """Compute derived shear quantities and add them to the catalog."""
+    def augment_catalog(self, cosmo, catalog, ikappa=0, **kwargs):
+        """Compute derived shear quantities and add them to the catalog.
+
+        Parameters
+        ----------
+        cosmo : pyccl.Cosmology
+            Cosmology (unused).
+        catalog : dict[str, np.ndarray]
+            Catalog of one tomographic bin, with ``'kappa'``, ``'gamma1'``,
+            ``'gamma2'`` and ``'idx_shell'``; updated in place.
+        ikappa : int, optional
+            Tomographic-bin index, used to seed the intrinsic shapes.
+        """
         kappa = catalog['kappa']
         gamma1, gamma2 = catalog['gamma1'], catalog['gamma2']
 
@@ -200,9 +213,14 @@ class CatalogAugmentorShear(CatalogAugmentor):
             g2 = gamma2
 
         if self.generate_intrinsic:
-            rng = np.random.default_rng(self.rng_seed)
-            catalog['e1_int'] = rng.normal(0., self.sigma_e, size=catalog['z'].shape)
-            catalog['e2_int'] = rng.normal(0., self.sigma_e, size=catalog['z'].shape)
+            idx_shell = catalog['idx_shell']
+            catalog['e1_int'] = np.empty(len(idx_shell))
+            catalog['e2_int'] = np.empty(len(idx_shell))
+            for ishell in np.unique(idx_shell):
+                w = np.flatnonzero(idx_shell == ishell)
+                rng = np.random.default_rng([self.rng_seed, ikappa, ishell])
+                catalog['e1_int'][w] = rng.normal(0., self.sigma_e, size=len(w))
+                catalog['e2_int'][w] = rng.normal(0., self.sigma_e, size=len(w))
 
         if self.compute_observed:
             e_int = catalog['e1_int'] + 1j * catalog['e2_int']

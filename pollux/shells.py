@@ -18,7 +18,8 @@ from tqdm.auto import tqdm, trange
 from parallel_sort import argsort as pargsort
 from collections.abc import Iterable
 
-from .map_builder import MapBuilder
+from .cosmo import Tracer
+from .map_builder import MapBuilder, MapSum
 from .utils import quad, split_bins, arange_endpoint
 from .reader import DummyReader
 from .lensing import BornLensingBuilder, SnapshotBornLensingBuilder
@@ -141,7 +142,10 @@ class ShellBuilder(MapBuilder):
 
         if root_dir is not None:
             assert save_dir is None, "Provide either root_dir or save_dir, not both."
-            save_dir = os.path.join(root_dir, f'nside{nside}', f'seed{seed}', 'shells')
+            # maps built on a padded footprint are kept apart from unpadded ones
+            padding = kwargs.get('padding_deg') if mask is not None else None
+            shells_dir = f'shells_pad{padding:g}' if padding else 'shells'
+            save_dir = os.path.join(root_dir, f'nside{nside}', f'seed{seed}', shells_dir)
             kwargs.setdefault('wsp_dir', os.path.join(root_dir, f'nside{nside}'))
 
         if base_fname is None:
@@ -440,8 +444,8 @@ class ShellBuilder(MapBuilder):
         dVdz = pyccl.comoving_angular_distance(self.cosmo, aa)**2 / pyccl.background.h_over_h0(self.cosmo, aa)
         return dVdz / np.trapz(dVdz, zz)  # rough normalization
 
-    def _create_tracers_ccl(self, Nz=1000):
-        """Create one CCL NumberCounts tracer per shell.
+    def _create_tracers(self, Nz=1000):
+        """Create one density tracer per shell, with a volume-weighted top-hat redshift distribution.
 
         Parameters
         ----------
@@ -450,39 +454,15 @@ class ShellBuilder(MapBuilder):
 
         Returns
         -------
-        list
-            List of :class:`pyccl.NumberCountsTracer` objects of length ``nshells``.
+        list of pollux.cosmo.Tracer
+            ``'density'`` tracers named ``density_{ishell}``, of length ``nshells``.
         """
         z_edges = self.shell_edges_redshift
 
         tracers = []
         for ishell in range(self.nshells):
             zz = np.linspace(z_edges[ishell], z_edges[ishell + 1], Nz)
-            dndz = self._dndz(zz)
-            tracers.append(pyccl.NumberCountsTracer(self.cosmo, has_rsd=False, dndz=(zz, dndz), bias=(zz, np.ones_like(zz))))
-
-        return tracers
-
-    def _create_tracers_sacc(self, Nz=1000):
-        """Create one SACC NZ tracer per shell.
-
-        Parameters
-        ----------
-        Nz : int, optional
-            Number of redshift samples used within each shell.
-
-        Returns
-        -------
-        list
-            List of :class:`sacc.tracers.NZTracer` objects of length ``nshells``.
-        """
-        z_edges = self.shell_edges_redshift
-
-        tracers = []
-        for ishell in range(self.nshells):
-            zz = np.linspace(z_edges[ishell], z_edges[ishell + 1], Nz)
-            dndz = self._dndz(zz)
-            tracers.append(sacc.tracers.NZTracer(f"density_{ishell}", zz, dndz))
+            tracers.append(Tracer(f"density_{ishell}", 'density', z=zz, nz=self._dndz(zz)))
 
         return tracers
 
@@ -655,7 +635,7 @@ class ShellBuilder(MapBuilder):
         # dense footprint mask for the overlap test (cached on self; vectorized
         # boolean indexing below is both faster and far lighter than building a
         # Python set of tens of millions of pixel indices)
-        mask_dense = self.get_mask(nest=True) if self.footprint is not None else None
+        mask_dense = self.get_mask(nest=True, padded=True) if self.footprint is not None else None
 
         valid = []
         # replicate the box
@@ -757,7 +737,7 @@ class ShellBuilder(MapBuilder):
                     self.subsample_ratios = np.minimum(1., (snr_pix / snr_pix_cut)**2)
                 elif 'clmax_r' in self.subsample_box.keys():
                     # compute theory Cl's
-                    cl = self.predict_cls(auto_only=True, approximate=True)[1]
+                    cl = self.predict_cls(auto_only=True, binning='unbinned')[1]
                     # fix particle density such that shot-noise is 100 times lower than Cl at lmax
                     nbar_th = self.subsample_box['clmax_r'] / np.array([cl[i, i][-1] for i in range(self.nshells)])
                     # convert to desired number of particles per pixel
@@ -856,6 +836,39 @@ class ShellBuilder(MapBuilder):
         area = hp.nside2pixarea(self.nside, degrees=degrees)
         return self.pixel_density(ishell) / area
 
+    def _count_to_shell(self, count):
+        """Convert dense per-pixel particle counts into a HealSparse shell map.
+
+        Parameters
+        ----------
+        count : ndarray of int
+            Dense RING-ordered array of length ``self.npix`` holding the number of
+            particles per pixel (e.g. accumulated with :func:`_count_pix`).
+
+        Returns
+        -------
+        hsp.HealSparseMap
+            Shell map of dtype ``self.dtype`` whose valid pixels are the non-empty
+            pixels of ``count`` inside the padded footprint.
+
+        Notes
+        -----
+        The footprint mask is applied here, on non-empty pixels only, which is
+        equivalent to (and cheaper than) filtering every particle hit.
+        """
+        shell = hsp.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
+        uipix = np.flatnonzero(count)
+        # drop out-of-footprint pixels (equivalent to filtering every particle)
+        if self.footprint is not None and len(uipix) > 0:
+            uipix = uipix[self.get_mask(nest=False, padded=True)[uipix]]
+        if len(uipix) > 0:
+            c = count[uipix]
+            shell.update_values_pix(hp.ring2nest(self.nside, uipix), c.astype(self.dtype), nest=True)
+            logger.debug("Found %d particles in the shell.", int(c.sum(dtype=np.int64)))
+        else:
+            logger.debug("Found no particle in the shell.")
+        return shell
+
     def combine_maps_subs(self, ishells=None, allow_missing_subs=False):
         """Sum per-subvolume shell maps into final per-shell maps.
 
@@ -883,7 +896,7 @@ class ShellBuilder(MapBuilder):
         """
         shells = {}
 
-        _, ipix = self.get_mask(nest=True, return_ipix=True)
+        mask = self.get_mask(nest=True, padded=True)
         for ishell in self.tqdm(ishells, desc="[combine_maps_subs]"):
             fname = self.get_fname(ishell)
             shell = self.check_maps(read=True, fname=fname)
@@ -891,27 +904,13 @@ class ShellBuilder(MapBuilder):
                 shells[ishell] = shell
                 continue
 
-            shell = hsp.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
-            shell.update_values_pix(ipix, self.dtype(0), nest=True)  # initialize to zero on valid pixels
-
-            isubs = self.reader.get_isubs_for_snapshot(ishell)
-            n_subs_added = 0
-            for isub in tqdm(isubs, desc=f"[combine_maps_subs: shell {ishell}]", leave=False):
-                try:
-                    tmp_shell = self.load_maps(ishell, sub=isub)
-                    shell = hsp.operations.sum_union([shell, tmp_shell])
-                    n_subs_added += 1
-                except FileNotFoundError:
-                    if not allow_missing_subs:
-                        raise
-            if allow_missing_subs:
-                logger.info("Sub files found for shell number %d: %d / %d.", ishell, n_subs_added, len(isubs))
-
+            isubs = list(self.reader.get_isubs_for_snapshot(ishell))
             if self.add_orphans:
-                orphan_fname = self.get_fname(ishell, sub='orphan')
-                tmp_shell = hsp.HealSparseMap.read(orphan_fname)
-                logger.debug("Found and loaded map at %s.", orphan_fname)
-                shell = hsp.operations.sum_union([shell, tmp_shell])
+                isubs.append('orphan')
+            shell_sum = MapSum(mask, self.nside_c, self.dtype)
+            for _, sub_map in self.iter_maps(ishell, isubs=isubs, allow_missing=allow_missing_subs, desc=f"[combine_maps_subs: shell {ishell}]"):
+                shell_sum.add(sub_map)
+            shell = shell_sum.to_map()
 
             shell.write(fname, clobber=True, format=self.save_format, nocompress=self.nocompress)
             logger.debug("Saved to file %s.", fname)
@@ -950,36 +949,27 @@ class ShellBuilder(MapBuilder):
         # then combine into final shells
         return self.combine_maps_subs(imaps)
 
-    def _field_map(self, ishell, nest=True):
-        """Return a dense Healpix map for one shell.
+    def get_field_hspmap(self, ishell):
+        """Return the density contrast of one shell as a HealSparse map.
 
         Parameters
         ----------
         ishell : int
             Shell index.
-        nest : bool, optional
-            Output ordering.
 
         Returns
         -------
-        ndarray
-            Dense healpix density contrast map with:
-            - delta = -1 on masked (valid-but-empty) pixels by convention,
-            - delta = shell_count/pixel_density - 1 on pixels containing data.
+        hsp.HealSparseMap
+            Density contrast relative to the cosmic mean, on the padded footprint:
+            ``shell_count / pixel_density - 1`` on pixels containing particles, and
+            -1 on empty pixels.
         """
         shell = self.load_maps(ishell)
+        _, ipix = self.get_mask(nest=True, return_ipix=True, padded=True)
+        density = hsp.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
+        density.update_values_pix(ipix, np.full(len(ipix), -1., dtype=self.dtype), nest=True)
         spix = shell.valid_pixels
-        s = shell[spix]
-
-        if not nest:
-            spix = hp.nest2ring(self.nside, spix)
-
-        _, ipix = self.get_mask(nest=nest, return_ipix=True)
-
-        density = np.zeros(self.npix)
-        density[ipix] = -1.
-        density[spix] = s / self.pixel_density(ishell) - 1.
-
+        density.update_values_pix(spix, (shell[spix] / self.pixel_density(ishell) - 1.).astype(self.dtype), nest=True)
         return density
 
     def _noise_cls(self, ishell):
@@ -998,7 +988,7 @@ class ShellBuilder(MapBuilder):
         """
         return 1. / self.sky_density(ishell)
 
-    def compute_smoothed_density_maps(self, ishells=None, smooth_Mpc=None, lmax=None, replicate_octant=False):
+    def compute_smoothed_density_maps(self, ishells=None, smooth_Mpc=None, lmax=None):
         """Compute and save Gaussian-smoothed density maps.
 
         Parameters
@@ -1011,8 +1001,6 @@ class ShellBuilder(MapBuilder):
             shell midpoint comoving distance.
         lmax : int or None, optional
             Maximum multipole for harmonic transforms. Defaults to ``3*nside - 1``.
-        replicate_octant : bool, optional
-            If True, recompute a_lm from octant maps replicated to full sky.
 
         Returns
         -------
@@ -1025,7 +1013,7 @@ class ShellBuilder(MapBuilder):
             lmax = 3 * self.nside - 1
 
         chi_edges = self.shell_edges_comoving_distance
-        _, ipix = self.get_mask(nest=False, return_ipix=True)
+        _, ipix = self.get_mask(nest=False, return_ipix=True, padded=True)
 
         maps = {}
         for ishell in self.tqdm(ishells, desc="[compute_smoothed_density]"):
@@ -1036,14 +1024,14 @@ class ShellBuilder(MapBuilder):
                 maps[ishell] = existing
                 continue
 
-            alm = self.compute_alms(ishell, replicate_octant=replicate_octant, pol=False, lmax=lmax)
+            alm = self.compute_alms(ishell, pol=False, lmax=lmax)
             maps[ishell] = self._smooth_alms(alm, smooth_Mpc / chi_edges[ishell + 1], ipix, lmax)
             maps[ishell].write(fname, clobber=True, format=self.save_format, nocompress=self.nocompress)
             logger.debug("Saved to file %s.", fname)
 
         return maps[ishells] if type(ishells) is int else maps
 
-    def compute_tidal_tensor_maps(self, ishells=None, smooth_Mpc=None, lmax=None, replicate_octant=False):
+    def compute_tidal_tensor_maps(self, ishells=None, smooth_Mpc=None, lmax=None):
         """Compute tidal tensor component maps from shell density maps.
 
         For each shell, computes a spin-2 transform of the E-mode a_lm of the
@@ -1061,9 +1049,6 @@ class ShellBuilder(MapBuilder):
         lmax : int or None, optional
             Maximum multipole used for harmonic transforms. Defaults to
             ``3*nside - 1``.
-        replicate_octant : bool, optional
-            If True, recompute a_lm from octant maps replicated to full sky
-            (irrelevant if ``octant_only=False``).
 
         Returns
         -------
@@ -1077,7 +1062,7 @@ class ShellBuilder(MapBuilder):
             lmax = 3 * self.nside - 1
 
         chi_edges = self.shell_edges_comoving_distance
-        _, ipix = self.get_mask(nest=False, return_ipix=True)
+        _, ipix = self.get_mask(nest=False, return_ipix=True, padded=True)
         whats = ['t11', 't22', 't12']
 
         ts = {}
@@ -1089,7 +1074,7 @@ class ShellBuilder(MapBuilder):
                 ts[ishell] = [t11, t22, t12]
                 continue
 
-            alm = self.compute_alms(ishell, replicate_octant=replicate_octant, pol=False, lmax=lmax)
+            alm = self.compute_alms(ishell, pol=False, lmax=lmax)
 
             if smooth_Mpc is not None:
                 density_hsp = self._smooth_alms(alm, smooth_Mpc / chi_edges[ishell + 1], ipix, lmax)
@@ -1099,7 +1084,7 @@ class ShellBuilder(MapBuilder):
                 density = density_hsp.get_values_pix(ipix, nest=False)
                 # alm is now smoothed inplace — reuse for spin-2 transform below
             else:
-                density = self.get_field_map(ishell, nest=False)[ipix]
+                density = self.get_transform_map(ishell)[1][ipix]
 
             Q, U = hp.alm2map_spin((alm, np.zeros_like(alm)), self.nside, spin=2, lmax=lmax)
             Q = Q[ipix]
@@ -1123,7 +1108,7 @@ class ShellBuilder(MapBuilder):
                 hsmap = hsp.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
                 hsmap.update_values_pix(ipix, val.astype(self.dtype), nest=False)
                 tensor_fname = self.get_fname(ishell, what=what, smooth_Mpc=smooth_Mpc)
-                hsmap.write(tensor_fname, clobber=True, format=self.save_format)
+                hsmap.write(tensor_fname, clobber=True, format=self.save_format, nocompress=self.nocompress)
                 logger.debug("Saved to file %s.", tensor_fname)
                 ts[ishell].append(hsmap)
 
@@ -1225,11 +1210,9 @@ class SnapshotShellBuilder(ShellBuilder):
             elif not self.apply_replicate_rotflip:
                 xyz_work = xyz
 
-            # dense footprint mask, used to filter hits below
-            mask_dense = self.get_mask(nest=False) if self.footprint is not None else None
-
-            # accumulate in exact int64 (self.dtype may be float32); cast once at the end
-            count_map = hsp.HealSparseMap.make_empty(self.nside_c, nside, dtype=np.int64)
+            count = np.zeros(npix, dtype=np.int32)  # per-pixel counts: int32 is enough
+            ipix = np.empty(len(xyz), dtype=np.int32 if npix < 2**31 else np.int64)  # reused for all replicas
+            buf = np.empty_like(ipix)
             for ix, iy, iz in valid_replicas:
                 shift_orig = np.expand_dims(np.array([ix, iy, iz]) * boxsize, 0).astype(dtype)
                 shift = Ax(A, shift_orig) if self.apply_grid_isometry else shift_orig
@@ -1237,28 +1220,15 @@ class SnapshotShellBuilder(ShellBuilder):
                     xyz_work = rotflip(self.replicate_rotflip[ix, iy, iz], xyz, boxsize).astype(dtype)
 
                 # bin particles into healpix pixels
-                ipix = _vec2pix(
-                    nside, order, ncap, npix, xyz_work[:, 0], xyz_work[:, 1], xyz_work[:, 2], shift[0, 0], shift[0, 1], shift[0, 2], rmin2, rmax2,
+                _vec2pix(
+                    ipix, nside, order, ncap, npix, xyz_work[:, 0], xyz_work[:, 1], xyz_work[:, 2], shift[0, 0], shift[0, 1], shift[0, 2], rmin2, rmax2,
                     self.octant_only)
 
-                # drop out-of-shell particles
-                ipix = ipix[ipix >= 0]
+                # scatter-add (out-of-shell particles have ipix = -1 and are skipped)
+                _count_pix(count, ipix, buf)
 
-                # drop out-of-footprint particles
-                if mask_dense is not None and len(ipix) > 0:
-                    ipix = ipix[mask_dense[ipix]]
-
-                # scatter-add
-                if len(ipix) > 0:
-                    count_map.update_values_pix(ipix, 1, operation='add', nest=False)
-
-            uipix = count_map.valid_pixels
-            if len(uipix) > 0:
-                c = count_map.get_values_pix(uipix, nest=True)
-                shell.update_values_pix(uipix, c.astype(self.dtype), nest=True)
-                logger.debug("Found %d particles in the shell.", int(c.sum()))
-            else:
-                logger.debug("Found no particle in the shell.")
+            shell = self._count_to_shell(count)
+            del count, ipix, buf
         else:
             logger.debug("No valid replica — skipping particle load.")
 
@@ -1344,7 +1314,7 @@ class SnapshotShellBuilder(ShellBuilder):
         # post-filter: drop particles whose sky position falls outside the mask
         if self.footprint is not None and len(idx) > 0:
             ipix = hp.ang2pix(self.nside, ra, dec, nest=False, lonlat=True)
-            _, mask_ipix_ring = self.get_mask(nest=False, return_ipix=True)
+            _, mask_ipix_ring = self.get_mask(nest=False, return_ipix=True, padded=True)
             keep = np.isin(ipix, mask_ipix_ring)
             idx, ra, dec, r = idx[keep], ra[keep], dec[keep], r[keep]
         
@@ -1636,27 +1606,17 @@ class LightconeSlicingBuilder(ShellBuilder):
         shift = Ax(A, shift_orig) if self.apply_grid_isometry else shift_orig
 
         # bin particles into healpix pixels
-        ipix = _vec2pix(
-            nside, order, ncap, npix, xyz_work[:, 0], xyz_work[:, 1], xyz_work[:, 2], shift[0, 0], shift[0, 1], shift[0, 2], rmin2, rmax2, self.octant_only)
-        
-        # drop out-of-shell particles
-        ipix = ipix[ipix >= 0]
+        ipix = np.empty(len(xyz), dtype=np.int32 if npix < 2**31 else np.int64)
+        buf = np.empty_like(ipix)
+        _vec2pix(
+            ipix, nside, order, ncap, npix, xyz_work[:, 0], xyz_work[:, 1], xyz_work[:, 2], shift[0, 0], shift[0, 1], shift[0, 2], rmin2, rmax2,
+            self.octant_only)
 
-        # drop out-of-footprint particles
-        if self.footprint is not None and len(ipix) > 0:
-            mask_dense = self.get_mask(nest=False)
-            ipix = ipix[mask_dense[ipix]]
-
-        # accumulate in exact int64 (self.dtype may be float32); cast once at the end
-        if len(ipix) > 0:
-            count_map = hsp.HealSparseMap.make_empty(self.nside_c, nside, dtype=np.int64)
-            count_map.update_values_pix(ipix, 1, operation='add', nest=False)  # scatter-add
-            uipix = count_map.valid_pixels
-            c = count_map.get_values_pix(uipix, nest=True)
-            shell.update_values_pix(uipix, c.astype(self.dtype), nest=True)
-            logger.debug("Found %d particles in the shell.", int(c.sum()))
-        else:
-            logger.debug("Found no particle in the shell.")
+        count = np.zeros(npix, dtype=np.int32)  # per-pixel counts: int32 is enough
+        # scatter-add (out-of-shell particles have ipix = -1 and are skipped)
+        _count_pix(count, ipix, buf)
+        shell = self._count_to_shell(count)
+        del count, ipix, buf
 
         shell.write(fname, clobber=True, format=self.save_format, nocompress=self.nocompress)
         logger.debug("Saved to file %s.", fname)
@@ -1836,11 +1796,9 @@ class SnapshotInterpBuilder(ShellBuilder):
             xyz_i_work = xyz_i
             xyz_f_work = xyz_f
 
-        # dense footprint mask, used to filter hits below
-        mask_dense = self.get_mask(nest=False) if self.footprint is not None else None
-
-        # accumulate in exact int64 (self.dtype may be float32); cast once at the end
-        count_map = hsp.HealSparseMap.make_empty(self.nside_c, nside, dtype=np.int64)
+        count = np.zeros(npix, dtype=np.int32)  # per-pixel counts: int32 is enough
+        ipix = np.empty(len(xyz_i), dtype=np.int32 if npix < 2**31 else np.int64)  # reused for all replicas
+        buf = np.empty_like(ipix)
         for ix, iy, iz in valid_replicas:
             shift_orig = np.expand_dims(np.array([ix, iy, iz]) * boxsize, 0).astype(dtype)
             shift = Ax(A, shift_orig) if self.apply_grid_isometry else shift_orig
@@ -1849,28 +1807,15 @@ class SnapshotInterpBuilder(ShellBuilder):
                 xyz_f_work = rotflip(self.replicate_rotflip[ix, iy, iz], xyz_f, boxsize).astype(dtype)
 
             # bin particles into healpix pixels
-            ipix = _worldline2pix(
-                nside, order, ncap, npix, a_lc, chi2_lc, xyz_i_work[:, 0], xyz_i_work[:, 1], xyz_i_work[:, 2], xyz_f_work[:, 0], xyz_f_work[:, 1],
+            _worldline2pix(
+                ipix, nside, order, ncap, npix, a_lc, chi2_lc, xyz_i_work[:, 0], xyz_i_work[:, 1], xyz_i_work[:, 2], xyz_f_work[:, 0], xyz_f_work[:, 1],
                 xyz_f_work[:, 2], shift[0, 0], shift[0, 1], shift[0, 2], rmin2, rmax2, self.octant_only)
 
-            # drop out-of-shell particles
-            ipix = ipix[ipix >= 0]
+            # scatter-add (out-of-shell particles have ipix = -1 and are skipped)
+            _count_pix(count, ipix, buf)
 
-            # drop out-of-footprint particles
-            if mask_dense is not None and len(ipix) > 0:
-                ipix = ipix[mask_dense[ipix]]
-
-            # scatter-add
-            if len(ipix) > 0:
-                count_map.update_values_pix(ipix, 1, operation='add', nest=False)
-
-        uipix = count_map.valid_pixels
-        if len(uipix) > 0:
-            c = count_map.get_values_pix(uipix, nest=True)
-            shell.update_values_pix(uipix, c.astype(self.dtype), nest=True)
-            logger.debug("Found %d particles in the shell.", int(c.sum()))
-        else:
-            logger.debug("Found no particle in the shell.")
+        shell = self._count_to_shell(count)
+        del count, ipix, buf
 
         shell.write(fname, clobber=True, format=self.save_format, nocompress=self.nocompress)
         logger.debug("Saved to file %s.", fname)
@@ -2282,11 +2227,13 @@ def _vec2pix_kernel(nside, order, ncap, npix, x, y, z, shiftx, shifty, shiftz, r
 
 
 @numba.njit(parallel=True)
-def _vec2pix(nside, order, ncap, npix, x, y, z, shiftx, shifty, shiftz, rmin2, rmax2, octant_only):
-    """Vectorized/parallel version of :func:`_vec2pix_kernel`.
+def _vec2pix(ipix, nside, order, ncap, npix, x, y, z, shiftx, shifty, shiftz, rmin2, rmax2, octant_only):
+    """Vectorized/parallel version of :func:`_vec2pix_kernel`, filling ``ipix`` in place.
 
     Parameters
     ----------
+    ipix : ndarray of int
+        Output pixel indices, same length as ``x``, with -1 for rejected particles.
     x, y, z : ndarray
         1D arrays of equal length.
     shiftx, shifty, shiftz : float
@@ -2295,17 +2242,9 @@ def _vec2pix(nside, order, ncap, npix, x, y, z, shiftx, shifty, shiftz, rmin2, r
         Shell cuts.
     octant_only : bool
         Octant cut flag.
-
-    Returns
-    -------
-    ndarray
-        Pixel indices (int), with -1 for rejected particles.
     """
-    n = len(x)
-    ipix = np.zeros(n, dtype=np.int_)
-    for i in numba.prange(n):
+    for i in numba.prange(len(x)):
         ipix[i] = _vec2pix_kernel(nside, order, ncap, npix, x[i], y[i], z[i], shiftx, shifty, shiftz, rmin2, rmax2, octant_only)
-    return ipix
 
 
 @numba.njit
@@ -2492,20 +2431,78 @@ def _worldline2pix_kernel(nside, order, ncap, npix, a_lc, chi2_lc, x_i, y_i, z_i
 
 
 @numba.njit(parallel=True)
-def _worldline2pix(nside, order, ncap, npix, a_lc, chi_lc, x_i, y_i, z_i, x_f, y_f, z_f, shiftx, shifty, shiftz, rmin2, rmax2, octant_only):
-    """Parallel worldline-to-pixel conversion for snapshot interpolation.
+def _worldline2pix(ipix, nside, order, ncap, npix, a_lc, chi_lc, x_i, y_i, z_i, x_f, y_f, z_f, shiftx, shifty, shiftz, rmin2, rmax2, octant_only):
+    """Parallel worldline-to-pixel conversion for snapshot interpolation, filling ``ipix`` in place.
 
-    Returns
-    -------
-    ndarray
-        Pixel indices (int) of length N, with -1 for rejected particles.
+    Parameters
+    ----------
+    ipix : ndarray of int
+        Output pixel indices, same length as ``x_i``, with -1 for rejected particles.
     """
-    n = len(x_i)
-    ipix = np.zeros(n, dtype=np.int_)
-    for i in numba.prange(n):
+    for i in numba.prange(len(x_i)):
         ipix[i] = _worldline2pix_kernel(
             nside, order, ncap, npix, a_lc, chi_lc, x_i[i], y_i[i], z_i[i], x_f[i], y_f[i], z_f[i], shiftx, shifty, shiftz, rmin2, rmax2, octant_only)
-    return ipix
+
+
+@numba.njit(parallel=True)
+def _count_pix(count, ipix, buf, nranges=4096):
+    """Add one count per particle to a dense per-pixel count array, in place.
+
+    Parallel histogram: valid pixel indices are first grouped by pixel range into
+    ``buf`` (counting then scattering them per chunk of particles), then each range
+    is counted by a single thread.
+
+    Parameters
+    ----------
+    count : ndarray of int
+        Dense per-pixel count array, updated in place.
+    ipix : ndarray of int
+        Pixel index of each particle (e.g. from :func:`_vec2pix`), with -1 marking
+        rejected particles, which are skipped.
+    buf : ndarray of int
+        Work array, at least as long as ``ipix``, with a dtype able to hold pixel indices.
+    nranges : int, optional
+        Number of pixel ranges.
+    """
+    n = len(ipix)
+    nchunks = numba.get_num_threads()
+    shift = 0
+    while (len(count) - 1) >> shift >= nranges:
+        shift += 1
+
+    # number of valid particles of each chunk in each pixel range
+    hist = np.zeros((nchunks, nranges), np.int64)
+    for c in numba.prange(nchunks):
+        for i in range(c * n // nchunks, (c + 1) * n // nchunks):
+            p = ipix[i]
+            if p >= 0:
+                hist[c, p >> shift] += 1
+
+    # position in buf of each (chunk, range) block, grouped by range
+    offset = np.empty((nchunks, nranges), np.int64)
+    start = np.empty(nranges + 1, np.int64)
+    total = 0
+    for k in range(nranges):
+        start[k] = total
+        for c in range(nchunks):
+            offset[c, k] = total
+            total += hist[c, k]
+    start[nranges] = total
+
+    # scatter valid pixel indices into buf, grouped by range
+    for c in numba.prange(nchunks):
+        o = offset[c].copy()
+        for i in range(c * n // nchunks, (c + 1) * n // nchunks):
+            p = ipix[i]
+            if p >= 0:
+                k = p >> shift
+                buf[o[k]] = p
+                o[k] += 1
+
+    # count each range
+    for k in numba.prange(nranges):
+        for j in range(start[k], start[k + 1]):
+            count[buf[j]] += 1
 
 
 @numba.njit

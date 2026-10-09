@@ -329,17 +329,19 @@ def make_healpix_map(
     return res
 
 
-def make_mask_radec_cuts(nside, ramin, ramax, decmin, decmax, eps=0.0, dtype=float, nest=True):
-    """Generate a rectangular mask from RA/Dec cuts.
+def make_mask_radec_cuts(nside, ramin, ramax, decmin, decmax, eps=0.0, dtype=float, nest=True, coord='C'):
+    """Generate a rectangular mask from longitude/latitude cuts.
 
     Parameters
     ----------
     nside : int
         Healpix nside.
     ramin, ramax : float
-        Right ascension bounds in degrees, in [0, 360] with ``ramin < ramax``.
+        Longitude bounds in degrees (right ascension for ``coord='C'``), in
+        [0, 360] with ``ramin < ramax``.
     decmin, decmax : float
-        Declination bounds in degrees, in [-90, 90] with ``decmin < decmax``.
+        Latitude bounds in degrees (declination for ``coord='C'``), in [-90, 90]
+        with ``decmin < decmax``.
     eps : float, optional
         Margin (in radians in theta/phi space) excluded from each boundary.
         Default is 0.
@@ -347,6 +349,11 @@ def make_mask_radec_cuts(nside, ramin, ramax, decmin, decmax, eps=0.0, dtype=flo
         dtype used for the returned mask values (typically float or int).
     nest : bool, optional
         If True, use NESTED pixel ordering. Default is True.
+    coord : {'C', 'E', 'G'}, optional
+        Frame of the bounds: equatorial (default), ecliptic or galactic. The
+        mask itself is in equatorial coordinates, e.g. ``coord='E'`` with
+        ``decmin=-90, decmax=30`` (and ``ramin=0, ramax=360``) masks ecliptic
+        latitudes above 30 degrees.
 
     Returns
     -------
@@ -355,14 +362,18 @@ def make_mask_radec_cuts(nside, ramin, ramax, decmin, decmax, eps=0.0, dtype=flo
 
     Notes
     -----
-    The rectangle is defined in RA/Dec, but implemented by selecting pixels whose
-    (theta, phi) lie within the converted ranges.
+    The rectangle is implemented by selecting pixels whose (theta, phi) in the
+    frame ``coord`` lie within the converted ranges.
     """
     assert (0.0 <= ramin <= 360.0) & (0.0 <= ramax <= 360.0) & (ramin < ramax)
     assert (-90.0 <= decmin <= 90.0) & (-90.0 <= decmax <= 90.0) & (decmin < decmax)
 
     mask = np.zeros(hp.nside2npix(nside), dtype=dtype)
     th, ph = hp.pix2ang(nside, np.arange(hp.nside2npix(nside)), nest=nest)
+    if coord != 'C':
+        # pixel centers in the frame of the bounds, with longitudes in [0, 2 pi)
+        th, ph = hp.Rotator(coord=['C', coord])(th, ph)
+        ph = np.mod(ph, 2. * np.pi)
     ths, phs = radec2thetaphi([ramin, ramax], [decmin, decmax])
     thmin, thmax = min(ths), max(ths)
     phmin, phmax = min(phs), max(phs)

@@ -1,11 +1,14 @@
+import copy
 import logging
 import os
 from typing import Any, Iterable
 
+import numpy as np
 import pyccl
 import healpy as hp
 import healsparse as hsp
 import BaryonForge as bfg
+from tqdm.auto import trange
 from .map_builder import MapBuilder
 from .shells import ShellBuilder, SnapshotShellBuilder
 
@@ -17,7 +20,9 @@ class BaryonifiedShellBuilder(ShellBuilder):
 
     This builder reads per-shell halo catalogs and shell count maps from the
     provided builders, applies the BaryonForge baryonification model, and
-    writes baryonified shell maps to disk.
+    writes baryonified shell maps to disk. The matter power spectrum of the
+    predictions (:meth:`matter_power_spectrum`) is corrected by the halo-model
+    boost of the same profiles.
     
     Inherits all ShellBuilder methods and attributes from the input shell_builder.
     """
@@ -44,8 +49,10 @@ class BaryonifiedShellBuilder(ShellBuilder):
             and methods are inherited from this builder.
         halo_builder : SnapshotShellBuilder
             Builder providing halo catalogs per shell.
-        dmo, dmb : object
-            Dark-matter-only and baryonic profiles compatible with BaryonForge.
+        dmo, dmb : BaryonForge profiles
+            Dark-matter-only and baryonified profiles (e.g. :func:`s19_profiles`),
+            used both to baryonify the shells and to correct the matter power
+            spectrum of the predictions (:meth:`matter_power_spectrum`).
         mass_name : str
             Halo mass field name in the catalogs (e.g. ``'fof_halo_mass'``).
         mass_def : tuple
@@ -67,6 +74,8 @@ class BaryonifiedShellBuilder(ShellBuilder):
         """
         self.shell_builder_ref = shell_builder
         self.halo_builder = halo_builder
+        self.dmo = dmo  # unconvolved, also used for the matter power spectrum prediction
+        self.dmb = dmb
         self.mass_name = mass_name
         self.mass_def = mass_def
         if mass_unit not in ('Msun', 'Msun_over_h'):
@@ -98,6 +107,10 @@ class BaryonifiedShellBuilder(ShellBuilder):
             b=shell_builder.b,
             nlb=shell_builder.nlb,
             remove_monopole=shell_builder.remove_monopole,
+            padding_deg=shell_builder.padding_deg,
+            apotype=shell_builder.apotype,
+            padding_nside=shell_builder.padding_nside,
+            replicate_octant=shell_builder.replicate_octant,
             nocompress=shell_builder.nocompress,
             f_ell=shell_builder.f_ell,
             base_fname='shell')
@@ -108,12 +121,70 @@ class BaryonifiedShellBuilder(ShellBuilder):
         self.cosmo_linear = pyccl.Cosmology(**self.cosmo_dict)
         self.cosmo_dict.update({'Omega_m': self.cosmo['Omega_m']})
 
+        self._pk2d = None
         pix = bfg.HealPixel(self.nside)
         dmo = bfg.ConvolvedProfile(dmo, pix)
         dmb = bfg.ConvolvedProfile(dmb, pix)
         self.model = bfg.Profiles.Baryonification2D(dmo, dmb, self.cosmo_linear, mass_def=pyccl.halos.massdef.MassDef(*mass_def))
 
         self._interpolator_ishell = None  # shell index currently tabulated in self.model
+
+    def matter_power_spectrum(self, nk=128, na=32):
+        """Return the baryon-corrected matter power spectrum consistent with the baryonified shells.
+
+        CCL's nonlinear P(k) multiplied by the boost ``R(k, a) = P_DMB / P_DMO`` of the
+        profiles used to baryonify the shells, in CCL's halo model (BaryonForge's
+        ``FlexibleHMCalculator``, with the mass definition of the shells). As in the
+        shells, halos lighter than ``M_min`` keep their dark-matter-only profile. The
+        profiles' two-halo term is replaced by zero (on copies) since the halo model
+        adds its own. Computed once, then cached.
+
+        Parameters
+        ----------
+        nk, na : int, optional
+            Number of wavenumbers in ``[1e-4, 20]`` 1/Mpc and of scale factors up to
+            the shells' maximum redshift.
+
+        Returns
+        -------
+        pyccl.Pk2D
+        """
+        if self._pk2d is not None:
+            return self._pk2d
+        cosmo = self.cosmo
+        rho_m = pyccl.rho_x(cosmo, 1.0, 'matter', is_comoving=True)
+
+        dmo, dmb = copy.copy(self.dmo), copy.copy(self.dmb)
+        for prof in (dmo, dmb):
+            if hasattr(prof, 'TwoHalo'):
+                prof.TwoHalo = bfg.Profiles.misc.Zeros()
+        above = _MassThreshold(M_threshold=self.M_min)
+        dmb = dmb * above + dmo * (1. - above)
+        # profiles extend well beyond R200c: weight the 2-halo term with the total mass
+        m_to_mtot = bfg.Profiles.misc.Mdelta_to_Mtot(dmo, r_min=1e-6, r_max=1e2, N_int=100)
+
+        # overdensity profiles, truncated, with FFTLog precision high enough for extended profiles
+        truncation = bfg.Profiles.misc.Truncation(epsilon_trunc=100)
+        dmo = dmo / rho_m * truncation
+        dmb = dmb / rho_m * truncation
+        for prof in (dmo, dmb):
+            prof.update_precision_fftlog(padding_lo_fftlog=1e-8, padding_hi_fftlog=1e8, n_per_decade=100)
+
+        hmc = bfg.utils.FlexibleHMCalculator(
+            mass_function='Tinker08', halo_bias='Tinker10', halo_m_to_mtot=m_to_mtot,
+            mass_def=pyccl.halos.massdef.MassDef(*self.mass_def), log10M_min=9, log10M_max=16, nM=100)
+
+        a_arr = np.linspace(1. / (1. + self.shell_edges_redshift.max()), 1., na)
+        k_arr = np.geomspace(1e-4, 20, nk)
+        cosmo.compute_nonlin_power()
+        boost = np.empty((na, nk))
+        for ia in trange(na, desc='[matter_power_spectrum]'):
+            p_dmo = pyccl.halos.pk_2pt.halomod_power_spectrum(cosmo, hmc, k_arr, a_arr[ia], dmo, suppress_1h=lambda k: 1e-2)
+            p_dmb = pyccl.halos.pk_2pt.halomod_power_spectrum(cosmo, hmc, k_arr, a_arr[ia], dmb, suppress_1h=lambda k: 1e-2)
+            boost[ia] = p_dmb / p_dmo
+        pk = np.array([cosmo.nonlin_matter_power(k_arr, a) for a in a_arr]) * boost
+        self._pk2d = pyccl.Pk2D(a_arr=a_arr, lk_arr=np.log(k_arr), pk_arr=np.log(pk), is_logp=True)
+        return self._pk2d
 
     def _setup_interpolator(self, ishell: int) -> None:
         """(Re)build the interpolator for a single shell.
@@ -163,7 +234,7 @@ class BaryonifiedShellBuilder(ShellBuilder):
         """
         shells = {}
 
-        _, ipix = self.get_mask(nest=False, return_ipix=True)
+        _, ipix = self.get_mask(nest=False, return_ipix=True, padded=True)
         for ishell in self.tqdm(ishells, desc="[construct_maps]"):
             fname = self.get_fname(ishell)
             shell = self.check_maps(read=True, fname=fname)
@@ -210,3 +281,58 @@ class BaryonifiedShellBuilder(ShellBuilder):
             shells[ishell] = shell
 
         return shells[ishells] if type(ishells) is int else shells
+
+
+def s19_profiles(bfg_params, mass_def, **kwargs):
+    """Return the S19 dark-matter-only and baryonified halo profiles.
+
+    Both profiles share their components (dark matter, gas, stars, collisionless
+    matter, two-halo term), with BaryonForge's default numerical settings unless
+    overridden by ``kwargs``.
+
+    Parameters
+    ----------
+    bfg_params : dict
+        S19 model parameters (``baryon.bfg_params`` of the run configuration).
+    mass_def : tuple
+        Halo mass definition, e.g. ``('200', 'critical')``.
+    **kwargs
+        Other options of the BaryonForge S19 profiles, passed to every component
+        (e.g. ``r_min_int``, ``r_max_int``, ``r_steps``, ``c_M_relation``).
+
+    Returns
+    -------
+    dmo, dmb : BaryonForge profiles
+        ``DarkMatterOnly`` and ``DarkMatterBaryon`` profiles.
+    """
+    S19 = bfg.Profiles.Schneider19
+    kwargs = dict(bfg_params, mass_def=pyccl.halos.massdef.MassDef(*mass_def), **kwargs)
+    dm = S19.DarkMatter(**kwargs)
+    gas = S19.Gas(**kwargs)
+    stars = S19.Stars(**kwargs)
+    clm = S19.CollisionlessMatter(gas=gas, stars=stars, darkmatter=dm, **kwargs)
+    two = S19.TwoHalo(**kwargs)
+    dmo = S19.DarkMatterOnly(darkmatter=dm, twohalo=two, **kwargs)
+    dmb = S19.DarkMatterBaryon(gas=gas, stars=stars, collisionlessmatter=clm, darkmatter=dm, twohalo=two, **kwargs)
+    return dmo, dmb
+
+
+class _MassThreshold(bfg.Profiles.Base.BaseBFGProfiles):
+    """Profile equal to 1 for halo masses above ``M_threshold`` and 0 below (to select halos in profile arithmetic)."""
+
+    # a hyper parameter, so that profile arithmetic (which rebuilds profiles from their parameters) keeps it
+    hyper_param_names = bfg.Profiles.Base.hyper_params + ['M_threshold']
+
+    def __init__(self, M_threshold=None, **kwargs):
+        self.M_threshold = M_threshold
+        super().__init__(**kwargs)
+
+    def _real(self, cosmo, r, M, a):
+        r_use = np.atleast_1d(r)
+        M_use = np.atleast_1d(M)
+        prof = np.broadcast_to((M_use >= self.M_threshold)[:, None], (len(M_use), len(r_use))).astype(float)
+        if np.ndim(r) == 0:
+            prof = np.squeeze(prof, axis=-1)
+        if np.ndim(M) == 0:
+            prof = np.squeeze(prof, axis=0)
+        return prof

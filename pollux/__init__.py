@@ -1,4 +1,8 @@
+import warnings
+
 from .io import PolluxIO
+
+__all__ = ['PolluxIO']
 
 try:
     from .lensing import BornLensingBuilder, SnapshotBornLensingBuilder
@@ -7,6 +11,11 @@ try:
     from .catalog import CatalogSourceUniform, CatalogSourceClusteredMultinomial, CatalogSourceClusteredPoisson
     from .ia import IACalculator, CatalogAugmentorShear
     from .baryons import BaryonifiedShellBuilder
+    __all__ += [
+        'BornLensingBuilder', 'SnapshotBornLensingBuilder', 'SLICSReader', 'HACCReader', 'HACCHaloReader', 'DummyReader', 'SnapshotShellBuilder',
+        'SnapshotInterpBuilder', 'LightconeSlicingBuilder', 'CatalogSourceUniform', 'CatalogSourceClusteredMultinomial', 'CatalogSourceClusteredPoisson',
+        'IACalculator', 'CatalogAugmentorShear', 'BaryonifiedShellBuilder'
+    ]
 except ImportError as e:
-    print(f"Warning: Could not import full pollux package: {e}")
-    print("Only imported pollux.io")
+    # e.g. on a machine with only the I/O dependencies, to read products
+    warnings.warn(f"Could not import the full pollux package ({e}): only pollux.io is available.")

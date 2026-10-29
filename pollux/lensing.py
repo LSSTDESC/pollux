@@ -1,16 +1,20 @@
+from __future__ import annotations
+
 import logging
 import os
+from typing import TYPE_CHECKING, Any, Iterable
 
 import healpy as hp
 import healsparse as hsp
 import numpy as np
 import pyccl
-import sacc
-from tqdm.auto import trange
 
-from .cosmo import MyCMBLensingTracer, Tracer  # noqa: F401 (MyCMBLensingTracer kept importable from here)
+from .cosmo import Tracer
 from .map_builder import MapBuilder, MapSum
 from .utils import quad
+
+if TYPE_CHECKING:
+    from .shells import ShellBuilder
 
 logger = logging.getLogger(__name__)
 
@@ -42,9 +46,22 @@ class LensingBuilder(MapBuilder):
         is provided it must have length matching the number of maps and gives
         per-map values. Values are converted to per-steradian internally
         where needed.
+    **kwargs
+        Forwarded to :class:`pollux.map_builder.MapBuilder`. The footprint, padding,
+        octant replication, monopole removal and workspace directory default to
+        those of ``shell_builder``.
     """
 
-    def __init__(self, shell_builder, nzs, tag=None, save_dir=None, dtype=np.float32, sigma_e=0.3, nbar=5., **kwargs):
+    def __init__(
+            self,
+            shell_builder: ShellBuilder,
+            nzs: str | list,
+            tag: str | None = None,
+            save_dir: str | None = None,
+            dtype: np.dtype = np.float32,
+            sigma_e: float | np.ndarray = 0.3,
+            nbar: float | np.ndarray = 5.,
+            **kwargs: Any) -> None:
         self.shell_builder = shell_builder
         self.tag = tag
         if save_dir is None:
@@ -53,7 +70,8 @@ class LensingBuilder(MapBuilder):
             else:
                 save_dir = os.path.join(shell_builder.save_dir, f'kappa_{tag}')
         else:
-            assert tag is None, "Provide either tag or save_dir, not both."
+            if tag is not None:
+                raise ValueError('Provide either tag or save_dir, not both.')
         self.reader = shell_builder.reader
         self.cosmo = shell_builder.cosmo
         self.nshells = shell_builder.nshells
@@ -99,13 +117,8 @@ class LensingBuilder(MapBuilder):
         super().__init__(
             nside=shell_builder.nside, dtype=dtype, save_dir=save_dir, base_fname=base_fname, nmaps=self.nkappas, sacc_type="galaxy_convergence_cl", **kwargs)
 
-    def _create_tracers(self, Nz=1000):
-        """Create one lensing tracer per source redshift distribution.
-
-        Parameters
-        ----------
-        Nz : int, optional
-            Sampling used to tabulate n(z) when a callable is provided.
+    def _create_tracers(self) -> list[Tracer]:
+        """Create one lensing tracer per source redshift distribution (callables tabulated on 1000 redshifts).
 
         Returns
         -------
@@ -116,17 +129,30 @@ class LensingBuilder(MapBuilder):
         tracers = []
         for i, nz in enumerate(self.nzs):
             if callable(nz):
-                zz = np.linspace(0, z_edges[-1], Nz)
+                zz = np.linspace(0, z_edges[-1], 1000)
                 tracers.append(Tracer(f"kappa_{i}", 'shear', z=zz, nz=nz(zz)))
             else:
                 tracers.append(Tracer(f"kappa_{i}", 'shear', z=nz[0], nz=nz[1]))
         return tracers
 
-    def matter_power_spectrum(self):
+    def matter_power_spectrum(self) -> pyccl.Pk2D | None:
         """Return the matter power spectrum of the shell builder (see :meth:`MapBuilder.matter_power_spectrum`)."""
         return self.shell_builder.matter_power_spectrum()
 
-    def compute_shear_maps(self, ikappas=None, smooth_Mpc=None, lmax=None):
+    def _smoothing_sigma(self, ikappa: int, smooth_Mpc: float) -> float:
+        """Return the angular width (radians) of a comoving smoothing scale at the source plane of a per-shell convergence map."""
+        if self.nzs != 'zsnapshots':
+            raise ValueError(
+                "smoothing in Mpc is only meaningful for snapshot lensing (nzs='zsnapshots'); "
+                "for n(z) bins there is no single comoving distance to convert Mpc to an angle.")
+        return smooth_Mpc / self.shell_builder.shell_edges_comoving_distance[ikappa + 1]
+
+    def compute_shear_maps(
+            self,
+            ikappas: int | Iterable[int] | None = None,
+            smooth_Mpc: float | None = None,
+            lmax: int | None = None,
+            save_field_map: bool = True) -> list[hsp.HealSparseMap] | dict[int, list[hsp.HealSparseMap]]:
         """Compute shear (gamma1, gamma2) maps from convergence maps.
 
         Parameters
@@ -134,14 +160,17 @@ class LensingBuilder(MapBuilder):
         ikappas : int or array_like of int or None, optional
             Convergence map indices to process. If None, process all.
         smooth_Mpc : float or None, optional
-            If provided, smooth the convergence alm with a Gaussian of angular
-            width ``sigma = smooth_Mpc / chi_mid`` before deriving shear.  The
-            smoothed kappa map is also saved (``what='kappa_{smooth_Mpc}Mpc'``).
-            Shear maps are saved with the same suffix.  Only meaningful when the
-            kappa maps are per-shell (``nzs='zsnapshots'``).
+            Comoving Gaussian smoothing scale in Mpc of the convergence a_lm before
+            deriving shear (angular width at the source plane, see
+            :meth:`_smoothing_sigma`; only for per-shell maps, ``nzs='zsnapshots'``).
+            Shear maps are saved with the suffix ``_{smooth_Mpc}Mpc``.
         lmax : int or None, optional
             Maximum multipole used in harmonic transforms. Defaults to
             ``3*nside - 1``.
+        save_field_map : bool, optional
+            With ``smooth_Mpc``, also save the smoothed convergence map, from the same
+            a_lm (as :meth:`~pollux.map_builder.MapBuilder.compute_maps_from_alms`).
+            Default is True.
 
         Returns
         -------
@@ -158,31 +187,23 @@ class LensingBuilder(MapBuilder):
         fl[1:] = -np.sqrt((ell[1:] + 2.) * (ell[1:] - 1.) / (ell[1:] * (ell[1:] + 1.)))
 
         _, ipix = self.get_mask(nest=False, return_ipix=True, padded=True)
-
-        if smooth_Mpc is not None:
-            if self.nzs != 'zsnapshots':
-                raise ValueError(
-                    "smooth_Mpc is only meaningful for snapshot lensing (nzs='zsnapshots'); "
-                    "for n(z) bins there is no single comoving distance to convert Mpc to an angle."
-                )
-            chi_edges = self.shell_builder.shell_edges_comoving_distance
+        save_field_map = save_field_map and smooth_Mpc is not None
 
         gammas = {}
         for ikappa in self.tqdm(ikappas, desc="[compute_shear_maps]"):
             g1 = self.check_maps(read=True, fname=self.get_fname(ikappa, what='gamma1', smooth_Mpc=smooth_Mpc))
             g2 = self.check_maps(read=True, fname=self.get_fname(ikappa, what='gamma2', smooth_Mpc=smooth_Mpc))
-            if g1 is not None and g2 is not None:
+            field_done = not save_field_map or os.path.exists(self.get_fname(ikappa, what=self.smoothed_field_what, smooth_Mpc=smooth_Mpc))
+            if g1 is not None and g2 is not None and field_done:
                 gammas[ikappa] = [g1, g2]
                 continue
 
-            # Get harmonic coefficients of convergence map
+            # Get harmonic coefficients of convergence map, smoothed in place if requested
             klm = self.compute_alms(ikappa, pol=False, lmax=lmax)
-            if smooth_Mpc is not None:
-                kappa_hsp = self._smooth_alms(klm, smooth_Mpc / chi_edges[ikappa + 1], ipix, lmax)
-                kappa_fname = self.get_fname(ikappa, smooth_Mpc=smooth_Mpc)
-                kappa_hsp.write(kappa_fname, clobber=True, format=self.save_format, nocompress=self.nocompress)
-                logger.debug("Saved to file %s.", kappa_fname)
-                # klm is now smoothed inplace
+            if save_field_map:
+                self._save_smoothed_field(ikappa, klm, smooth_Mpc, ipix, lmax)
+            elif smooth_Mpc is not None:
+                self._smooth_alms(klm, self._smoothing_sigma(ikappa, smooth_Mpc), ipix, lmax)
 
             # Convert to shear
             glm_E = hp.almxfl(klm, fl)
@@ -205,9 +226,9 @@ class LensingBuilder(MapBuilder):
 
             gammas[ikappa] = [gamma1, gamma2]
 
-        return gammas[ikappas] if type(ikappas) is int else gammas
+        return gammas[ikappas] if np.isscalar(ikappas) else gammas
 
-    def _noise_cls(self, imap):
+    def _noise_cls(self, imap: int) -> float:
         """Return the (white) shape-noise power spectrum.
 
         Parameters
@@ -224,20 +245,32 @@ class LensingBuilder(MapBuilder):
 
 
 class BornLensingBuilder(LensingBuilder):
-    """Convergence-map builder in the Born approximation."""
+    """Convergence-map builder in the Born approximation.
 
-    def __init__(self, shell_builder, nzs, tag=None, save_dir=None, dtype=np.float32, multiple_planes=False, nbar_from_maps=False, **kwargs):
-        """Initialize a Born-approximation lensing builder.
+    Parameters
+    ----------
+    shell_builder, nzs, tag, save_dir, dtype
+        See :class:`LensingBuilder`.
+    multiple_planes : bool, optional
+        If True, compute weights using a multiple-lens-planes approximation.
+        If False, use Limber-style integrals of tracer kernels per shell.
+    nbar_from_maps : bool, optional
+        If True, estimate the mean density from the shell maps themselves.
+        This can affect large-scale modes.
+    **kwargs
+        Forwarded to :class:`LensingBuilder` (e.g. ``sigma_e``, ``nbar``).
+    """
 
-        Parameters
-        ----------
-        multiple_planes : bool, optional
-            If True, compute weights using a multiple-lens-planes approximation.
-            If False, use Limber-style integrals of tracer kernels per shell.
-        nbar_from_maps : bool, optional
-            If True, estimate the mean density from the shell maps themselves.
-            This can affect large-scale modes.
-        """
+    def __init__(
+            self,
+            shell_builder: ShellBuilder,
+            nzs: str | list,
+            tag: str | None = None,
+            save_dir: str | None = None,
+            dtype: np.dtype = np.float32,
+            multiple_planes: bool = False,
+            nbar_from_maps: bool = False,
+            **kwargs: Any) -> None:
         super().__init__(shell_builder, nzs, tag=tag, save_dir=save_dir, dtype=dtype, **kwargs)
 
         self.multiple_planes = multiple_planes
@@ -254,7 +287,7 @@ class BornLensingBuilder(LensingBuilder):
             self.dndz_norm = [quad(lambda z: t.ccl(self.cosmo).get_dndz(z), 0., zmax) if t.kind == 'shear' else np.nan for t in self.tracers]
             self.zlens = [self.shell_builder.mean_z(ishell) for ishell in range(self.nshells)]
 
-    def compute_weight(self, ishell, ikappa):
+    def compute_weight(self, ishell: int, ikappa: int) -> float:
         """Compute the shell weight contributing to a given convergence map.
 
         Parameters
@@ -283,7 +316,8 @@ class BornLensingBuilder(LensingBuilder):
 
             if tracer.kind == 'shear':
 
-                def integrand(zsource, zlens, tracer):
+                def integrand(zsource: float, zlens: float, tracer: pyccl.Tracer) -> float:
+                    # source n(z) over the critical surface density
                     sigma_critical = pyccl.background.sigma_critical(self.cosmo, a_lens=1. / (1. + zlens), a_source=1. / (1. + zsource))  # in Msun / Mpc^2
                     return tracer.get_dndz(zsource) / sigma_critical
 
@@ -304,7 +338,7 @@ class BornLensingBuilder(LensingBuilder):
             tracer_ccl = tracer.ccl(self.cosmo)
             return quad(lambda chi: tracer_ccl.get_kernel(chi), chi_min, chi_max)
 
-    def construct_maps(self, ikappas=None):
+    def construct_maps(self, ikappas: int | Iterable[int] | None = None) -> hsp.HealSparseMap | dict[int, hsp.HealSparseMap]:
         """Construct and save convergence maps by summing weighted shells.
 
         Parameters
@@ -322,7 +356,7 @@ class BornLensingBuilder(LensingBuilder):
 
         # First check if requested kappas are already present, otherwise rebuild all
         kappas = self.check_maps(ikappas, read=True)
-        if type(ikappas) is int:
+        if np.isscalar(ikappas):
             if kappas is not None:
                 return kappas
         else:
@@ -361,7 +395,7 @@ class BornLensingBuilder(LensingBuilder):
             kappa.write(fname, clobber=True, format=self.save_format, nocompress=self.nocompress)
             logger.debug("Saved to file %s.", fname)
 
-        return kappas[ikappas] if type(ikappas) is int else kappas
+        return kappas[ikappas] if np.isscalar(ikappas) else kappas
 
 
 class SnapshotBornLensingBuilder(BornLensingBuilder):
@@ -382,10 +416,10 @@ class SnapshotBornLensingBuilder(BornLensingBuilder):
         Forwarded to :class:`BornLensingBuilder` (e.g. ``multiple_planes``).
     """
 
-    def __init__(self, shell_builder, tag='zsnapshots', **kwargs):
+    def __init__(self, shell_builder: ShellBuilder, tag: str | None = 'zsnapshots', **kwargs: Any) -> None:
         super().__init__(shell_builder, nzs='zsnapshots', tag=tag, **kwargs)
 
-    def _create_tracers(self, Nz=None):
+    def _create_tracers(self) -> list[Tracer]:
         """Create one convergence tracer per shell, with its source plane at the shell's far edge.
 
         Returns

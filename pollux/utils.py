@@ -1,5 +1,9 @@
+from __future__ import annotations
+
+import logging
 import warnings
 from functools import partial
+from typing import Any, Callable
 
 import healpy as hp
 import numba
@@ -11,12 +15,14 @@ from scipy.integrate import quad as scipy_quad
 from scipy.spatial import KDTree
 from scipy.stats import truncnorm
 
+logger = logging.getLogger(__name__)
+
 QUAD_EPS_REL = 1e-6
 QUAD_EPS_ABS = 0.0
 QUAD_LIMIT = 1000
 
 
-def quad(*args, **kwargs):
+def quad(*args: Any, **kwargs: Any) -> float:
     """Integrate a function using SciPy quad with project-wide default tolerances.
 
     This is a thin wrapper around :func:`scipy.integrate.quad` that enforces
@@ -43,7 +49,7 @@ def quad(*args, **kwargs):
     return scipy_quad(*args, epsabs=QUAD_EPS_ABS, epsrel=QUAD_EPS_REL, limit=QUAD_LIMIT, **kwargs)[0]
 
 
-def powspace(start, stop, num, power):
+def powspace(start: float, stop: float, num: int, power: float) -> np.ndarray:
     """Generate a power-law spaced grid between two positive endpoints.
 
     This is similar to :func:`numpy.linspace` and :func:`numpy.geomspace`, but uses
@@ -78,7 +84,7 @@ def powspace(start, stop, num, power):
     return np.power(np.linspace(start, stop, num=num), 1.0 / power)
 
 
-def radec2thetaphi(ra, dec):
+def radec2thetaphi(ra: np.ndarray, dec: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Convert (RA, Dec) in degrees to Healpix angles (theta, phi) in radians.
 
     Healpix conventions:
@@ -104,7 +110,7 @@ def radec2thetaphi(ra, dec):
     return theta, phi
 
 
-def thetaphi2radec(theta, phi):
+def thetaphi2radec(theta: np.ndarray, phi: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Convert Healpix angles (theta, phi) in radians to (RA, Dec) in degrees.
 
     Healpix conventions:
@@ -131,25 +137,7 @@ def thetaphi2radec(theta, phi):
 
 
 @numba.njit(parallel=False)  # this operation does NOT support parallelization!
-def _add_at_cst(a, index, b):
-    """Numba helper: add a constant value to ``a`` at given indices.
-
-    Parameters
-    ----------
-    a : ndarray
-        1D array modified in-place.
-    index : ndarray of int
-        Indices where to add.
-    b : float
-        Constant added to each ``a[index[i]]``.
-    """
-    n = len(index)
-    for i in numba.prange(n):
-        a[index[i]] += b
-
-
-@numba.njit(parallel=False)
-def _add_at(a, index, b):
+def _add_at(a: np.ndarray, index: np.ndarray, b: np.ndarray) -> None:
     """Numba helper: add values ``b`` to ``a`` at given indices.
 
     Parameters
@@ -167,7 +155,18 @@ def _add_at(a, index, b):
 
 
 def make_healpix_map(
-        ra, dec, quantity, nside, mask=None, weight=None, ipix=None, fill_UNSEEN=False, return_w_maps=False, return_extra=False, nest=True, mode='mean'):
+        ra: np.ndarray,
+        dec: np.ndarray,
+        quantity: np.ndarray | None,
+        nside: int,
+        mask: np.ndarray | None = None,
+        weight: np.ndarray | None = None,
+        ipix: np.ndarray | None = None,
+        fill_UNSEEN: bool = False,
+        return_w_maps: bool = False,
+        return_extra: bool = False,
+        nest: bool = True,
+        mode: str = 'mean') -> list:
     """Bin point samples into one or more dense Healpix maps.
 
     This function takes samples at sky coordinates (RA, Dec) and aggregates an
@@ -246,26 +245,31 @@ def make_healpix_map(
         if weight is not None:
             w = np.atleast_2d(weight)
             if w.shape[0] > 1:
-                assert quantity.shape == w.shape, "[make_healpix_map] quantity/weight arrays don't have the same length"
+                if quantity.shape != w.shape:
+                    raise ValueError("[make_healpix_map] quantity/weight arrays don't have the same length")
             else:
                 w = np.tile(w[0], (quantity.shape[0], 1))
 
-            assert np.all(w > 0.0), "[make_healpix_map] weight is not strictly positive"
+            if not np.all(w > 0.0):
+                raise ValueError('[make_healpix_map] weight is not strictly positive')
         else:
             w = np.ones_like(quantity)
 
-        assert quantity.shape == w.shape, "[make_healpix_map] quantity/weight arrays don't have the same length"
+        if quantity.shape != w.shape:
+            raise ValueError("[make_healpix_map] quantity/weight arrays don't have the same length")
 
     npix = hp.nside2npix(nside)
 
     if mask is not None:
-        assert len(mask) == npix, "[make_healpix_map] mask array does not have the right length"
+        if len(mask) != npix:
+            raise ValueError('[make_healpix_map] mask array does not have the right length')
 
     # Value to fill outside the mask
     x = hp.UNSEEN if fill_UNSEEN else 0.0
 
     # Make sure mode is correct
-    assert (mode in ['sum', 'mean']), "[make_healpix_map] mode should be 'mean' or 'sum'"
+    if mode not in ['sum', 'mean']:
+        raise ValueError("[make_healpix_map] mode should be 'mean' or 'sum'")
 
     count = np.zeros(npix, dtype=float)
     outmaps = []
@@ -273,16 +277,19 @@ def make_healpix_map(
 
     # Getting pixels for each object
     if ipix is None:
-        assert len(ra) == len(dec), "[make_healpix_map] ra/dec arrays don't have the same length"
+        if len(ra) != len(dec):
+            raise ValueError("[make_healpix_map] ra/dec arrays don't have the same length")
         if quantity is not None:
-            assert len(ra) == quantity.shape[1]
+            if len(ra) != quantity.shape[1]:
+                raise ValueError("[make_healpix_map] ra and quantity arrays don't have the same length")
         ipix = hp.ang2pix(nside, (90.0 - dec) / 180.0 * np.pi, ra / 180.0 * np.pi, nest=nest)
     else:
         if quantity is not None:
-            assert len(ipix) == quantity.shape[1], "[make_healpix_map] ipix has wrong size"
+            if len(ipix) != quantity.shape[1]:
+                raise ValueError('[make_healpix_map] ipix has wrong size')
 
     # Counting objects in pixels
-    _add_at_cst(count, ipix, 1.0)
+    count += np.bincount(ipix, minlength=npix)
 
     # Creating the mask if it does not exist
     if mask is None:
@@ -329,7 +336,16 @@ def make_healpix_map(
     return res
 
 
-def make_mask_radec_cuts(nside, ramin, ramax, decmin, decmax, eps=0.0, dtype=float, nest=True, coord='C'):
+def make_mask_radec_cuts(
+        nside: int,
+        ramin: float,
+        ramax: float,
+        decmin: float,
+        decmax: float,
+        eps: float = 0.0,
+        dtype: type = float,
+        nest: bool = True,
+        coord: str = 'C') -> np.ndarray:
     """Generate a rectangular mask from longitude/latitude cuts.
 
     Parameters
@@ -365,8 +381,10 @@ def make_mask_radec_cuts(nside, ramin, ramax, decmin, decmax, eps=0.0, dtype=flo
     The rectangle is implemented by selecting pixels whose (theta, phi) in the
     frame ``coord`` lie within the converted ranges.
     """
-    assert (0.0 <= ramin <= 360.0) & (0.0 <= ramax <= 360.0) & (ramin < ramax)
-    assert (-90.0 <= decmin <= 90.0) & (-90.0 <= decmax <= 90.0) & (decmin < decmax)
+    if not ((0.0 <= ramin <= 360.0) & (0.0 <= ramax <= 360.0) & (ramin < ramax)):
+        raise ValueError(f"Need 0 <= ramin < ramax <= 360, not ramin={ramin}, ramax={ramax}")
+    if not ((-90.0 <= decmin <= 90.0) & (-90.0 <= decmax <= 90.0) & (decmin < decmax)):
+        raise ValueError(f"Need -90 <= decmin < decmax <= 90, not decmin={decmin}, decmax={decmax}")
 
     mask = np.zeros(hp.nside2npix(nside), dtype=dtype)
     th, ph = hp.pix2ang(nside, np.arange(hp.nside2npix(nside)), nest=nest)
@@ -381,7 +399,16 @@ def make_mask_radec_cuts(nside, ramin, ramax, decmin, decmax, eps=0.0, dtype=flo
     return mask
 
 
-def make_nmtbin(nside, lmin, lmax, n_ell_bins, bin_func=np.linspace, f_ell=None, verbose=False, b_lmax=None, bins_ell=None):
+def make_nmtbin(
+        nside: int,
+        lmin: int,
+        lmax: int,
+        n_ell_bins: int,
+        bin_func: Callable = np.linspace,
+        f_ell: str | np.ndarray | None = None,
+        verbose: bool = False,
+        b_lmax: int | None = None,
+        bins_ell: np.ndarray | None = None) -> nmt.NmtBin:
     """Create a NaMaster bandpower binning object (:class:`pymaster.NmtBin`).
 
     Parameters
@@ -442,8 +469,9 @@ def make_nmtbin(nside, lmin, lmax, n_ell_bins, bin_func=np.linspace, f_ell=None,
         if f_ell == 'pixwin':
             f_ell = 1.0 / hp.pixwin(nside)[lmin:lmax + 1]**2
         else:
-            assert type(f_ell) == np.ndarray
-            assert len(f_ell) == len(ells)
+            f_ell = np.asarray(f_ell)
+            if len(f_ell) != len(ells):
+                raise ValueError(f"f_ell has {len(f_ell)} values, but there are {len(ells)} multipoles")
 
     if b_lmax is None:
         b_lmax = 3 * nside - 1
@@ -460,7 +488,7 @@ def make_nmtbin(nside, lmin, lmax, n_ell_bins, bin_func=np.linspace, f_ell=None,
     return b
 
 
-def make_nmtbin_logspaced(nside, lmin, lmax, n_ell_bins, f_ell=None, **kwargs):
+def make_nmtbin_logspaced(nside: int, lmin: int, lmax: int, n_ell_bins: int, f_ell: str | np.ndarray | None = None, **kwargs: Any) -> nmt.NmtBin:
     """Convenience wrapper to create log-spaced NaMaster bins.
 
     Parameters
@@ -480,7 +508,7 @@ def make_nmtbin_logspaced(nside, lmin, lmax, n_ell_bins, f_ell=None, **kwargs):
     return make_nmtbin(nside, lmin, lmax, n_ell_bins, bin_func=np.geomspace, f_ell=f_ell, **kwargs)
 
 
-def make_nmtbin_linspaced(nside, lmin, lmax, n_ell_bins, f_ell=None, **kwargs):
+def make_nmtbin_linspaced(nside: int, lmin: int, lmax: int, n_ell_bins: int, f_ell: str | np.ndarray | None = None, **kwargs: Any) -> nmt.NmtBin:
     """Convenience wrapper to create linearly spaced NaMaster bins.
 
     Parameters
@@ -500,7 +528,7 @@ def make_nmtbin_linspaced(nside, lmin, lmax, n_ell_bins, f_ell=None, **kwargs):
     return make_nmtbin(nside, lmin, lmax, n_ell_bins, bin_func=np.linspace, f_ell=f_ell, **kwargs)
 
 
-def make_nmtbin_powspaced(nside, lmin, lmax, n_ell_bins, power, f_ell=None, **kwargs):
+def make_nmtbin_powspaced(nside: int, lmin: int, lmax: int, n_ell_bins: int, power: float, f_ell: str | np.ndarray | None = None, **kwargs: Any) -> nmt.NmtBin:
     """Convenience wrapper to create power-law spaced NaMaster bins.
 
     Parameters
@@ -522,7 +550,7 @@ def make_nmtbin_powspaced(nside, lmin, lmax, n_ell_bins, power, f_ell=None, **kw
     return make_nmtbin(nside, lmin, lmax, n_ell_bins, bin_func=partial(powspace, power=power), f_ell=f_ell, **kwargs)
 
 
-def split_bins(x, func=None, ifunc=None, zmax=None):
+def split_bins(x: np.ndarray, func: Callable | None = None, ifunc: Callable | None = None, zmax: float | None = None) -> np.ndarray:
     """Compute bin edges from sample centers using a midpoint rule in transformed space.
 
     Given an array of bin centers ``x`` (monotonic), this constructs edges such that
@@ -553,10 +581,11 @@ def split_bins(x, func=None, ifunc=None, zmax=None):
 
     Raises
     ------
-    AssertionError
+    ValueError
         If both ``func`` and ``ifunc`` are None.
     """
-    assert func or ifunc
+    if not (func or ifunc):
+        raise ValueError("func or ifunc must be given")
 
     if func is None:
         func = inversefunc(ifunc, domain=[0.0, None], image=[0.0, None])
@@ -575,7 +604,7 @@ def split_bins(x, func=None, ifunc=None, zmax=None):
     return bins
 
 
-def read_params(fname):
+def read_params(fname: str) -> dict[str, str]:
     """Read a HACC-style parameter file into a dict.
 
     The expected format is one entry per line::
@@ -611,7 +640,7 @@ def read_params(fname):
     return params
 
 
-def save_dict_fits_file(fname, cat):
+def save_dict_fits_file(fname: str, cat: dict[str, np.ndarray]) -> None:
     """Write a dictionary of 1D float arrays to a FITS binary table.
 
     Parameters
@@ -637,7 +666,7 @@ def save_dict_fits_file(fname, cat):
     fits.HDUList(hdul).writeto(fname, overwrite=True)
 
 
-def trim(a, mindiff, return_indices=False):
+def trim(a: np.ndarray, mindiff: float, return_indices: bool = False) -> np.ndarray | tuple[np.ndarray, list[int]]:
     """Downsample a monotonically increasing array with a minimum spacing constraint.
 
     The algorithm keeps elements such that adjacent kept values are separated by
@@ -679,53 +708,7 @@ def trim(a, mindiff, return_indices=False):
         return np.array(x)
 
 
-@numba.njit(parallel=True)
-def inter_diff(idx1, idx2):
-    """Return intersection and differences between two arrays of unique integers.
-
-    Parameters
-    ----------
-    idx1, idx2 : ndarray of int
-        1D arrays containing unique integer values.
-
-    Returns
-    -------
-    idx1_int : ndarray of int
-        Indices into ``idx1`` for elements also present in ``idx2``.
-    idx2_int : ndarray of int
-        Indices into ``idx2`` for elements also present in ``idx1``.
-    idx1_diff : ndarray of int
-        Indices into ``idx1`` for elements not present in ``idx2``.
-    idx2_diff : ndarray of int
-        Indices into ``idx2`` for elements not present in ``idx1``.
-
-    Notes
-    -----
-    This Numba implementation concatenates and stable-sorts both arrays, then
-    identifies adjacent matches for the intersection and non-matched entries for
-    the differences.
-    """
-    idx = np.concatenate((idx1, idx2))
-
-    order = np.argsort(idx, kind='mergesort')
-    sidx = idx[order]
-
-    # intersection
-    mask = sidx[1:] == sidx[:-1]
-    idx1_int = order[:-1][mask]
-    idx2_int = order[1:][mask] - idx1.size
-
-    # difference
-    flag = np.concatenate((np.array([True]), ~mask, np.array([True])))
-    z = order[flag[1:] & flag[:-1]]
-    w = z >= idx1.size
-    idx1_diff = z[~w]
-    idx2_diff = z[w] - idx1.size
-
-    return idx1_int, idx2_int, idx1_diff, idx2_diff
-
-
-def arange_endpoint(start, end, step):
+def arange_endpoint(start: float, end: float, step: float) -> np.ndarray:
     """Like :func:`numpy.arange`, but force the last element to equal ``end``.
 
     Parameters
@@ -748,7 +731,7 @@ def arange_endpoint(start, end, step):
     return out
 
 
-def trunc_norm(myclip_a, myclip_b, loc, scale):
+def trunc_norm(myclip_a: float, myclip_b: float, loc: float, scale: float) -> Any:
     """Construct a SciPy truncated normal distribution.
 
     Parameters
@@ -769,7 +752,7 @@ def trunc_norm(myclip_a, myclip_b, loc, scale):
     return truncnorm(loc=loc, scale=scale, a=a, b=b)
 
 
-def subsample_ppf(z, n, ppf, keep_first_last=True):
+def subsample_ppf(z: np.ndarray, n: int, ppf: Callable, keep_first_last: bool = True) -> tuple[np.ndarray, np.ndarray]:
     """Subsample points to match a target distribution via its percent point function.
 
     Given a sorted grid of candidate points ``z`` and a target percent point
@@ -816,11 +799,11 @@ def subsample_ppf(z, n, ppf, keep_first_last=True):
         if len(unique_idx) == n:
             break
     if usize > n:
-        print(f"[subsample_ppf] had to try finer grid {usize}>{n}")
+        logger.debug("[subsample_ppf] had to try finer grid %d>%d", usize, n)
     return unique_idx, z[unique_idx]
 
 
-def sample_pdf(x, pdf, n, rng):
+def sample_pdf(x: np.ndarray, pdf: np.ndarray, n: int, rng: np.random.Generator) -> np.ndarray:
     """Sample from a 1D distribution specified by samples of its PDF.
 
     The PDF is assumed piecewise-linear between points in ``x``. Sampling is
@@ -845,7 +828,7 @@ def sample_pdf(x, pdf, n, rng):
     Notes
     -----
     This routine uses trapezoidal integration to approximate the CDF:
-    ``CDF[i] = \int_{x0}^{xi} pdf(x) dx``.
+    ``CDF[i] = int_{x0}^{xi} pdf(x) dx``.
     """
     dx = np.diff(x)
     trapz = 0.5 * (pdf[1:] + pdf[:-1]) * dx

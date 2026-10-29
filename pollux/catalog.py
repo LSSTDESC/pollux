@@ -1,8 +1,12 @@
+from __future__ import annotations
+
 import logging
 import os
 import warnings
+from functools import cached_property
+from typing import TYPE_CHECKING, Any, Iterable
+
 import numpy as np
-from typing import Any
 import healpy as hp
 import pymaster as nmt
 import sacc
@@ -12,6 +16,11 @@ from astropy.io import fits
 
 from .cosmo import Tracer
 from .utils import radec2thetaphi, quad, sample_pdf
+
+if TYPE_CHECKING:
+    import healsparse as hsp
+    import pyccl
+    from .lensing import LensingBuilder
 
 logger = logging.getLogger(__name__)
 
@@ -30,22 +39,31 @@ class CatalogSourceGenerator:
         interpolate.
     tag : str or None, optional
         Tag used to name the output directory ``catalogs_{tag}/``. Default is None.
-    nbar : float, array-like, or None, optional
+    nbar_input : float, array-like, or None, optional
         Galaxy surface density in gal/arcmin^2. If a float, the same surface
         density is used for all tomographic bins; if an array-like, it must
         have length ``lensing.nmaps`` and provide a per-bin value. If ``None``,
         the values are taken from ``lensing.nbar``. Default is None.
-    smooth_Mpc : float or None, optional
-        Physical Gaussian smoothing scale in Mpc of the fields used for intrinsic
-        alignments (``SMOOTHED_FIELDS``: density and tidal tensor), interpolated from
-        their smoothed maps. Convergence, shear and the density used to place
-        galaxies are not smoothed. ``None`` means no smoothing.
-    interp_list : list of str, optional
-        Names of fields to interpolate from maps. Default is
-        ``['kappa', 'gamma1', 'gamma2']``.
-    interp_pixels : bool, optional
-        If True, use pixel interpolation at continuous (RA, DEC) coordinates.
-        If False, evaluate maps at the nearest pixel center. Default is True.
+    interp_fields : tuple of str, optional
+        Fields interpolated at the galaxies, among ``FIELDS`` (``'kappa'``,
+        ``'gamma1'``, ``'gamma2'``, ``'density'``, ``'t11'``, ``'t22'``, ``'t12'``);
+        the fields required by the augmentors are added. Default is
+        ``('kappa', 'gamma1', 'gamma2')``.
+    interp_method : {'bilinear', 'nearest'}, optional
+        Interpolation of the maps at the galaxy positions: bilinear across pixels
+        (default), or the value of the nearest pixel.
+    smooth_fields : tuple of str, optional
+        Fields read from their maps smoothed by ``smooth_Mpc``, among ``FIELDS`` and
+        ``'positions'`` (the density contrast used to place galaxies). Default is
+        ``('positions', 'density', 't11', 't22', 't12')``. The smoothed maps are made
+        by the builders (:meth:`~pollux.map_builder.MapBuilder.compute_maps_from_alms`,
+        :meth:`~pollux.shells.ShellBuilder.compute_tidal_tensor_maps`,
+        :meth:`~pollux.lensing.LensingBuilder.compute_shear_maps`).
+    smooth_Mpc : float or dict or None, optional
+        Comoving Gaussian smoothing scale in Mpc of ``smooth_fields``, or a dict of
+        scales per field (then ``smooth_fields`` is ignored, and fields not in the dict
+        are not smoothed). None (default) means no smoothing. Fields made together
+        (``t11``, ``t22``, ``t12``; ``gamma1``, ``gamma2``) must share their scale.
     augmentors : list, optional
         List of catalog augmentors. Default is empty list.
     cls_b : pymaster.NmtBin or None, optional
@@ -67,25 +85,30 @@ class CatalogSourceGenerator:
 
     def __init__(
         self,
-        lensing: Any,
+        lensing: LensingBuilder,
         tag: str | None = None,
         nbar_input: float | np.ndarray | None = None,
-        smooth_Mpc: float | None = None,
-        interp_list: list[str] | None = None,
-        interp_pixels: bool = True,
+        interp_fields: tuple[str, ...] = ('kappa', 'gamma1', 'gamma2'),
+        interp_method: str = 'bilinear',
+        smooth_fields: tuple[str, ...] = ('positions', 'density', 't11', 't22', 't12'),
+        smooth_Mpc: float | dict[str, float] | None = None,
         augmentors: list | None = None,
-        cls_b: Any = None,
+        cls_b: nmt.NmtBin | None = None,
         cls_lmax_mask: int | None = None,
     ) -> None:
-        """Initialize catalog generator and compute derived attributes."""
         self.lensing = lensing
         self.tag = tag
         self.nbar_input = nbar_input
-        self.interp_pixels = interp_pixels
+        if interp_method not in ('bilinear', 'nearest'):
+            raise ValueError(f"interp_method must be 'bilinear' or 'nearest', got {interp_method!r}")
+        if not set(interp_fields) <= set(self.FIELDS):
+            raise ValueError(f"interp_fields must be among {self.FIELDS}, got {interp_fields!r}")
+        self.interp_method = interp_method
+        self.smooth_fields = tuple(smooth_fields)
         self.smooth_Mpc = smooth_Mpc
+        self.smoothing = self.smoothing_scales(smooth_fields, smooth_Mpc)
 
-        # Set defaults for list parameters
-        self.interp_list = interp_list if interp_list is not None else ['kappa', 'gamma1', 'gamma2']
+        self.interp_fields = tuple(interp_fields)
         self.augmentors = augmentors if augmentors is not None else []
 
         # Catalogs live alongside the lensing maps; tag distinguishes parallel runs
@@ -103,14 +126,12 @@ class CatalogSourceGenerator:
         # Handle augmentor fields
         for augmentor in self.augmentors:
             for field_name in augmentor.required_interp_fields:
-                if field_name not in self.interp_list:
-                    warnings.warn(f"Adding field '{field_name}' to interp_list for augmentor '{augmentor.name}'.")
-                    self.interp_list.append(field_name)
+                if field_name not in self.interp_fields:
+                    warnings.warn(f"Adding field '{field_name}' to interp_fields for augmentor '{augmentor.name}'.")
+                    self.interp_fields += (field_name,)
         self.augmentor_kwargs = {ikappa: {'ikappa': ikappa} for ikappa in self.lensing.iter()}
         self.cls_b = cls_b
         self.cls_lmax_mask = cls_lmax_mask
-        self._b = None
-        self._footprint = None
         self.predicted_cls = None
         self._wsp = {}
 
@@ -140,7 +161,7 @@ class CatalogSourceGenerator:
         logger.info("  - Number of catalogs = %d.", self.ncats)
         logger.info("  - Catalogs saved to %s.", self._catalog_dir)
 
-    def generate(self, ikappas=None, ishell=None):
+    def generate(self, ikappas: int | Iterable[int] | None = None, ishell: int | None = None) -> None:
         """Generate mock catalogs and interpolate requested map quantities.
 
         Parameters
@@ -178,7 +199,7 @@ class CatalogSourceGenerator:
         # Save it!
         self._save_catalogs(catalog, ikappas=ikappas, ishell=ishell)
 
-    def combine_shells(self, ikappas=None):
+    def combine_shells(self, ikappas: int | Iterable[int] | None = None) -> None:
         """Concatenate the per-shell partial catalogs into one catalog per bin.
 
         Parameters
@@ -202,7 +223,8 @@ class CatalogSourceGenerator:
             fits.HDUList(hdul).writeto(fname, overwrite=True)
             logger.debug("Saved to file %s.", fname)
 
-    def _generate_galaxies(self, catalog, ikappas=None, ishells=None):
+    def _generate_galaxies(
+            self, catalog: dict[int, dict[str, np.ndarray]], ikappas: int | Iterable[int] | None = None, ishells: list[int] | None = None) -> None:
         """Populate a catalog container with galaxy properties.
 
         Parameters
@@ -221,12 +243,12 @@ class CatalogSourceGenerator:
         """
         raise NotImplementedError
 
-    def _generate_z(self, catalog, ikappa):
+    def _generate_z(self, catalog: dict[int, dict[str, np.ndarray]], ikappa: int) -> None:
         """Draw redshifts from the tracer n(z) via inverse-CDF sampling.
 
         Parameters
         ----------
-        catalog : list of dict
+        catalog : dict
             Per-bin output container.
         ikappa : int
             Tomographic-bin index.
@@ -253,12 +275,13 @@ class CatalogSourceGenerator:
         catalog[ikappa]['chi'] = chi
         catalog[ikappa]['idx_shell'] = np.digitize(z, z_edges) - 1
 
-    def _interpolate_maps(self, catalog, ikappas=None, ishells=None):
+    def _interpolate_maps(
+            self, catalog: dict[int, dict[str, np.ndarray]], ikappas: int | Iterable[int] | None = None, ishells: list[int] | None = None) -> None:
         """Interpolate map quantities at galaxy positions.
 
         Parameters
         ----------
-        catalog : list of dict
+        catalog : dict
             Per-bin catalog dictionaries containing at least ``'ra'``, ``'dec'``,
             ``'chi'`` and ``'idx_shell'``.
         ikappas : int or array_like of int or None, optional
@@ -273,7 +296,7 @@ class CatalogSourceGenerator:
         ``interpolate_pos``). For ``k='delta'``, a density contrast map is built
         from snapshot-lensing density shells.
         """
-        for k in self.interp_list:
+        for k in self.interp_fields:
             if ishells is None:
                 # all shells: each map is read once and reused as the lower map of the next shell
                 map_high = None
@@ -287,10 +310,64 @@ class CatalogSourceGenerator:
                     map_high = self._load_interp_map(k, ishell)
                     self._interpolate_shell(catalog, k, ishell, map_low, map_high, ikappas=ikappas)
 
-    # fields used for intrinsic alignments, interpolated from maps smoothed by smooth_Mpc
-    SMOOTHED_FIELDS = ('density', 't11', 't22', 't12')
+    # fields that can be interpolated at the galaxies
+    FIELDS = ('kappa', 'gamma1', 'gamma2', 'density', 't11', 't22', 't12')
 
-    def _load_interp_map(self, k, ishell):
+    # fields made together by the builders, which must share their smoothing
+    _SMOOTHED_TOGETHER = (('t11', 't22', 't12'), ('gamma1', 'gamma2'))
+
+    @classmethod
+    def smoothing_scales(cls, smooth_fields: tuple[str, ...], smooth_Mpc: float | dict[str, float] | None) -> dict[str, float | None]:
+        """Return the smoothing scale of every field (see ``smooth_fields`` and ``smooth_Mpc``).
+
+        Parameters
+        ----------
+        smooth_fields : tuple of str
+            Fields smoothed by a single scale ``smooth_Mpc``.
+        smooth_Mpc : float or dict or None
+            Smoothing scale, or scales per field.
+
+        Returns
+        -------
+        dict
+            Scale (Mpc) or None of each of ``FIELDS`` and ``'positions'``, e.g. to
+            schedule the smoothed maps needed by a catalog.
+        """
+        names = cls.FIELDS + ('positions',)
+        if isinstance(smooth_Mpc, dict):
+            scales = dict(smooth_Mpc)
+        else:
+            scales = {k: smooth_Mpc for k in smooth_fields} if smooth_Mpc else {}
+        unknown = set(scales) - set(names)
+        if unknown:
+            raise ValueError(f"Unknown fields {sorted(unknown)} for smoothing, must be among {names}")
+        scales = {k: scales.get(k) or None for k in names}
+        for group in cls._SMOOTHED_TOGETHER:
+            if len({scales[k] for k in group}) > 1:
+                raise ValueError(f"Fields {group} are made together and must share their smoothing scale")
+        return scales
+
+    def _density_map(self, ishell: int, smooth_Mpc: float | None) -> hsp.HealSparseMap:
+        """Return the density contrast of one shell, smoothed by ``smooth_Mpc`` (Mpc) if not None.
+
+        Parameters
+        ----------
+        ishell : int
+            Shell index.
+        smooth_Mpc : float or None
+            Smoothing scale of the map (saved by the shell builder's
+            :meth:`~pollux.shells.ShellBuilder.compute_tidal_tensor_maps`).
+
+        Returns
+        -------
+        hsp.HealSparseMap
+        """
+        builder = self.lensing.shell_builder
+        if smooth_Mpc is None:
+            return builder.field_hspmap(ishell)
+        return builder.load_maps(ishell, what='density', smooth_Mpc=smooth_Mpc)
+
+    def _load_interp_map(self, k: str, ishell: int) -> hsp.HealSparseMap:
         """Load the map of field ``k`` for one shell.
 
         Parameters
@@ -303,30 +380,35 @@ class CatalogSourceGenerator:
         Returns
         -------
         hsp.HealSparseMap
-            Map of field ``k``, smoothed for the fields in ``SMOOTHED_FIELDS`` if
-            ``self.smooth_Mpc`` is set.
+            Map of field ``k``, smoothed as given by ``smooth_fields`` and ``smooth_Mpc``.
         """
-        smooth_Mpc = self.smooth_Mpc if k in self.SMOOTHED_FIELDS else None
+        smooth_Mpc = self.smoothing[k]
         # Fields that live in the shell builder (density/tidal), vs the snapshot lensing builder
-        if k in ('density', 't11', 't22', 't12'):
-            if k == 'density' and smooth_Mpc is None:
-                hsp_map = self.snap_lensing.shell_builder.get_field_hspmap(ishell)
-            else:
-                hsp_map = self.lensing.shell_builder.load_maps(ishell, what=k, smooth_Mpc=smooth_Mpc)
+        if k == 'density':
+            hsmap = self._density_map(ishell, smooth_Mpc)
+        elif k in ('t11', 't22', 't12'):
+            hsmap = self.lensing.shell_builder.load_maps(ishell, what=k, smooth_Mpc=smooth_Mpc)
         else:
             # kappa, gamma1, gamma2: live in the snapshot lensing builder.
             # kappa is the default product (what=None); gamma* use what=k.
             what = None if k == 'kappa' else k
-            hsp_map = self.snap_lensing.load_maps(ishell, what=what, smooth_Mpc=smooth_Mpc)
+            hsmap = self.snap_lensing.load_maps(ishell, what=what, smooth_Mpc=smooth_Mpc)
 
-        return hsp_map
+        return hsmap
 
-    def _interpolate_shell(self, catalog, k, ishell, map_low, map_high, ikappas=None):
+    def _interpolate_shell(
+            self,
+            catalog: dict[int, dict[str, np.ndarray]],
+            k: str,
+            ishell: int,
+            map_low: hsp.HealSparseMap | None,
+            map_high: hsp.HealSparseMap,
+            ikappas: int | Iterable[int] | None = None) -> None:
         """Interpolate field ``k`` at the positions of the galaxies of one shell.
 
         Parameters
         ----------
-        catalog : list of dict
+        catalog : dict
             Per-bin catalog dictionaries, updated in place.
         k : str
             Field name.
@@ -350,7 +432,7 @@ class CatalogSourceGenerator:
                 dec = catalog[ikappa]['dec'][w]
                 if 'delta' in k:
                     # no interpolation between shells for delta (integrated quantity)
-                    if self.interp_pixels:
+                    if self.interp_method == 'bilinear':
                         catalog[ikappa][k][w] = map_high.interpolate_pos(
                             ra,
                             dec,
@@ -368,7 +450,7 @@ class CatalogSourceGenerator:
                     dchi = (catalog[ikappa]['chi'][w] - chi_low)  # distance
 
                     # interpolation between shells and (optionnally) accross pixels
-                    if self.interp_pixels:
+                    if self.interp_method == 'bilinear':
                         if ishell == 0:
                             catalog[ikappa][k][w] = dchi * map_high.interpolate_pos(ra, dec, allow_partial=True) / (chi_high - chi_low)
                         else:
@@ -382,7 +464,7 @@ class CatalogSourceGenerator:
                         else:
                             catalog[ikappa][k][w] = map_low[idx] + dchi * (map_high[idx] - map_low[idx]) / (chi_high - chi_low)
 
-    def get_fname(self, ikappa, format='fits', ishell=None):
+    def get_fname(self, ikappa: int, format: str = 'fits', ishell: int | None = None) -> str:
         """Return the path for the saved catalog of one tomographic bin.
 
         Parameters
@@ -405,20 +487,20 @@ class CatalogSourceGenerator:
             return os.path.join(self._catalog_dir, f'cat_imap{ikappa}.{format}')
         return os.path.join(self._catalog_dir, 'shells', f'cat_imap{ikappa}_shell{ishell}.{format}')
 
-    def _save_catalogs(self, catalog, ikappas=None, ishell=None):
+    def _save_catalogs(self, catalog: dict[int, dict[str, np.ndarray]], ikappas: int | Iterable[int] | None = None, ishell: int | None = None) -> None:
         """Write per-bin catalogs to FITS files.
 
         Parameters
         ----------
-        catalog : list of dict
+        catalog : dict
             Per-bin outputs containing ``'ra'``, ``'dec'``, ``'z'``, ``'chi'`` and
-            any fields listed in ``self.interp_list``.
+            any fields listed in ``self.interp_fields``.
         ikappas : int or array_like of int or None, optional
             Tomographic-bin indices to save.
         ishell : int or None, optional
             If given, save as the partial catalogs of shell ``ishell``.
         """
-        columns = list(self.interp_list)
+        columns = list(self.interp_fields)
         for augmentor in self.augmentors:
             columns += augmentor.new_columns
         if ishell is not None:
@@ -443,7 +525,14 @@ class CatalogSourceGenerator:
             fits.HDUList(hdul).writeto(fname, overwrite=True)
             logger.debug("Saved to file %s.", fname)
 
-    def load_catalogs(self, ikappas=None, return_header=False, subsample=None, seed=None, columns=None, remove_mean=None):
+    def load_catalogs(
+            self,
+            ikappas: int | Iterable[int] | None = None,
+            return_header: bool = False,
+            subsample: float | None = None,
+            seed: int | None = None,
+            columns: list[str] | None = None,
+            remove_mean: list[str] | None = None) -> np.ndarray | dict[int, np.ndarray] | tuple:
         """Load saved FITS catalog(s) for one or more tomographic bins.
 
         Parameters
@@ -461,7 +550,7 @@ class CatalogSourceGenerator:
             non-representative pattern. Default is None (no subsampling).
         seed : int or None, optional
             Seed for the subsampling RNG. Only used when ``subsample`` is not
-            None. Defaults to the shell builder's seed.
+            None. Default is the shell builder's seed.
         columns : list of str or None, optional
             Columns to read. If None (default), all columns.
         remove_mean : list of str or None, optional
@@ -480,8 +569,9 @@ class CatalogSourceGenerator:
         -----
         Only the requested rows and columns are read (with ``fitsio``).
         """
-        rng_seed = self.lensing.shell_builder.seed if seed is None else seed
+        seed = self.lensing.shell_builder.seed if seed is None else seed
 
+        # read the requested columns of each bin, optionally a random subsample of its rows
         headers = {}
         tables = {}
         for ikappa in self.lensing.tqdm(ikappas, desc="[load_catalogs]"):
@@ -489,15 +579,22 @@ class CatalogSourceGenerator:
             headers[ikappa] = fits.getheader(fname, ext=1)
             rows = None
             if subsample is not None:
-                rows = self._subsample_rows(headers[ikappa]['NAXIS2'], subsample, np.random.default_rng(rng_seed + ikappa))
+                # random rows (galaxies are stored in shell order, so a stride would not be a fair sample)
+                if not 0.0 < subsample < 1.0:
+                    raise ValueError('subsample must satisfy 0 < subsample < 1')
+                nrows = headers[ikappa]['NAXIS2']
+                rows = np.sort(np.random.default_rng(seed + ikappa).choice(nrows, size=int(subsample * nrows), replace=False))
             table = fitsio.read(fname, ext=1, columns=columns, rows=rows)
+            # native byte order (FITS is big-endian), for numpy operations
             table = table.astype(table.dtype.newbyteorder('='))
+            # e.g. remove the mean shear of the bin
             for col in remove_mean or []:
                 table[col] -= table[col].mean()
             tables[ikappa] = table
             logger.debug("Found and loaded catalog at %s.", fname)
 
-        if type(ikappas) is int:
+        # a single table for a single bin, else dicts keyed by bin
+        if np.isscalar(ikappas):
             header, table = headers[ikappas], tables[ikappas]
         else:
             header, table = headers, tables
@@ -507,52 +604,62 @@ class CatalogSourceGenerator:
         else:
             return table
 
-    def _random_radec(self, ipix_mask, n, rng):
-        """Draw ``n`` random (RA, DEC) positions uniformly within the footprint.
-
-        Parameters
-        ----------
-        ipix_mask : ndarray of int
-            Valid pixel indices of the footprint (NESTED, at ``self.nside``).
-        n : int
-            Number of random positions to draw.
-        rng : numpy.random.Generator
-            Random number generator.
+    @property
+    def lensing_tracers(self) -> list[Tracer]:
+        """Lensing tracers of the catalog, those of the lensing builder (:attr:`MapBuilder.tracers`).
 
         Returns
         -------
-        ra, dec : ndarray
-            Longitudes and latitudes in degrees.
+        list of pollux.cosmo.Tracer
+            Shear tracers (one per bin) with the n(z) of the catalog's galaxies.
         """
-        ipix_rand = rng.choice(ipix_mask, size=n, replace=True)
-        return generate_radec_in_pix(self.nside, ipix_rand, rng)
-
-    @staticmethod
-    def _subsample_rows(nrows, subsample, rng):
-        """Draw the rows of a random subsample of a catalog, without replacement.
-
-        Galaxies are stored in a fixed order (e.g. by shell/generation order),
-        so a fixed stride would sample a specific, non-representative pattern.
-
-        Parameters
-        ----------
-        nrows : int
-            Number of rows of the catalog.
-        subsample : float
-            Fraction of rows to keep, with ``0 < subsample < 1``.
-        rng : numpy.random.Generator
-            Random number generator.
-
-        Returns
-        -------
-        numpy.ndarray
-            Sorted row indices.
-        """
-        assert 0. < subsample < 1., "subsample must satisfy 0 < subsample < 1"
-        return np.sort(rng.choice(nrows, size=int(subsample * nrows), replace=False))
+        return self.lensing.tracers
 
     @property
-    def b(self):
+    def density_tracers(self) -> list[Tracer]:
+        """Density tracers of the catalog: each bin's n(z) and linear bias.
+
+        Returns
+        -------
+        list of pollux.cosmo.Tracer
+            ``'density'`` tracers named ``density_{i}``, with the n(z) of the lensing
+            tracers (the galaxies are both lenses and sources), and the smoothing of
+            the density used to place them (``'positions'`` smoothing).
+        """
+        bias = getattr(self, 'bias', np.ones(self.ncats))
+        smooth_Mpc = self.smoothing['positions']
+        return [Tracer(f"density_{i}", 'density', z=t.z, nz=t.nz, bias=bias[i], smooth_Mpc=smooth_Mpc) for i, t in enumerate(self.lensing_tracers)]
+
+    def _noise_cls(self, tracer: Tracer, shear_cols: tuple[str, str] = ('gamma1', 'gamma2'), subsample: float | None = None) -> float:
+        """Return the white noise level of one catalog tracer.
+
+        Parameters
+        ----------
+        tracer : pollux.cosmo.Tracer
+            Density (``density_{i}``) or shear (``kappa_{i}``) tracer of bin ``i``.
+        shear_cols : tuple of str, optional
+            Shear columns used for the measurement (see :meth:`compute_cls`): shape
+            noise only for ellipticities (``e1_*``), none for the lensing shear.
+        subsample : float or None, optional
+            Fraction of galaxies used for the measurement.
+
+        Returns
+        -------
+        float
+            Shot noise ``1 / n`` (density) or shape noise ``sigma_e**2 / n`` (shear),
+            with ``n`` the bin's galaxy density per steradian.
+        """
+        i = int(tracer.name.rsplit('_', 1)[-1])
+        n_sr = self.nbar[i] * (180. * 60. / np.pi)**2 * (subsample or 1.)
+        if tracer.kind == 'density':
+            return 1. / n_sr
+        if not shear_cols[0].startswith('e'):
+            return 0.
+        sigma_e = next((a.sigma_e for a in self.augmentors if hasattr(a, 'sigma_e')), 0.)
+        return sigma_e**2 / n_sr
+
+    @cached_property
+    def b(self) -> nmt.NmtBin:
         """Return (and lazily create) the NaMaster binning of :meth:`compute_cls` and :meth:`predict_cls`.
 
         Returns
@@ -562,35 +669,39 @@ class CatalogSourceGenerator:
             without its pixel-window deconvolution, since catalog fields are sampled
             at exact positions.
         """
-        if self._b is None:
-            if self.cls_b is not None:
-                self._b = self.cls_b
-            else:
-                b_ref = self.lensing.shell_builder.b
-                n_bands = b_ref.get_n_bands()
-                ells = np.concatenate([b_ref.get_ell_list(i) for i in range(n_bands)])
-                weights = np.concatenate([b_ref.get_weight_list(i) for i in range(n_bands)])
-                bpws = np.concatenate([np.full(len(b_ref.get_ell_list(i)), i) for i in range(n_bands)])
-                self._b = nmt.NmtBin(ells=ells, bpws=bpws, weights=weights, f_ell=None, lmax=b_ref.lmax)
-        return self._b
+        if self.cls_b is not None:
+            return self.cls_b
+        b_ref = self.lensing.shell_builder.b
+        n_bands = b_ref.get_n_bands()
+        ells = np.concatenate([b_ref.get_ell_list(i) for i in range(n_bands)])
+        weights = np.concatenate([b_ref.get_weight_list(i) for i in range(n_bands)])
+        bpws = np.concatenate([np.full(len(b_ref.get_ell_list(i)), i) for i in range(n_bands)])
+        return nmt.NmtBin(ells=ells, bpws=bpws, weights=weights, f_ell=None, lmax=b_ref.lmax)
 
     @property
-    def lmax_mask(self):
+    def lmax_mask(self) -> int:
         """Maximum multipole of the masks of the catalog fields and of the footprint (``cls_lmax_mask``)."""
         lmax_mask = self.cls_lmax_mask if self.cls_lmax_mask is not None else self.b.lmax
         if lmax_mask < self.b.lmax:
             raise ValueError(f"cls_lmax_mask={lmax_mask} is below the fields' lmax={self.b.lmax}")
         return lmax_mask
 
-    @property
-    def footprint(self):
+    @cached_property
+    def footprint(self) -> np.ndarray:
         """Footprint mask (RING, float, at the shell builder's ``nside``), the mask of map-based fields."""
-        if self._footprint is None:
-            self._footprint = self.lensing.shell_builder.get_mask(nest=False).astype(np.float64)
-        return self._footprint
+        return self.lensing.shell_builder.get_mask(nest=False).astype(np.float64)
 
-    def _cls_fields(self, ikappas, what, shear_cols=('gamma1', 'gamma2'), randoms=False, nran_factor=5, seed=None, subsample=None,
-                    shared_randoms=True, remove_mean=True):
+    def _cls_fields(
+            self,
+            ikappas: list[int],
+            what: list[str],
+            shear_cols: tuple[str, str] = ('gamma1', 'gamma2'),
+            subsample: float | None = None,
+            remove_mean: bool = True,
+            randoms: bool = False,
+            nran_factor: int = 5,
+            shared_randoms: bool = True,
+            seed: int | None = None) -> tuple[dict[int, nmt.NmtFieldCatalogClustering], dict[int, nmt.NmtFieldCatalog]]:
         """Build the NaMaster catalog fields used by :meth:`compute_cls`.
 
         Parameters
@@ -599,7 +710,7 @@ class CatalogSourceGenerator:
             Tomographic bins.
         what : list of str
             Statistics to compute (see :meth:`compute_cls`), which set the fields needed.
-        shear_cols, randoms, nran_factor, seed, subsample, shared_randoms, remove_mean
+        shear_cols, subsample, remove_mean, randoms, nran_factor, shared_randoms, seed : optional
             See :meth:`compute_cls`.
 
         Returns
@@ -613,9 +724,12 @@ class CatalogSourceGenerator:
         """
         builder = self.lensing.shell_builder
         lmax, lmax_mask = self.b.lmax, self.lmax_mask
-        rng_seed = builder.seed if seed is None else seed
+        seed = builder.seed if seed is None else seed
+        # footprint pixels (to draw randoms) and area (to normalize the mask amplitudes)
         _, ipix_mask = builder.get_mask(nest=True, return_ipix=True)
         area = ipix_mask.size * hp.nside2pixarea(builder.nside)
+
+        # fields needed by the statistics
         need_density = 'clustering' in what or 'shear_clustering' in what
         need_shear = 'shear' in what or 'shear_clustering' in what
         col1, col2 = shear_cols
@@ -624,40 +738,43 @@ class CatalogSourceGenerator:
         f_dens, f_shear = {}, {}
         shared_radec = None
         for ikappa in self.lensing.tqdm(ikappas, desc="[compute_cls] building fields"):
-            cat = self.load_catalogs(ikappa, subsample=subsample, seed=rng_seed, columns=['ra', 'dec', *shear_cols],
-                                     remove_mean=list(shear_cols) if remove_mean else None)
+            cat = self.load_catalogs(
+                ikappa, subsample=subsample, seed=seed, columns=['ra', 'dec', *shear_cols], remove_mean=list(shear_cols) if remove_mean else None)
             positions = [cat['ra'], cat['dec']]
             weights_gal = np.ones(cat['ra'].size)
 
             if need_density:
+                # density: footprint mask, or randoms drawn over the footprint
                 if not randoms:
-                    f = nmt.NmtFieldCatalogClustering(positions, weights_gal, None, None, lmax=lmax, lmax_mask=lmax_mask, lonlat=True,
-                                                      mask=self.footprint)
+                    f = nmt.NmtFieldCatalogClustering(positions, weights_gal, None, None, lmax=lmax, lmax_mask=lmax_mask, lonlat=True, mask=self.footprint)
                     f.mask_amplitude = 1.
                 else:
+                    # one set of randoms for all bins, or one per bin
                     if shared_randoms:
                         if shared_radec is None:
-                            rng = np.random.default_rng(rng_seed)
+                            rng = np.random.default_rng(seed)
                             nran = int(nran_factor * cat['ra'].size)
-                            shared_radec = self._random_radec(ipix_mask, nran, rng)
+                            shared_radec = generate_radec_in_pix(self.nside, rng.choice(ipix_mask, size=nran), rng)
                         ra_rand, dec_rand = shared_radec
                     else:
-                        rng = np.random.default_rng(rng_seed + ikappa)
+                        rng = np.random.default_rng(seed + ikappa)
                         nran = int(nran_factor * cat['ra'].size)
-                        ra_rand, dec_rand = self._random_radec(ipix_mask, nran, rng)
-                    f = nmt.NmtFieldCatalogClustering(positions, weights_gal, [ra_rand, dec_rand], np.ones(len(ra_rand)), lmax=lmax,
-                                                      lmax_mask=lmax_mask, lonlat=True)
+                        ra_rand, dec_rand = generate_radec_in_pix(self.nside, rng.choice(ipix_mask, size=nran), rng)
+                    f = nmt.NmtFieldCatalogClustering(
+                        positions, weights_gal, [ra_rand, dec_rand], np.ones(len(ra_rand)), lmax=lmax, lmax_mask=lmax_mask, lonlat=True)
+                    # randoms per steradian of footprint
                     f.mask_amplitude = len(ra_rand) / area
                 f_dens[ikappa] = f
 
             if need_shear:
+                # shear: spin-2 field of the galaxies, whose mask amplitude is their number per steradian
                 f = nmt.NmtFieldCatalog(positions, weights_gal, [cat[col1], cat[col2]], spin=2, lmax=lmax, lmax_mask=lmax_mask, lonlat=True)
                 f.mask_amplitude = weights_gal.sum() / area
                 f_shear[ikappa] = f
 
         return f_dens, f_shear
 
-    def _wsp_fname(self, stat, pair=None, randoms=False):
+    def _wsp_fname(self, stat: str, pair: tuple[int, int] | None = None, randoms: bool = False) -> str:
         """Return the path of a workspace (see :meth:`get_wsp`).
 
         Parameters
@@ -686,7 +803,13 @@ class CatalogSourceGenerator:
             name = f'{stat}_{i}_{j}' + ('_randoms' if randoms and stat != 'shear' else '')
         return os.path.join(self._catalog_dir, f'wsp_{name}_lmax{self.b.lmax}.wsp')
 
-    def get_wsp(self, stat, pair=None, fields=None, read_unbinned_MCM=True, **field_kwargs):
+    def get_wsp(
+            self,
+            stat: str,
+            pair: tuple[int, int] | None = None,
+            fields: tuple | None = None,
+            read_unbinned_MCM: bool = True,
+            **field_kwargs: Any) -> nmt.NmtWorkspace:
         """Return (and lazily create) the workspace of one statistic and bin pair.
 
         The workspace stores the mode-coupling matrix and bandpower windows. It is
@@ -722,8 +845,11 @@ class CatalogSourceGenerator:
         -------
         pymaster.NmtWorkspace
         """
+        # shared workspace already in memory (with the unbinned coupling matrix, if needed)
         if pair is None and stat in self._wsp and (self._wsp[stat][1] or not read_unbinned_MCM):
             return self._wsp[stat][0]
+
+        # otherwise read it from disk, or compute and save it (with its bandpower windows)
         fname = self._wsp_fname(stat, pair, field_kwargs.get('randoms', False))
         wsp = nmt.NmtWorkspace()
         if os.path.exists(fname):
@@ -731,30 +857,28 @@ class CatalogSourceGenerator:
             logger.info("Found and loaded workspace at %s.", fname)
         else:
             if pair is None:
+                # shared: fields of the footprint mask, with the spins of the statistic
                 spins = {'clustering': (0, 0), 'shear': (2, 2), 'shear_clustering': (0, 2)}[stat]
-                f_spin = {spin: nmt.NmtField(self.footprint, None, spin=spin, lmax=self.b.lmax, lmax_mask=self.lmax_mask)
-                          for spin in set(spins)}
+                f_spin = {spin: nmt.NmtField(self.footprint, None, spin=spin, lmax=self.b.lmax, lmax_mask=self.lmax_mask) for spin in set(spins)}
                 fields = (f_spin[spins[0]], f_spin[spins[1]])
             elif fields is None:
+                # per pair: the catalog fields of the two bins
                 i, j = pair
                 f_dens, f_shear = self._cls_fields(sorted({i, j}), [stat], **field_kwargs)
                 f1, f2 = {'clustering': (f_dens, f_dens), 'shear': (f_shear, f_shear), 'shear_clustering': (f_dens, f_shear)}[stat]
                 fields = (f1[i], f2[j])
             wsp.compute_coupling_matrix(*fields, self.b)
             wsp.write_to(fname)
-            np.save(self._bpws_fname(fname), wsp.get_bandpower_windows())
+            np.save(fname.replace('.wsp', '_bpws.npy'), wsp.get_bandpower_windows())
             logger.info("Computed and saved workspace to file %s.", fname)
             read_unbinned_MCM = True
+
+        # keep the shared workspace in memory
         if pair is None:
             self._wsp[stat] = (wsp, read_unbinned_MCM)
         return wsp
 
-    @staticmethod
-    def _bpws_fname(wsp_fname):
-        """Return the path of the bandpower windows saved next to a workspace."""
-        return wsp_fname[:-len('.wsp')] + '_bpws.npy'
-
-    def get_bpws(self, stat, pair=None, randoms=False):
+    def get_bpws(self, stat: str, pair: tuple[int, int] | None = None, randoms: bool = False) -> np.ndarray:
         """Return the bandpower windows of a workspace (see :meth:`get_wsp`).
 
         Read from the file saved with the workspace, else from the workspace
@@ -780,7 +904,7 @@ class CatalogSourceGenerator:
             If the workspace of a bin pair has not been computed (see :meth:`compute_cls`).
         """
         fname = self._wsp_fname(stat, pair, randoms)
-        fname_bpws = self._bpws_fname(fname)
+        fname_bpws = fname.replace('.wsp', '_bpws.npy')
         if os.path.exists(fname_bpws):
             return np.load(fname_bpws)
         if pair is not None and not os.path.exists(fname):
@@ -789,21 +913,47 @@ class CatalogSourceGenerator:
         np.save(fname_bpws, bpws)
         return bpws
 
+    # tracer roles (density or shear) of the (i, j) legs of each harmonic-space SACC data type
+    _SACC_TYPE_LEGS_CLS = {
+        sacc.standard_types.galaxy_density_cl: ('density', 'density'),
+        sacc.standard_types.galaxy_shear_cl_ee: ('shear', 'shear'),
+        sacc.standard_types.galaxy_shear_cl_bb: ('shear', 'shear'),
+        sacc.standard_types.galaxy_shearDensity_cl_e: ('density', 'shear'),
+        sacc.standard_types.galaxy_shearDensity_cl_b: ('density', 'shear'),
+    }
+
+    # index of each harmonic-space SACC data type among the coupled spectra of its statistic
+    _SACC_TYPE_COMPONENT_CLS = {
+        sacc.standard_types.galaxy_density_cl: 0,
+        sacc.standard_types.galaxy_shear_cl_ee: 0,
+        sacc.standard_types.galaxy_shear_cl_bb: 3,
+        sacc.standard_types.galaxy_shearDensity_cl_e: 0,
+        sacc.standard_types.galaxy_shearDensity_cl_b: 1,
+    }
+
+    # harmonic-space SACC data types of each statistic
+    _STAT_TYPES_CLS = {
+        'clustering': (sacc.standard_types.galaxy_density_cl,),
+        'shear': (sacc.standard_types.galaxy_shear_cl_ee, sacc.standard_types.galaxy_shear_cl_bb),
+        'shear_clustering': (sacc.standard_types.galaxy_shearDensity_cl_e, sacc.standard_types.galaxy_shearDensity_cl_b),
+    }
+
     def compute_cls(
             self,
-            ikappas=None,
-            what='all',
-            auto_only=False,
-            shear_cols=('gamma1', 'gamma2'),
-            randoms=False,
-            nran_factor=5,
-            seed=None,
-            shared_wsp=False,
-            subsample=None,
-            shared_randoms=True,
-            remove_mean=True,
-            pairs=None,
-            save=True):
+            ikappas: int | Iterable[int] | None = None,
+            what: str | list[str] = 'all',
+            *,
+            auto_only: bool = False,
+            pairs: list[tuple[int, int]] | None = None,
+            shared_wsp: bool = False,
+            randoms: bool = False,
+            shear_cols: tuple[str, str] = ('gamma1', 'gamma2'),
+            subsample: float | None = None,
+            remove_mean: bool = True,
+            nran_factor: int = 5,
+            shared_randoms: bool = True,
+            seed: int | None = None,
+            save: bool = True) -> tuple[np.ndarray, dict]:
         """Measure angular power spectra directly from the generated catalog(s),
         including all cross-tomographic-bin combinations.
 
@@ -830,21 +980,10 @@ class CatalogSourceGenerator:
         auto_only : bool, optional
             If True, restrict to same-bin pairs (i, i) only, skipping cross-bin
             spectra. Default is False (compute all cross-bin combinations).
-        shear_cols : tuple of str, optional
-            Names of the two catalog columns to use as the spin-2 shear field,
-            e.g. ``('gamma1', 'gamma2')`` (lensing shear, default), ``('g1', 'g2')``
-            (reduced shear), ``('e1_obs', 'e2_obs')`` (observed ellipticity), or
-            any IA-related pair such as ``('e1_ia_ta', 'e2_ia_ta')``. Must be
-            present in the loaded catalog (see the augmentors used at generation
-            time, e.g. :class:`~pollux.ia.CatalogAugmentorShear`, :class:`~pollux.ia.IACalculator`).
-        randoms : bool, optional
-            If False (default), the mask of density fields is the :attr:`footprint`.
-            If True, it is a random catalog (see ``nran_factor`` and ``shared_randoms``).
-        nran_factor : int, optional
-            With ``randoms``, ratio of random points to galaxies for each bin's
-            clustering random catalog. Default is 5.
-        seed : int or None, optional
-            Seed for the random catalogs' RNG. Defaults to the shell builder's seed.
+        pairs : list of tuple of int or None, optional
+            If given, only compute these ``(i, j)`` bin pairs, for every
+            statistic in ``what`` (overrides ``ikappas`` and ``auto_only``).
+            Only the catalogs of the bins involved are loaded.
         shared_wsp : bool, optional
             If True, use one mode-coupling matrix per statistic (dd, shear-shear,
             density-shear) for all bin pairs, computed from the footprint, with
@@ -855,6 +994,16 @@ class CatalogSourceGenerator:
             the masks of its fields (exact, slower). Workspaces are cached on disk
             and reused by later calls and by :meth:`predict_cls`; delete them if the
             catalogs or settings change.
+        randoms : bool, optional
+            If False (default), the mask of density fields is the :attr:`footprint`.
+            If True, it is a random catalog (see ``nran_factor`` and ``shared_randoms``).
+        shear_cols : tuple of str, optional
+            Names of the two catalog columns to use as the spin-2 shear field,
+            e.g. ``('gamma1', 'gamma2')`` (lensing shear, default), ``('g1', 'g2')``
+            (reduced shear), ``('e1_obs', 'e2_obs')`` (observed ellipticity), or
+            any IA-related pair such as ``('e1_ia_ta', 'e2_ia_ta')``. Must be
+            present in the loaded catalog (see the augmentors used at generation
+            time, e.g. :class:`~pollux.ia.CatalogAugmentorShear`, :class:`~pollux.ia.IACalculator`).
         subsample : float or None, optional
             If not None, randomly draw (without replacement, seeded by
             ``seed + ikappa``) this fraction of galaxies from each loaded
@@ -863,6 +1012,12 @@ class CatalogSourceGenerator:
             are stored in a fixed (non-random) order and a stride would
             sample a specific, non-representative pattern. Default is None
             (no subsampling).
+        remove_mean : bool, optional
+            If True (default), subtract the mean of the shear columns over each bin
+            before the measurement.
+        nran_factor : int, optional
+            With ``randoms``, ratio of random points to galaxies for each bin's
+            clustering random catalog. Default is 5.
         shared_randoms : bool, optional
             With ``randoms``, if True (default), draw a single random-point realization (sized
             from the first processed bin) and reuse it for every bin's
@@ -870,13 +1025,8 @@ class CatalogSourceGenerator:
             This matches the fact that all bins share the same survey
             footprint, and is cheaper since randoms are only drawn once. If
             False, each bin gets its own randoms, seeded by ``seed + ikappa``.
-        remove_mean : bool, optional
-            If True (default), subtract the mean of the shear columns over each bin
-            before the measurement.
-        pairs : list of tuple of int or None, optional
-            If given, only compute these ``(i, j)`` bin pairs, for every
-            statistic in ``what`` (overrides ``ikappas`` and ``auto_only``).
-            Only the catalogs of the bins involved are loaded.
+        seed : int or None, optional
+            Seed for the random catalogs' RNG. Default is the shell builder's seed.
         save : bool, optional
             If True (default), save the spectra to a SACC FITS file via
             :meth:`_save_cls`, at ``{self._catalog_dir}/cls.fits``.
@@ -894,71 +1044,60 @@ class CatalogSourceGenerator:
             depending on ``what``), each mapping to a dict keyed by ``(i, j)``.
         """
         if isinstance(what, str):
-            what = ['clustering', 'shear', 'shear_clustering'] if what == 'all' else [what]
+            what = list(self._STAT_TYPES_CLS) if what == 'all' else [what]
 
-        ikappas = sorted({k for pair in pairs for k in pair}) if pairs is not None else list(self.lensing.iter(ikappas))
+        # bins, and symmetric pairs (i >= j) for same-type correlations
+        ikappas, sym_pairs = self.lensing._pairs(ikappas, auto_only, pairs)
+        # bandpowers, and the catalog fields of each bin (built once, reused by all pairs)
         b = self.b
         ell = b.get_effective_ells()
-        f_dens, f_shear = self._cls_fields(ikappas, what, shear_cols, randoms, nran_factor, seed, subsample, shared_randoms, remove_mean)
+        f_dens, f_shear = self._cls_fields(
+            ikappas,
+            what,
+            shear_cols=shear_cols,
+            subsample=subsample,
+            remove_mean=remove_mean,
+            randoms=randoms,
+            nran_factor=nran_factor,
+            shared_randoms=shared_randoms,
+            seed=seed)
 
+        # decoupled spectra, keyed by SACC data type then bin pair
         cl = {}
 
-        def decoupled(f1, f2, name, pair):
+        def decoupled(f1: nmt.NmtField, f2: nmt.NmtField, name: str, pair: tuple[int, int]) -> np.ndarray:
             # the shared workspace is that of the footprint, to which pseudo-spectra are rescaled (see get_wsp)
             pcl = nmt.compute_coupled_cell(f1, f2)
             if shared_wsp:
                 return self.get_wsp(name, read_unbinned_MCM=False).decouple_cell(pcl / (f1.mask_amplitude * f2.mask_amplitude))
             return self.get_wsp(name, pair=pair, fields=(f1, f2), read_unbinned_MCM=False, randoms=randoms).decouple_cell(pcl)
 
-        # symmetric pairs (i <= j): valid for same-type correlations (dd, shear-shear)
-        if pairs is not None:
-            sym_pairs = list(pairs)
-        elif auto_only:
-            sym_pairs = [(i, i) for i in ikappas]
-        else:
-            sym_pairs = [(i1, i2) for i, i2 in enumerate(ikappas) for i1 in ikappas[i:]]
-
         if 'clustering' in what:
-            cl_dd = cl[sacc.standard_types.galaxy_density_cl] = {}
             for i, j in self.lensing.tqdm(sym_pairs, desc="[compute_cls] clustering"):
-                cl_dd[i, j] = decoupled(f_dens[i], f_dens[j], 'clustering', (i, j)).squeeze()
+                c = decoupled(f_dens[i], f_dens[j], 'clustering', (i, j))
+                for data_type in self._STAT_TYPES_CLS['clustering']:
+                    cl.setdefault(data_type, {})[i, j] = c[self._SACC_TYPE_COMPONENT_CLS[data_type]]
 
         if 'shear' in what:
-            cl_ee = cl[sacc.standard_types.galaxy_shear_cl_ee] = {}
-            cl_bb = cl[sacc.standard_types.galaxy_shear_cl_bb] = {}
             for i, j in self.lensing.tqdm(sym_pairs, desc="[compute_cls] shear"):
-                cl_ee_bb = decoupled(f_shear[i], f_shear[j], 'shear', (i, j))
-                cl_ee[i, j] = cl_ee_bb[0]
-                cl_bb[i, j] = cl_ee_bb[3]
+                c = decoupled(f_shear[i], f_shear[j], 'shear', (i, j))
+                for data_type in self._STAT_TYPES_CLS['shear']:
+                    cl.setdefault(data_type, {})[i, j] = c[self._SACC_TYPE_COMPONENT_CLS[data_type]]
 
         if 'shear_clustering' in what:
             # not symmetric under bin exchange (lens bin i, source bin j) -> all ordered pairs
-            if pairs is not None:
-                de_pairs = list(pairs)
-            else:
-                de_pairs = [(i, i) for i in ikappas] if auto_only else [(i, j) for i in ikappas for j in ikappas]
-            cl_de = cl[sacc.standard_types.galaxy_shearDensity_cl_e] = {}
-            cl_db = cl[sacc.standard_types.galaxy_shearDensity_cl_b] = {}
+            de_pairs = sym_pairs if (pairs is not None or auto_only) else [(i, j) for i in ikappas for j in ikappas]
             for i, j in self.lensing.tqdm(de_pairs, desc="[compute_cls] shear x clustering"):
-                cl_de_db = decoupled(f_dens[i], f_shear[j], 'shear_clustering', (i, j))
-                cl_de[i, j] = cl_de_db[0]
-                cl_db[i, j] = cl_de_db[1]
+                c = decoupled(f_dens[i], f_shear[j], 'shear_clustering', (i, j))
+                for data_type in self._STAT_TYPES_CLS['shear_clustering']:
+                    cl.setdefault(data_type, {})[i, j] = c[self._SACC_TYPE_COMPONENT_CLS[data_type]]
 
         if save:
             self._save_cls(ell, cl)
 
         return ell, cl
 
-    # which tracer role (density or shear) each SACC data type's (i, j) legs refer to
-    _SACC_TYPE_LEGS = {
-        sacc.standard_types.galaxy_density_cl: ('density', 'density'),
-        sacc.standard_types.galaxy_shear_cl_ee: ('shear', 'shear'),
-        sacc.standard_types.galaxy_shear_cl_bb: ('shear', 'shear'),
-        sacc.standard_types.galaxy_shearDensity_cl_e: ('density', 'shear'),
-        sacc.standard_types.galaxy_shearDensity_cl_b: ('density', 'shear'),
-    }
-
-    def _save_cls(self, ell, cl):
+    def _save_cls(self, ell: np.ndarray, cl: dict) -> str:
         """Save catalog-based angular power spectra to a SACC FITS file.
 
         The catalog's density and shear fields share the same underlying n(z)
@@ -986,13 +1125,13 @@ class CatalogSourceGenerator:
         for t in shear_tracers + density_tracers:
             s.add_tracer_object(t)
 
-        tracers_by_role = {'density': density_tracers, 'shear': shear_tracers}
+        tracers = {'density': density_tracers, 'shear': shear_tracers}
 
         for data_type, pairs in cl.items():
-            role_i, role_j = self._SACC_TYPE_LEGS[data_type]
-            tracers_i, tracers_j = tracers_by_role[role_i], tracers_by_role[role_j]
+            role_i, role_j = self._SACC_TYPE_LEGS_CLS[data_type]
+            tracers_i, tracers_j = tracers[role_i], tracers[role_j]
             for (i, j), _cl in pairs.items():
-                for _ell, _cl_ell in zip(ell, _cl):
+                for _ell, _cl_ell in zip(ell, _cl, strict=True):
                     s.add_data_point(data_type, [tracers_i[i].name, tracers_j[j].name], _cl_ell, ell=_ell)
         fname = os.path.join(self._catalog_dir, 'cat_cls.fits')
         s.save_fits(fname, overwrite=True)
@@ -1025,7 +1164,8 @@ class CatalogSourceGenerator:
         if not return_dict:
             return s
 
-        def tracer_index(name):
+        def tracer_index(name: str) -> int:
+            # bin index of a tracer name (e.g. 'kappa_3')
             return int(name.rsplit('_', 1)[-1])
 
         ell = None
@@ -1039,26 +1179,260 @@ class CatalogSourceGenerator:
 
         return ell, cl
 
+    def predict_cls(
+            self,
+            ikappas: int | Iterable[int] | None = None,
+            what: str | list[str] = 'all',
+            *,
+            auto_only: bool = False,
+            pairs: list[tuple[int, int]] | None = None,
+            binning: str = 'wsp',
+            shared_wsp: bool = False,
+            randoms: bool = False,
+            shear_cols: tuple[str, str] = ('gamma1', 'gamma2'),
+            subsample: float | None = None,
+            error_bars: bool = False,
+            keep_cls: bool = False,
+            stacked: bool = False,
+            ell: np.ndarray | None = None) -> tuple:
+        """Predict the catalog angular power spectra.
+
+        Predictions use the lensing builder's :attr:`~pollux.map_builder.MapBuilder.theory`,
+        i.e. the matter power spectrum of the catalog's shells (CCL's nonlinear P(k)
+        for dark-matter-only shells, S19-corrected for baryonified shells). Predicted
+        spectra are noise-free, like the measured ones (NaMaster subtracts the noise
+        bias of catalog auto-spectra).
+
+        Parameters
+        ----------
+        ikappas : int or array_like of int or None, optional
+            Tomographic bins. If None, all bins.
+        what : {'shear', 'clustering', 'shear_clustering', 'all'} or list of str, optional
+            Statistics to predict (see :meth:`compute_cls`).
+        auto_only : bool, optional
+            If True, only same-bin pairs ``(i, i)``.
+        pairs : list of tuple of int or None, optional
+            If given, only these ``(i, j)`` bin pairs, for every statistic in ``what``
+            (overrides ``ikappas`` and ``auto_only``).
+        binning : {'wsp', 'average', 'unbinned'}, optional
+            ``'wsp'`` (default): bandpowers binned with the bandpower windows of the
+            workspaces of :meth:`compute_cls` (see ``shared_wsp`` and :meth:`get_bpws`). ``'average'``: bandpowers averaged over each bandpower.
+            ``'unbinned'``: spectra at ``ell``.
+        shared_wsp : bool, optional
+            With ``binning='wsp'``, as in :meth:`compute_cls`: use the workspace shared
+            by all pairs of each statistic if True, else that of each pair (default).
+        randoms : bool, optional
+            With per-pair workspaces, as in :meth:`compute_cls`.
+        shear_cols, subsample : optional
+            As in :meth:`compute_cls`, setting the noise (see :meth:`_noise_cls`).
+        error_bars : bool, optional
+            If True, also return Gaussian error bars (E-mode and density spectra),
+            with ``C_ell + N_ell`` for auto-spectra (:meth:`_noise_cls`) and the
+            lensing builder's sky fraction.
+        keep_cls : bool, optional
+            If True, cache the results on ``self.predicted_cls``.
+        stacked : bool, optional
+            If True, also return the E-mode and density spectra of all statistics
+            stacked into one vector (in the order of ``what``, then of the pairs), and
+            with ``error_bars`` their joint covariance.
+        ell : ndarray or None, optional
+            Multipoles for ``binning='unbinned'``. Default is the effective bandpower multipoles.
+
+        Returns
+        -------
+        ell : ndarray
+            Multipoles.
+        cl : dict
+            Keyed by SACC data type, then by ``(i, j)`` (same structure as :meth:`compute_cls`).
+        dcl : dict
+            Only with ``error_bars``, keyed like ``cl`` (E-mode and density types).
+        cl_stacked, cov : ndarray
+            Only with ``stacked`` (``cov`` only with ``error_bars`` too).
+
+        Notes
+        -----
+        Wraps :meth:`pollux.cosmo.Theory.predict_cls` (one call for all statistics,
+        so that the covariance includes cross-statistic blocks).
+        """
+        # cached prediction (see keep_cls)
+        if self.predicted_cls is not None:
+            return self.predicted_cls
+        if isinstance(what, str):
+            what = list(self._STAT_TYPES_CLS) if what == 'all' else [what]
+        # tracers of the legs of each statistic
+        tracers = {'density': self.density_tracers, 'shear': self.lensing_tracers}
+        # bins, and symmetric pairs (i >= j) for same-type correlations
+        ikappas, sym_pairs = self.lensing._pairs(ikappas, auto_only, pairs)
+
+        # tracer pairs of all statistics, with the bandpower windows of their workspaces
+        tracer_pairs, bpws = {}, {}
+        for stat in what:
+            role_i, role_j = self._SACC_TYPE_LEGS_CLS[self._STAT_TYPES_CLS[stat][0]]
+            # shear x clustering is not symmetric under bin exchange (lens bin i, source bin j) -> all ordered pairs
+            stat_pairs = sym_pairs
+            if stat == 'shear_clustering' and pairs is None and not auto_only:
+                stat_pairs = [(i, j) for i in ikappas for j in ikappas]
+            windows = {}  # bandpower windows by workspace (bin pair, or None if shared)
+            for i, j in stat_pairs:
+                tracer_pairs[stat, i, j] = (tracers[role_i][i], tracers[role_j][j])
+                if binning == 'wsp':
+                    pair = None if shared_wsp else (i, j)
+                    if pair not in windows:
+                        windows[pair] = self.get_bpws(stat, pair, randoms)
+                    bpws[stat, i, j] = windows[pair]
+
+        # noise of each tracer, for the error bars
+        noise = None
+        if error_bars:
+            noise = {t.name: self._noise_cls(t, shear_cols, subsample) for t1, t2 in tracer_pairs.values() for t in (t1, t2)}
+
+        # predict all statistics at once (for their joint covariance)
+        res = self.lensing.theory.predict_cls(
+            tracer_pairs,
+            b=self.b,
+            ell=ell,
+            binning=binning,
+            bpws=bpws,
+            noise=noise,
+            error_bars=error_bars,
+            stacked=stacked,
+            fsky=self.lensing.fsky,
+            all_components=True)
+
+        # split the coupled components into SACC data types, as in compute_cls
+        cl = {}
+        for (stat, i, j), c in res[1].items():
+            c = np.atleast_2d(c)  # components (a single one without bandpower windows)
+            for data_type in self._STAT_TYPES_CLS[stat]:
+                k = self._SACC_TYPE_COMPONENT_CLS[data_type]
+                cl.setdefault(data_type, {})[i, j] = c[k] if k < len(c) else np.zeros_like(c[0])
+
+        # outputs: ell, cl, error bars of the first data type of each statistic, then stacked spectra and covariance
+        out = [res[0], cl]
+        if error_bars:
+            dcl = {}
+            for (stat, i, j), d in res[2].items():
+                dcl.setdefault(self._STAT_TYPES_CLS[stat][0], {})[i, j] = d
+            out.append(dcl)
+        out += list(res[2 + error_bars:])
+        out = tuple(out)
+        if keep_cls:
+            self.predicted_cls = out
+        return out
+
+    def plot_cls(
+            self,
+            plot_dir: str | None = None,
+            *,
+            modes: tuple[str, ...] = ('values', 'ratio'),
+            ell_factor: int = 1,
+            logy: bool = False,
+            error_bars: bool = False,
+            **predict_kwargs: Any) -> None:
+        """Plot the saved angular power spectra against their prediction (:meth:`predict_cls`), one panel per bin pair.
+
+        Parameters
+        ----------
+        plot_dir : str or None, optional
+            Output directory. Default is ``{catalog_dir}/plots``.
+        modes : tuple of str, optional
+            Plots to make, see :func:`pollux.plotting.plot_pairs` (``'values'``, ``'ratio'``,
+            ``'diff_over_error'``). Default is ``('values', 'ratio')``.
+        ell_factor : {0, 1, 2}, optional
+            In ``'values'`` mode, plot ``C_ell`` (0), ``ell C_ell`` (1, default) or
+            ``ell (ell + 1) C_ell / 2 pi`` (2).
+        logy : bool, optional
+            If True, use a log y-scale in ``'values'`` mode.
+        error_bars : bool, optional
+            If True, draw Gaussian errors of the prediction as bands (always used by
+            ``'diff_over_error'``).
+        **predict_kwargs
+            Options of :meth:`predict_cls`, e.g. ``auto_only``, ``pairs``, or ``shared_wsp`` and
+            ``randoms`` as used by :meth:`compute_cls`: the predicted pairs are plotted.
+
+        Notes
+        -----
+        Saves ``cl_shear_ee``, ``cl_shear_density`` and ``cl_density``, with suffix
+        ``_{mode}`` for modes other than ``'values'``.
+        """
+        from .plotting import plot_pairs
+        plot_dir = plot_dir or os.path.join(self._catalog_dir, 'plots')
+        os.makedirs(plot_dir, exist_ok=True)
+
+        # measured spectra, and their prediction for the statistics found
+        ell, cl = self.load_cls(return_dict=True)
+        what = [stat for stat, types in self._STAT_TYPES_CLS.items() if types[0] in cl]
+        need_errors = error_bars or 'diff_over_error' in modes
+        _, cl_th, *dcl = self.predict_cls(what=what, error_bars=need_errors, **predict_kwargs)
+        dcl = dcl[0] if need_errors else {}
+
+        # one figure per E-mode/density data type and mode
+        scales = self.lensing.reference_scales()
+        st = sacc.standard_types
+        for data_type, name, color in ((st.galaxy_shear_cl_ee, 'cl_shear_ee', 'orange'), (st.galaxy_shearDensity_cl_e, 'cl_shear_density', 'red'),
+                                       (st.galaxy_density_cl, 'cl_density', 'green')):
+            if data_type not in cl:
+                continue
+            for mode in modes:
+                plot_pairs(
+                    ell,
+                    data={ij: cl[data_type][ij] for ij in cl_th[data_type] if ij in cl[data_type]},
+                    theory=cl_th[data_type],
+                    theory_errors=dcl.get(data_type) if (error_bars or mode == 'diff_over_error') else None,
+                    mode=mode,
+                    auto_only=all(i == j for i, j in cl_th[data_type]),
+                    ell_factor=ell_factor,
+                    scales=scales,
+                    color=color,
+                    logy=logy,
+                    sharey=False if mode == 'values' else 'all',
+                    fname=os.path.join(plot_dir, name + ('' if mode == 'values' else f'_{mode}') + '.png'))
+
+    # tracer roles (density or shear) of the (i, j) legs of each real-space SACC data type
+    _SACC_TYPE_LEGS_2PT = {
+        sacc.standard_types.galaxy_density_xi: ('density', 'density'),
+        sacc.standard_types.galaxy_shear_xi_plus: ('shear', 'shear'),
+        sacc.standard_types.galaxy_shear_xi_minus: ('shear', 'shear'),
+        sacc.standard_types.galaxy_shearDensity_xi_t: ('density', 'shear'),
+        sacc.standard_types.galaxy_shearDensity_xi_x: ('density', 'shear'),
+    }
+
+    # component of the predicted correlation (xi+ or xi-) of each real-space SACC data type (None if a single one; zero if absent)
+    _SACC_TYPE_COMPONENT_2PT = {
+        sacc.standard_types.galaxy_density_xi: None,
+        sacc.standard_types.galaxy_shear_xi_plus: 0,
+        sacc.standard_types.galaxy_shear_xi_minus: 1,
+        sacc.standard_types.galaxy_shearDensity_xi_t: None,
+    }
+
+    # real-space SACC data types of each statistic, in the order of the correlations of TreeCorr
+    _STAT_TYPES_2PT = {
+        'clustering': (sacc.standard_types.galaxy_density_xi,),
+        'shear': (sacc.standard_types.galaxy_shear_xi_plus, sacc.standard_types.galaxy_shear_xi_minus),
+        'shear_clustering': (sacc.standard_types.galaxy_shearDensity_xi_t, sacc.standard_types.galaxy_shearDensity_xi_x),
+    }
+
     def compute_2pt(
             self,
-            ikappas=None,
-            what='all',
-            auto_only=False,
-            shear_cols=('gamma1', 'gamma2'),
-            theta_min=1.,
-            theta_max=100.,
-            ntheta=20,
-            sep_units='arcmin',
-            bin_slop=None,
-            nran_factor=5,
-            seed=None,
-            subsample=None,
-            shared_randoms=True,
-            remove_mean=True,
-            error_bars=False,
-            theta_per_pair=False,
-            pairs=None,
-            save=True):
+            ikappas: int | Iterable[int] | None = None,
+            what: str | list[str] = 'all',
+            *,
+            auto_only: bool = False,
+            pairs: list[tuple[int, int]] | None = None,
+            theta_min: float = 1.,
+            theta_max: float = 100.,
+            ntheta: int = 20,
+            sep_units: str = 'arcmin',
+            bin_slop: float | None = None,
+            shear_cols: tuple[str, str] = ('gamma1', 'gamma2'),
+            subsample: float | None = None,
+            remove_mean: bool = True,
+            nran_factor: int = 5,
+            shared_randoms: bool = True,
+            seed: int | None = None,
+            error_bars: bool = False,
+            theta_per_pair: bool = False,
+            save: bool = True) -> tuple:
         """Measure real-space two-point correlation functions directly from the
         generated catalog(s), including all cross-tomographic-bin combinations.
 
@@ -1084,9 +1458,10 @@ class CatalogSourceGenerator:
         auto_only : bool, optional
             If True, restrict to same-bin pairs (i, i) only, skipping cross-bin
             correlations. Default is False.
-        shear_cols : tuple of str, optional
-            Names of the two catalog columns to use as the spin-2 shear field.
-            See :meth:`compute_cls`.
+        pairs : list of tuple of int or None, optional
+            If given, only compute these ``(i, j)`` bin pairs, for every
+            statistic in ``what`` (overrides ``ikappas`` and ``auto_only``).
+            Only the catalogs of the bins involved are loaded.
         theta_min, theta_max : float, optional
             Angular separation range, in ``sep_units``. Defaults are 1 and 100 arcmin.
         ntheta : int, optional
@@ -1097,12 +1472,9 @@ class CatalogSourceGenerator:
         bin_slop : float or None, optional
             TreeCorr ``bin_slop`` (binning approximation tolerance). If None,
             uses TreeCorr's own default.
-        nran_factor : int, optional
-            Ratio of random points to galaxies for each bin's random catalog,
-            used for the Landy-Szalay ``w(theta)`` estimator and for
-            subtracting additive bias in ``gamma_t/x(theta)``. Default is 5.
-        seed : int or None, optional
-            Seed for the random catalogs' RNG. Defaults to the shell builder's seed.
+        shear_cols : tuple of str, optional
+            Names of the two catalog columns to use as the spin-2 shear field.
+            See :meth:`compute_cls`.
         subsample : float or None, optional
             If not None, randomly draw (without replacement, seeded by
             ``seed + ikappa``) this fraction of galaxies from each loaded
@@ -1111,6 +1483,13 @@ class CatalogSourceGenerator:
             are stored in a fixed (non-random) order and a stride would
             sample a specific, non-representative pattern. Default is None
             (no subsampling).
+        remove_mean : bool, optional
+            If True (default), subtract the mean of the shear columns over each bin
+            before the measurement.
+        nran_factor : int, optional
+            Ratio of random points to galaxies for each bin's random catalog,
+            used for the Landy-Szalay ``w(theta)`` estimator and for
+            subtracting additive bias in ``gamma_t/x(theta)``. Default is 5.
         shared_randoms : bool, optional
             If True (default), draw a single random-point realization (sized
             from the first processed bin) and reuse it for every bin's
@@ -1120,9 +1499,8 @@ class CatalogSourceGenerator:
             all bins share the same survey footprint, and is cheaper since
             randoms (and their TreeCorr catalog/tree) are only built once.
             If False, each bin gets its own randoms, seeded by ``seed + ikappa``.
-        remove_mean : bool, optional
-            If True (default), subtract the mean of the shear columns over each bin
-            before the measurement.
+        seed : int or None, optional
+            Seed for the random catalogs' RNG. Default is the shell builder's seed.
         error_bars : bool, optional
             If True, also return ``dxi``: standard deviations (shot-noise
             error bars from TreeCorr), with the same structure as ``xi``.
@@ -1135,10 +1513,6 @@ class CatalogSourceGenerator:
             slightly from one pair to another; this is always what gets
             written to the SACC file regardless of this flag. Default is
             False (return a single array, taken from the first pair computed).
-        pairs : list of tuple of int or None, optional
-            If given, only compute these ``(i, j)`` bin pairs, for every
-            statistic in ``what`` (overrides ``ikappas`` and ``auto_only``).
-            Only the catalogs of the bins involved are loaded.
         save : bool, optional
             If True (default), save the correlation functions to a SACC FITS
             file via :meth:`_save_2pt`, at ``{self._catalog_dir}/cat_2pt.fits``.
@@ -1153,22 +1527,22 @@ class CatalogSourceGenerator:
             ``'galaxy_shear_xi_plus'``, ``'galaxy_shear_xi_minus'``,
             ``'galaxy_shearDensity_xi_t'``, ``'galaxy_shearDensity_xi_x'``,
             depending on ``what``), each mapping to a dict keyed by ``(i, j)``.
-
-        Other Parameters
-        ----------------
-        error_bars : bool
-            If True, also returns ``dxi`` (dict keyed like ``xi``).
+        dxi : dict
+            Only with ``error_bars``: shot-noise error bars, keyed like ``xi``.
         """
         if isinstance(what, str):
-            what = ['clustering', 'shear', 'shear_clustering'] if what == 'all' else [what]
+            what = list(self._STAT_TYPES_2PT) if what == 'all' else [what]
 
         builder = self.lensing.shell_builder
-        rng_seed = builder.seed if seed is None else seed
+        seed = builder.seed if seed is None else seed
 
+        # footprint pixels, to draw randoms
         _, ipix_mask = builder.get_mask(nest=True, return_ipix=True)
 
-        ikappas = sorted({k for pair in pairs for k in pair}) if pairs is not None else list(self.lensing.iter(ikappas))
+        # bins, and symmetric pairs (i >= j) for same-type correlations
+        ikappas, sym_pairs = self.lensing._pairs(ikappas, auto_only, pairs)
 
+        # catalogs needed by the statistics, and the angular binning
         need_density = 'clustering' in what or 'shear_clustering' in what
         need_shear = 'shear' in what or 'shear_clustering' in what
         col1, col2 = shear_cols
@@ -1182,49 +1556,43 @@ class CatalogSourceGenerator:
         cat_gal, cat_rand = {}, {}
         shared_cat_rand = None
         for ikappa in self.lensing.tqdm(ikappas, desc="[compute_2pt] building catalogs"):
-            cat = self.load_catalogs(ikappa, subsample=subsample, seed=rng_seed, columns=['ra', 'dec', *shear_cols],
-                                     remove_mean=list(shear_cols) if remove_mean else None)
+            cat = self.load_catalogs(
+                ikappa, subsample=subsample, seed=seed, columns=['ra', 'dec', *shear_cols], remove_mean=list(shear_cols) if remove_mean else None)
 
+            # galaxies, with their shear if needed (TreeCorr's g2 convention is flipped)
             gal_kwargs = dict(ra=cat['ra'], dec=cat['dec'], ra_units='deg', dec_units='deg')
             if need_shear:
                 gal_kwargs.update(g1=cat[col1], g2=cat[col2], flip_g2=True)
             cat_gal[ikappa] = treecorr.Catalog(**gal_kwargs)
 
             if need_density:
+                # randoms over the footprint (for w(theta) and the random-lens subtraction of gamma_t): one set for all bins, or one per bin
                 if shared_randoms:
                     if shared_cat_rand is None:
-                        rng = np.random.default_rng(rng_seed)
+                        rng = np.random.default_rng(seed)
                         nran = int(nran_factor * cat['ra'].size)
-                        ra_rand, dec_rand = self._random_radec(ipix_mask, nran, rng)
+                        ra_rand, dec_rand = generate_radec_in_pix(self.nside, rng.choice(ipix_mask, size=nran), rng)
                         shared_cat_rand = treecorr.Catalog(ra=ra_rand, dec=dec_rand, ra_units='deg', dec_units='deg')
                     cat_rand[ikappa] = shared_cat_rand
                 else:
-                    rng = np.random.default_rng(rng_seed + ikappa)
+                    rng = np.random.default_rng(seed + ikappa)
                     nran = int(nran_factor * cat['ra'].size)
-                    ra_rand, dec_rand = self._random_radec(ipix_mask, nran, rng)
+                    ra_rand, dec_rand = generate_radec_in_pix(self.nside, rng.choice(ipix_mask, size=nran), rng)
                     cat_rand[ikappa] = treecorr.Catalog(ra=ra_rand, dec=dec_rand, ra_units='deg', dec_units='deg')
 
+        # correlations, errors and mean separations, keyed by SACC data type then bin pair
         xi = {}
         dxi = {}
         theta_pairs = {}
         theta = None
 
-        # symmetric pairs (i <= j): valid for same-type correlations (NN, GG)
-        if pairs is not None:
-            sym_pairs = list(pairs)
-        elif auto_only:
-            sym_pairs = [(i, i) for i in ikappas]
-        else:
-            sym_pairs = [(i1, i2) for i, i2 in enumerate(ikappas) for i1 in ikappas[i:]]
-
         if 'clustering' in what:
-            xi_nn = xi[sacc.standard_types.galaxy_density_xi] = {}
-            dxi_nn = dxi[sacc.standard_types.galaxy_density_xi] = {}
-            theta_nn = theta_pairs[sacc.standard_types.galaxy_density_xi] = {}
+            (xi_nn, dxi_nn, theta_nn), = ([d.setdefault(t, {}) for d in (xi, dxi, theta_pairs)] for t in self._STAT_TYPES_2PT['clustering'])
             for i, j in self.lensing.tqdm(sym_pairs, desc="[compute_2pt] clustering"):
                 dd = treecorr.NNCorrelation(**corr_kwargs)
                 rr = treecorr.NNCorrelation(**corr_kwargs)
                 dr = treecorr.NNCorrelation(**corr_kwargs)
+                # Landy-Szalay estimator
                 if i == j:
                     dd.process(cat_gal[i])
                     rr.process(cat_rand[i])
@@ -1243,12 +1611,7 @@ class CatalogSourceGenerator:
                     theta = theta_nn[i, j]
 
         if 'shear' in what:
-            xi_p = xi[sacc.standard_types.galaxy_shear_xi_plus] = {}
-            xi_m = xi[sacc.standard_types.galaxy_shear_xi_minus] = {}
-            dxi_p = dxi[sacc.standard_types.galaxy_shear_xi_plus] = {}
-            dxi_m = dxi[sacc.standard_types.galaxy_shear_xi_minus] = {}
-            theta_p = theta_pairs[sacc.standard_types.galaxy_shear_xi_plus] = {}
-            theta_m = theta_pairs[sacc.standard_types.galaxy_shear_xi_minus] = {}
+            (xi_p, dxi_p, theta_p), (xi_m, dxi_m, theta_m) = ([d.setdefault(t, {}) for d in (xi, dxi, theta_pairs)] for t in self._STAT_TYPES_2PT['shear'])
             for i, j in self.lensing.tqdm(sym_pairs, desc="[compute_2pt] shear"):
                 gg = treecorr.GGCorrelation(**corr_kwargs)
                 if i == j:
@@ -1265,19 +1628,13 @@ class CatalogSourceGenerator:
 
         if 'shear_clustering' in what:
             # not symmetric under bin exchange (lens bin i, source bin j) -> all ordered pairs
-            if pairs is not None:
-                de_pairs = list(pairs)
-            else:
-                de_pairs = [(i, i) for i in ikappas] if auto_only else [(i, j) for i in ikappas for j in ikappas]
-            xi_t = xi[sacc.standard_types.galaxy_shearDensity_xi_t] = {}
-            xi_x = xi[sacc.standard_types.galaxy_shearDensity_xi_x] = {}
-            dxi_t = dxi[sacc.standard_types.galaxy_shearDensity_xi_t] = {}
-            dxi_x = dxi[sacc.standard_types.galaxy_shearDensity_xi_x] = {}
-            theta_t = theta_pairs[sacc.standard_types.galaxy_shearDensity_xi_t] = {}
-            theta_x = theta_pairs[sacc.standard_types.galaxy_shearDensity_xi_x] = {}
+            de_pairs = sym_pairs if (pairs is not None or auto_only) else [(i, j) for i in ikappas for j in ikappas]
+            (xi_t, dxi_t, theta_t), (xi_x, dxi_x,
+                                     theta_x) = ([d.setdefault(t, {}) for d in (xi, dxi, theta_pairs)] for t in self._STAT_TYPES_2PT['shear_clustering'])
             for i, j in self.lensing.tqdm(de_pairs, desc="[compute_2pt] shear x clustering"):
                 ng = treecorr.NGCorrelation(**corr_kwargs)
                 rg = treecorr.NGCorrelation(**corr_kwargs)
+                # lens bin i, source bin j, with the signal around randoms subtracted
                 ng.process(cat_gal[i], cat_gal[j])
                 rg.process(cat_rand[i], cat_gal[j])
                 xi_t[i, j], xi_x[i, j], var_ng = ng.calculateXi(rg=rg)
@@ -1296,16 +1653,7 @@ class CatalogSourceGenerator:
         else:
             return theta_out, xi
 
-    # which tracer role (density or shear) each SACC data type's (i, j) legs refer to
-    _SACC_TYPE_LEGS_XI = {
-        sacc.standard_types.galaxy_density_xi: ('density', 'density'),
-        sacc.standard_types.galaxy_shear_xi_plus: ('shear', 'shear'),
-        sacc.standard_types.galaxy_shear_xi_minus: ('shear', 'shear'),
-        sacc.standard_types.galaxy_shearDensity_xi_t: ('density', 'shear'),
-        sacc.standard_types.galaxy_shearDensity_xi_x: ('density', 'shear'),
-    }
-
-    def _save_2pt(self, theta, xi, dxi=None):
+    def _save_2pt(self, theta: dict, xi: dict, dxi: dict | None = None) -> str:
         """Save catalog-based real-space two-point functions to a SACC FITS file.
 
         Mirrors :meth:`_save_cls`: the catalog's density and shear fields
@@ -1338,14 +1686,14 @@ class CatalogSourceGenerator:
         for t in shear_tracers + density_tracers:
             s.add_tracer_object(t)
 
-        tracers_by_role = {'density': density_tracers, 'shear': shear_tracers}
+        tracers = {'density': density_tracers, 'shear': shear_tracers}
 
         for data_type, pairs in xi.items():
-            role_i, role_j = self._SACC_TYPE_LEGS_XI[data_type]
-            tracers_i, tracers_j = tracers_by_role[role_i], tracers_by_role[role_j]
+            role_i, role_j = self._SACC_TYPE_LEGS_2PT[data_type]
+            tracers_i, tracers_j = tracers[role_i], tracers[role_j]
             for (i, j), _xi in pairs.items():
                 _theta = theta[data_type][i, j]
-                for _theta_k, _xi_k in zip(_theta, _xi):
+                for _theta_k, _xi_k in zip(_theta, _xi, strict=True):
                     s.add_data_point(data_type, [tracers_i[i].name, tracers_j[j].name], _xi_k, theta=_theta_k)
         if dxi is not None:
             # same order as the data points added above
@@ -1385,7 +1733,8 @@ class CatalogSourceGenerator:
         if not return_dict:
             return s
 
-        def tracer_index(name):
+        def tracer_index(name: str) -> int:
+            # bin index of a tracer name (e.g. 'kappa_3')
             return int(name.rsplit('_', 1)[-1])
 
         theta = {}
@@ -1407,196 +1756,7 @@ class CatalogSourceGenerator:
             return theta, xi, dxi
         return theta, xi
 
-
-    @property
-    def lensing_tracers(self):
-        """Lensing tracers of the catalog, those of the lensing builder (:attr:`MapBuilder.tracers`).
-
-        Returns
-        -------
-        list of pollux.cosmo.Tracer
-            Shear tracers (one per bin) with the n(z) of the catalog's galaxies.
-        """
-        return self.lensing.tracers
-
-    @property
-    def density_tracers(self):
-        """Density tracers of the catalog: each bin's n(z) and linear bias.
-
-        Returns
-        -------
-        list of pollux.cosmo.Tracer
-            ``'density'`` tracers named ``density_{i}``, with the n(z) of the lensing
-            tracers (the galaxies are both lenses and sources).
-        """
-        bias = getattr(self, 'bias', np.ones(self.ncats))
-        return [Tracer(f"density_{i}", 'density', z=t.z, nz=t.nz, bias=bias[i]) for i, t in enumerate(self.lensing_tracers)]
-
-    def _tracers(self):
-        """Return the tracers of the density and shear legs of the statistics."""
-        return {'density': self.density_tracers, 'shear': self.lensing_tracers}
-
-    @staticmethod
-    def _stat_pairs(stat, ikappas):
-        """Return the bin pairs of one statistic: ``i >= j`` for auto-type statistics, all ordered pairs otherwise."""
-        if stat == 'shear_clustering':
-            return [(i, j) for i in ikappas for j in ikappas]
-        return [(i1, i2) for k, i2 in enumerate(ikappas) for i1 in ikappas[k:]]
-
-    def _noise_cls(self, tracer, shear_cols=('gamma1', 'gamma2'), subsample=None):
-        """Return the white noise level of one catalog tracer.
-
-        Parameters
-        ----------
-        tracer : pollux.cosmo.Tracer
-            Density (``density_{i}``) or shear (``kappa_{i}``) tracer of bin ``i``.
-        shear_cols : tuple of str, optional
-            Shear columns used for the measurement (see :meth:`compute_cls`): shape
-            noise only for ellipticities (``e1_*``), none for the lensing shear.
-        subsample : float or None, optional
-            Fraction of galaxies used for the measurement.
-
-        Returns
-        -------
-        float
-            Shot noise ``1 / n`` (density) or shape noise ``sigma_e**2 / n`` (shear),
-            with ``n`` the bin's galaxy density per steradian.
-        """
-        i = int(tracer.name.rsplit('_', 1)[-1])
-        n_sr = self.nbar[i] * (180. * 60. / np.pi)**2 * (subsample or 1.)
-        if tracer.kind == 'density':
-            return 1. / n_sr
-        if not shear_cols[0].startswith('e'):
-            return 0.
-        sigma_e = next((a.sigma_e for a in self.augmentors if hasattr(a, 'sigma_e')), 0.)
-        return sigma_e**2 / n_sr
-
-    def predict_cls(self, ikappas=None, what='all', auto_only=False, pairs=None, binning='wsp', shared_wsp=False, randoms=False, ell=None,
-                    shear_cols=('gamma1', 'gamma2'), subsample=None, error_bars=False, keep_cls=False, stacked=False):
-        """Predict the catalog angular power spectra.
-
-        Predictions use the lensing builder's :attr:`~pollux.map_builder.MapBuilder.theory`,
-        i.e. the matter power spectrum of the catalog's shells (CCL's nonlinear P(k)
-        for dark-matter-only shells, S19-corrected for baryonified shells). Predicted
-        spectra are noise-free, like the measured ones (NaMaster subtracts the noise
-        bias of catalog auto-spectra).
-
-        Parameters
-        ----------
-        ikappas : int or array_like of int or None, optional
-            Tomographic bins. If None, all bins.
-        what : {'shear', 'clustering', 'shear_clustering', 'all'} or list of str, optional
-            Statistics to predict (see :meth:`compute_cls`).
-        auto_only : bool, optional
-            If True, only same-bin pairs ``(i, i)``.
-        pairs : list of tuple of int or None, optional
-            If given, only these ``(i, j)`` bin pairs, for every statistic in ``what``
-            (overrides ``ikappas`` and ``auto_only``).
-        binning : {'wsp', 'average', 'unbinned'}, optional
-            ``'wsp'`` (default): bandpowers binned with the bandpower windows of the
-            workspaces of :meth:`compute_cls` (see ``shared_wsp`` and :meth:`get_bpws`). ``'average'``: bandpowers averaged over each bandpower.
-            ``'unbinned'``: spectra at ``ell``.
-        shared_wsp : bool, optional
-            With ``binning='wsp'``, as in :meth:`compute_cls`: use the workspace shared
-            by all pairs of each statistic if True, else that of each pair (default).
-        randoms : bool, optional
-            With per-pair workspaces, as in :meth:`compute_cls`.
-        ell : ndarray or None, optional
-            Multipoles for ``binning='unbinned'``. Default is the effective bandpower multipoles.
-        shear_cols, subsample
-            As in :meth:`compute_cls`, setting the noise (see :meth:`_noise_cls`).
-        error_bars : bool, optional
-            If True, also return Gaussian error bars (E-mode and density spectra),
-            with ``C_ell + N_ell`` for auto-spectra (:meth:`_noise_cls`) and the
-            lensing builder's sky fraction.
-        keep_cls : bool, optional
-            If True, cache the results on ``self.predicted_cls``.
-        stacked : bool, optional
-            If True, also return the E-mode and density spectra of all statistics
-            stacked into one vector (in the order of ``what``, then of the pairs), and
-            with ``error_bars`` their joint covariance.
-
-        Returns
-        -------
-        ell : ndarray
-            Multipoles.
-        cl : dict
-            Keyed by SACC data type, then by ``(i, j)`` (same structure as :meth:`compute_cls`).
-        dcl : dict
-            Only with ``error_bars``, keyed like ``cl`` (E-mode and density types).
-        cl_stacked, cov : ndarray
-            Only with ``stacked`` (``cov`` only with ``error_bars`` too).
-
-        Notes
-        -----
-        Wraps :meth:`pollux.cosmo.Theory.predict_cls` (one call for all statistics,
-        so that the covariance includes cross-statistic blocks).
-        """
-        if self.predicted_cls is not None:
-            return self.predicted_cls
-        if isinstance(what, str):
-            what = ['clustering', 'shear', 'shear_clustering'] if what == 'all' else [what]
-        tracers = self._tracers()
-        st = sacc.standard_types
-        # data types of each statistic, with (tracer roles, index of the coupled spectrum in the bandpower windows)
-        types = {
-            'clustering': (('density', 'density'), [(st.galaxy_density_cl, 0)]),
-            'shear': (('shear', 'shear'), [(st.galaxy_shear_cl_ee, 0), (st.galaxy_shear_cl_bb, 3)]),
-            'shear_clustering': (('density', 'shear'), [(st.galaxy_shearDensity_cl_e, 0), (st.galaxy_shearDensity_cl_b, 1)]),
-        }
-        ikappas = list(self.lensing.iter(ikappas))
-
-        tracer_pairs, bpws = {}, {}
-        for stat in what:
-            (role_i, role_j), _ = types[stat]
-            if pairs is not None:
-                stat_pairs = [tuple(pair) for pair in pairs]
-            elif auto_only:
-                stat_pairs = [(i, i) for i in ikappas]
-            else:
-                stat_pairs = self._stat_pairs(stat, ikappas)
-            windows = {}  # bandpower windows by workspace (bin pair, or None if shared)
-            for i, j in stat_pairs:
-                tracer_pairs[stat, i, j] = (tracers[role_i][i], tracers[role_j][j])
-                if binning == 'wsp':
-                    pair = None if shared_wsp else (i, j)
-                    if pair not in windows:
-                        windows[pair] = self.get_bpws(stat, pair, randoms)
-                    bpws[stat, i, j] = windows[pair]
-
-        noise = None
-        if error_bars:
-            noise = {t.name: self._noise_cls(t, shear_cols, subsample) for t1, t2 in tracer_pairs.values() for t in (t1, t2)}
-        res = self.lensing.theory.predict_cls(
-            tracer_pairs, b=self.b, ell=ell, binning=binning, bpws=bpws, noise=noise, error_bars=error_bars,
-            stacked=stacked, fsky=self.lensing.fsky, all_components=True)
-
-        cl = {}
-        for (stat, i, j), c in res[1].items():
-            c = np.atleast_2d(c)  # components (a single one without bandpower windows)
-            for data_type, k in types[stat][1]:
-                cl.setdefault(data_type, {})[i, j] = c[k] if k < len(c) else np.zeros_like(c[0])
-        out = [res[0], cl]
-        if error_bars:
-            dcl = {}
-            for (stat, i, j), d in res[2].items():
-                dcl.setdefault(types[stat][1][0][0], {})[i, j] = d
-            out.append(dcl)
-        out += list(res[2 + error_bars:])
-        out = tuple(out)
-        if keep_cls:
-            self.predicted_cls = out
-        return out
-
-    # tracer roles of each real-space SACC data type, and component of the correlation (xi+ or xi-)
-    _XI_THEORY = {
-        sacc.standard_types.galaxy_shear_xi_plus: ('shear', 'shear', 0),
-        sacc.standard_types.galaxy_shear_xi_minus: ('shear', 'shear', 1),
-        sacc.standard_types.galaxy_shearDensity_xi_t: ('density', 'shear', None),
-        sacc.standard_types.galaxy_density_xi: ('density', 'density', None),
-    }
-
-    def predict_2pt(self, theta, nell=500):
+    def predict_2pt(self, theta: dict, nell: int = 500) -> dict:
         """Predict the catalog two-point correlation functions.
 
         Predictions use the matter power spectrum of the catalog's shells (see :meth:`predict_cls`).
@@ -1614,69 +1774,20 @@ class CatalogSourceGenerator:
         dict
             Same structure as ``theta``; ``galaxy_shearDensity_xi_x`` is zero.
         """
-        theory = self.lensing.theory
-        tracers = self._tracers()
+        tracers = {'density': self.density_tracers, 'shear': self.lensing_tracers}
         xi = {}
         for data_type, type_pairs in theta.items():
-            xi[data_type] = {}
-            for (i, j), tt in type_pairs.items():
-                if data_type not in self._XI_THEORY:
-                    xi[data_type][i, j] = np.zeros(len(tt))
-                    continue
-                role_i, role_j, component = self._XI_THEORY[data_type]
-                res = theory.correlation(tracers[role_i][i], tracers[role_j][j], tt, self.b.lmax, nell=nell)
-                xi[data_type][i, j] = res if component is None else res[component]
+            if data_type not in self._SACC_TYPE_COMPONENT_2PT:
+                xi[data_type] = {ij: np.zeros(len(tt)) for ij, tt in type_pairs.items()}
+                continue
+            role_i, role_j = self._SACC_TYPE_LEGS_2PT[data_type]
+            component = self._SACC_TYPE_COMPONENT_2PT[data_type]
+            res = self.lensing.theory.predict_2pt({(i, j): (tracers[role_i][i], tracers[role_j][j]) for i, j in type_pairs}, type_pairs, self.b.lmax, nell=nell)
+            xi[data_type] = {ij: r if component is None else r[component] for ij, r in res.items()}
         return xi
 
-    def plot_2pt(self, reference=None, plot_dir=None):
-        """Plot the saved two-point functions against their prediction.
-
-        Parameters
-        ----------
-        reference : CatalogSourceGenerator or None, optional
-            Catalog with saved two-point functions (e.g. dark-matter-only, for a
-            baryonified catalog): the ratio of the two catalogs' functions is also
-            plotted against the ratio of their predictions.
-        plot_dir : str or None, optional
-            Output directory. Default is ``{catalog_dir}/plots``.
-
-        Notes
-        -----
-        Saves ``xi_shear``, ``xi_shear_density`` and ``xi_density``, and
-        ``*_ratio_to_reference`` with ``reference``.
-        """
-        from .plotting import plot_pairs
-        plot_dir = plot_dir or os.path.join(self._catalog_dir, 'plots')
-        os.makedirs(plot_dir, exist_ok=True)
-        theta, xi, dxi = self.load_2pt(return_dict=True, return_errors=True)
-        xi_th = self.predict_2pt(theta)
-        if reference is not None:
-            _, xi_ref = reference.load_2pt(return_dict=True)
-            xi_th_ref = reference.predict_2pt(theta)
-        scales = self.lensing.reference_scales()
-        st = sacc.standard_types
-        for data_types, name, ylabel, ratio_label in (
-                ({st.galaxy_shear_xi_plus: 'dodgerblue', st.galaxy_shear_xi_minus: 'orange'}, 'xi_shear',
-                 r'$\theta \xi_\pm(\theta)$', r'$\xi_\pm / \xi_\pm^{\rm ref} - 1$'),
-                ({st.galaxy_shearDensity_xi_t: 'red'}, 'xi_shear_density',
-                 r'$\theta \gamma_{\rm t}(\theta)$', r'$\gamma_{\rm t} / \gamma_{\rm t}^{\rm ref} - 1$'),
-                ({st.galaxy_density_xi: 'green'}, 'xi_density', r'$\theta w(\theta)$', r'$w / w^{\rm ref} - 1$')):
-            data_types = {t: c for t, c in data_types.items() if t in xi}
-            modes = [('values', ylabel, '')] + ([('ratio_to_reference', ratio_label, '_ratio_to_reference')] if reference is not None else [])
-            for mode, label, suffix in modes:
-                figaxes = None
-                for k, (data_type, color) in enumerate(data_types.items()):
-                    last = k == len(data_types) - 1
-                    figaxes = plot_pairs(
-                        theta[data_type], data=xi[data_type], theory=xi_th[data_type], data_errors=dxi.get(data_type) if dxi else None,
-                        data_ref=xi_ref[data_type] if reference is not None else None,
-                        theory_ref=xi_th_ref[data_type] if reference is not None else None, mode=mode, nbins=self.ncats, y_factor=1,
-                        scales=scales if mode == 'values' else None, color=color, ylim=(-.5, .2) if mode != 'values' else None,
-                        xlabel=r'$\theta$ (arcmin)', ylabel=label, figaxes=figaxes,
-                        fname=os.path.join(plot_dir, f'{name}{suffix}.png') if last else None)
-
-    def plot_cls(self, plot_dir=None, modes=('values', 'ratio'), ell_factor=1, error_bars=False, **predict_kwargs):
-        """Plot the saved angular power spectra against their prediction (:meth:`predict_cls`).
+    def plot_2pt(self, plot_dir: str | None = None, *, modes: tuple[str, ...] = ('values', 'ratio'), reference: CatalogSourceGenerator | None = None) -> None:
+        """Plot the saved two-point functions against their prediction (:meth:`predict_2pt`), one panel per bin pair.
 
         Parameters
         ----------
@@ -1684,44 +1795,60 @@ class CatalogSourceGenerator:
             Output directory. Default is ``{catalog_dir}/plots``.
         modes : tuple of str, optional
             Plots to make, see :func:`pollux.plotting.plot_pairs` (``'values'``, ``'ratio'``,
-            ``'diff_over_error'``). Default is ``('values', 'ratio')``.
-        ell_factor : {0, 1, 2}, optional
-            In ``'values'`` mode, plot ``C_ell`` (0), ``ell C_ell`` (1, default) or
-            ``ell (ell + 1) C_ell / 2 pi`` (2).
-        error_bars : bool, optional
-            If True, draw Gaussian errors of the prediction as bands (always used by
-            ``'diff_over_error'``).
-        **predict_kwargs
-            Options of :meth:`predict_cls`, e.g. ``shared_wsp`` and ``randoms`` as used by :meth:`compute_cls`.
+            ``'diff_over_error'``, with the measurement errors). Default is ``('values', 'ratio')``.
+            Values are multiplied by ``theta``.
+        reference : CatalogSourceGenerator or None, optional
+            Catalog with saved two-point functions (e.g. dark-matter-only, for a
+            baryonified catalog): adds the ``'ratio_to_reference'`` mode, the ratio of the
+            two catalogs' functions against the ratio of their predictions.
 
         Notes
         -----
-        Saves ``cl_shear_ee``, ``cl_shear_density`` and ``cl_density``, with suffix
-        ``_{mode}`` for modes other than ``'values'``.
+        Saves ``xi_shear``, ``xi_shear_density`` and ``xi_density``, with suffix ``_{mode}``
+        for modes other than ``'values'``.
         """
         from .plotting import plot_pairs
         plot_dir = plot_dir or os.path.join(self._catalog_dir, 'plots')
         os.makedirs(plot_dir, exist_ok=True)
-        ell, cl = self.load_cls(return_dict=True)
-        st = sacc.standard_types
-        stat_of_type = {st.galaxy_density_cl: 'clustering', st.galaxy_shear_cl_ee: 'shear', st.galaxy_shearDensity_cl_e: 'shear_clustering'}
-        what = sorted({stat_of_type[t] for t in cl if t in stat_of_type})
-        need_errors = error_bars or 'diff_over_error' in modes
-        _, cl_th, *dcl = self.predict_cls(what=what, error_bars=need_errors, **predict_kwargs)
-        dcl = dcl[0] if need_errors else {}
+
+        # measurements and predictions (and those of the reference catalog)
+        theta, xi, dxi = self.load_2pt(return_dict=True, return_errors=True)
+        xi_th = self.predict_2pt(theta)
+        xi_ref, xi_th_ref = {}, {}
+        if reference is not None:
+            _, xi_ref = reference.load_2pt(return_dict=True)
+            xi_th_ref = reference.predict_2pt(theta)
+            modes = (*modes, 'ratio_to_reference')
+
+        # one figure per group of data types and mode, the data types of a group overplotted
         scales = self.lensing.reference_scales()
-        ylabel = {0: r'$C_\ell$', 1: r'$\ell C_\ell$', 2: r'$\ell(\ell+1)C_\ell/2\pi$'}[ell_factor]
-        for data_type, name, color in ((st.galaxy_shear_cl_ee, 'cl_shear_ee', 'orange'),
-                                       (st.galaxy_shearDensity_cl_e, 'cl_shear_density', 'red'),
-                                       (st.galaxy_density_cl, 'cl_density', 'green')):
-            if data_type not in cl:
-                continue
+        st = sacc.standard_types
+        for data_types, name, ylabel in (({st.galaxy_shear_xi_plus: 'dodgerblue', st.galaxy_shear_xi_minus: 'orange'}, 'xi_shear', r'$\theta \xi_\pm(\theta)$'),
+                                         ({st.galaxy_shearDensity_xi_t: 'red'}, 'xi_shear_density',
+                                          r'$\theta \gamma_{\rm t}(\theta)$'), ({st.galaxy_density_xi: 'green'}, 'xi_density', r'$\theta w(\theta)$')):
+            data_types = {t: c for t, c in data_types.items() if t in xi}
             for mode in modes:
-                plot_pairs(ell, data=cl[data_type], theory=cl_th[data_type],
-                           theory_errors=dcl.get(data_type) if (error_bars or mode == 'diff_over_error') else None, mode=mode,
-                           nbins=self.ncats, y_factor=ell_factor, scales=scales, color=color, ylim=(-1, 1) if mode == 'ratio' else None,
-                           ylabel=ylabel if mode == 'values' else None,
-                           fname=os.path.join(plot_dir, name + ('' if mode == 'values' else f'_{mode}') + '.png'))
+                # the last data type of the group saves the figure
+                figaxes = None
+                for k, (data_type, color) in enumerate(data_types.items()):
+                    last = k == len(data_types) - 1
+                    figaxes = plot_pairs(
+                        theta[data_type],
+                        data=xi[data_type],
+                        theory=xi_th[data_type],
+                        data_errors=dxi.get(data_type) if dxi else None,
+                        data_ref=xi_ref.get(data_type),
+                        theory_ref=xi_th_ref.get(data_type),
+                        mode=mode,
+                        auto_only=all(i == j for i, j in xi[data_type]),
+                        ell_factor=1,
+                        scales=scales,
+                        color=color,
+                        xlabel=r'$\theta$ (arcmin)',
+                        ylabel=ylabel if mode == 'values' else None,
+                        sharey=False if mode == 'values' else 'all',
+                        figaxes=figaxes,
+                        fname=os.path.join(plot_dir, name + ('' if mode == 'values' else f'_{mode}') + '.png') if last else None)
 
 
 class CatalogSourceUniform(CatalogSourceGenerator):
@@ -1737,28 +1864,25 @@ class CatalogSourceUniform(CatalogSourceGenerator):
         Lensing map builder.
     tag : str or None, optional
         Tag used to name the output directory ``catalogs_{tag}/``. Default is None.
-    nbar : float, array-like, or None, optional
+    nbar_input : float, array-like, or None, optional
         Galaxy surface density. Default is None.
-    smooth_Mpc : float or None, optional
-        Physical Gaussian smoothing scale in Mpc. Default is None.
-    interp_list : list of str, optional
-        Fields to interpolate. Default is ``['kappa', 'gamma1', 'gamma2']``.
-    interp_pixels : bool, optional
-        Use pixel interpolation. Default is True.
+    interp_fields, interp_method, smooth_fields, smooth_Mpc
+        Interpolation and smoothing of the fields, see :class:`CatalogSourceGenerator`.
     augmentors : list, optional
         List of augmentors. Default is empty list.
     """
 
-    def _generate_galaxies(self, catalog, ikappas=None, ishells=None):
+    def _generate_galaxies(
+            self, catalog: dict[int, dict[str, np.ndarray]], ikappas: int | Iterable[int] | None = None, ishells: list[int] | None = None) -> None:
         """Generate redshifts and positions for all selected tomographic bins.
 
         Parameters
         ----------
-        catalog : list of dict
+        catalog : dict
             Per-bin dictionaries updated in-place.
         ikappas : int or array_like of int or None, optional
             Tomographic-bin indices to generate.
-        ishells : None
+        ishells : None, optional
             Per-shell generation is not supported.
         """
         if ishells is not None:
@@ -1769,15 +1893,15 @@ class CatalogSourceUniform(CatalogSourceGenerator):
             self._generate_z(catalog, ikappa)
             self._generate_pos(catalog, ikappa)
 
-            for k in self.interp_list:
+            for k in self.interp_fields:
                 catalog[ikappa][k] = np.zeros_like(catalog[ikappa]['z'])
 
-    def _generate_pos(self, catalog, ikappa):
+    def _generate_pos(self, catalog: dict[int, dict[str, np.ndarray]], ikappa: int) -> None:
         """Draw uniform (RA, DEC) positions over the footprint.
 
         Parameters
         ----------
-        catalog : list of dict
+        catalog : dict
             Per-bin output container.
         ikappa : int
             Tomographic-bin index.
@@ -1810,48 +1934,41 @@ class CatalogSourceClustered(CatalogSourceGenerator):
         Tag used to name the output directory ``catalogs_{tag}/``. Default is None.
     nbar_input : float, array-like, or None, optional
         Galaxy surface density in gal/arcmin^2. Default is None.
-    bias : float or array-like
+    bias : float or array-like, optional
         Linear galaxy bias per tomographic bin. If a float, the same bias is used
         for all tomographic bins; if an array-like, it must have length
         ``lensing.nmaps`` and provide a per-bin value.
-    smooth_Mpc : float or None, optional
-        Physical Gaussian smoothing scale in Mpc of the intrinsic-alignment fields,
-        see :class:`CatalogSourceGenerator`. Galaxy positions are drawn from the
-        unsmoothed density contrast (``get_field_hspmap``).
-    interp_list : list of str, optional
-        Base field names to interpolate at galaxy positions (e.g.
-        ``['kappa', 'gamma1', 'gamma2', 't11', 't22', 't12']``).  Smoothed
-        filenames of the intrinsic-alignment fields are resolved from ``smooth_Mpc``.  Default is
-        ``['kappa', 'gamma1', 'gamma2']``.
-    interp_pixels : bool, optional
-        Use pixel interpolation. Default is True.
+    interp_fields, interp_method, smooth_fields, smooth_Mpc : optional
+        Interpolation and smoothing of the fields (including the density used to
+        place galaxies, ``'positions'``), see :class:`CatalogSourceGenerator`.
     augmentors : list, optional
         List of augmentors applied after map interpolation. Default is empty list.
-    cls_b, cls_lmax_mask
+    cls_b, cls_lmax_mask : optional
         Binning of the catalog angular power spectra, see :class:`CatalogSourceGenerator`.
     """
 
     def __init__(
         self,
-        lensing: Any,
+        lensing: LensingBuilder,
         tag: str | None = None,
         nbar_input: float | np.ndarray | None = None,
         bias: float | np.ndarray | None = None,
-        smooth_Mpc: float | None = None,
-        interp_list: list[str] | None = None,
-        interp_pixels: bool = True,
+        interp_fields: tuple[str, ...] = ('kappa', 'gamma1', 'gamma2'),
+        interp_method: str = 'bilinear',
+        smooth_fields: tuple[str, ...] = ('positions', 'density', 't11', 't22', 't12'),
+        smooth_Mpc: float | dict[str, float] | None = None,
         augmentors: list | None = None,
-        cls_b: Any = None,
+        cls_b: nmt.NmtBin | None = None,
         cls_lmax_mask: int | None = None,
     ) -> None:
-        """Initialize clustered catalog generator and validate bias parameter."""
         super().__init__(
             lensing=lensing,
             tag=tag,
             nbar_input=nbar_input,
+            interp_fields=interp_fields,
+            interp_method=interp_method,
+            smooth_fields=smooth_fields,
             smooth_Mpc=smooth_Mpc,
-            interp_list=interp_list,
-            interp_pixels=interp_pixels,
             augmentors=augmentors,
             cls_b=cls_b,
             cls_lmax_mask=cls_lmax_mask,
@@ -1892,28 +2009,25 @@ class CatalogSourceClusteredMultinomial(CatalogSourceClustered):
         Tag used to name the output directory ``catalogs_{tag}/``. Default is None.
     nbar_input : float, array-like, or None, optional
         Galaxy surface density in gal/arcmin^2. Default is None.
-    bias : float or array-like
+    bias : float or array-like, optional
         Linear galaxy bias per tomographic bin.
-    smooth_Mpc : float or None, optional
-        Physical Gaussian smoothing scale in Mpc.  See ``CatalogSourceClustered``.
-    interp_list : list of str, optional
-        Base field names to interpolate. Default is ``['kappa', 'gamma1', 'gamma2']``.
-    interp_pixels : bool, optional
-        Use pixel interpolation. Default is True.
+    interp_fields, interp_method, smooth_fields, smooth_Mpc
+        Interpolation and smoothing of the fields, see :class:`CatalogSourceGenerator`.
     augmentors : list, optional
         List of augmentors. Default is empty list.
     """
 
-    def _generate_galaxies(self, catalog, ikappas=None, ishells=None):
+    def _generate_galaxies(
+            self, catalog: dict[int, dict[str, np.ndarray]], ikappas: int | Iterable[int] | None = None, ishells: list[int] | None = None) -> None:
         """Generate redshifts first, then positions conditioned on density maps.
 
         Parameters
         ----------
-        catalog : list of dict
+        catalog : dict
             Per-bin dictionaries updated in-place.
         ikappas : int or array_like of int or None, optional
             Tomographic-bin indices to generate.
-        ishells : None
+        ishells : None, optional
             Per-shell generation is not supported (the number of galaxies per bin
             is fixed over all shells).
         """
@@ -1923,28 +2037,28 @@ class CatalogSourceClusteredMultinomial(CatalogSourceClustered):
         # Generate redshifts first, needed to know what shells galaxies are in
         for ikappa in self.lensing.tqdm(ikappas, desc="[generate] generating z"):
             self._generate_z(catalog, ikappa)
-            for k in ['ra', 'dec'] + self.interp_list:
+            for k in ['ra', 'dec', *self.interp_fields]:
                 catalog[ikappa][k] = np.zeros_like(catalog[ikappa]['z'])
 
         # Then generate positions, looping over shells for speed
-        for ishell in self.lensing.shell_builder.tqdm(None, desc=f"[generate] generating ra, dec from density"):
+        for ishell in self.lensing.shell_builder.tqdm(None, desc="[generate] generating ra, dec from density"):
             self._generate_pos(catalog, ishell, ikappas=ikappas)
 
-    def _generate_pos(self, catalog, ishell, ikappas=None):
+    def _generate_pos(self, catalog: dict[int, dict[str, np.ndarray]], ishell: int, ikappas: int | Iterable[int] | None = None) -> None:
         """Draw positions in a given shell using multinomial pixel sampling.
 
         Parameters
         ----------
-        catalog : list of dict
+        catalog : dict
             Per-bin dictionaries updated in-place.
         ishell : int
             Shell index.
         ikappas : int or array_like of int or None, optional
             Tomographic-bin indices to process.
         """
-        # unsmoothed density contrast, relative to the cosmic mean
+        # density contrast used to place galaxies ('positions' smoothing)
         _, ipix_mask = self.snap_lensing.shell_builder.get_mask(return_ipix=True)
-        density_masked = self.snap_lensing.shell_builder.get_field_hspmap(ishell).get_values_pix(ipix_mask)
+        density_masked = self._density_map(ishell, self.smoothing['positions']).get_values_pix(ipix_mask)
 
         # Loop over tomographic bins
         for ikappa in self.lensing.tqdm(ikappas, leave=False):
@@ -1983,24 +2097,21 @@ class CatalogSourceClusteredPoisson(CatalogSourceClustered):
         Tag used to name the output directory ``catalogs_{tag}/``. Default is None.
     nbar_input : float, array-like, or None, optional
         Galaxy surface density in gal/arcmin^2. Default is None.
-    bias : float or array-like
+    bias : float or array-like, optional
         Linear galaxy bias per tomographic bin.
-    smooth_Mpc : float or None, optional
-        Physical Gaussian smoothing scale in Mpc.  See ``CatalogSourceClustered``.
-    interp_list : list of str, optional
-        Base field names to interpolate. Default is ``['kappa', 'gamma1', 'gamma2']``.
-    interp_pixels : bool, optional
-        Use pixel interpolation. Default is True.
+    interp_fields, interp_method, smooth_fields, smooth_Mpc
+        Interpolation and smoothing of the fields, see :class:`CatalogSourceGenerator`.
     augmentors : list, optional
         List of augmentors. Default is empty list.
     """
 
-    def _generate_galaxies(self, catalog, ikappas=None, ishells=None):
+    def _generate_galaxies(
+            self, catalog: dict[int, dict[str, np.ndarray]], ikappas: int | Iterable[int] | None = None, ishells: list[int] | None = None) -> None:
         """Generate a clustered catalog by shell-wise Poisson sampling.
 
         Parameters
         ----------
-        catalog : list of dict
+        catalog : dict
             Per-bin dictionaries updated in-place.
         ikappas : int or array_like of int or None, optional
             Tomographic-bin indices to generate.
@@ -2034,7 +2145,7 @@ class CatalogSourceClusteredPoisson(CatalogSourceClustered):
 
         # Second generate positions, looping over shells
         ishells = list(range(self.nshells)) if ishells is None else ishells
-        for ishell in self.lensing.shell_builder.tqdm(ishells, desc=f"[generate] generating ra, dec from density"):
+        for ishell in self.lensing.shell_builder.tqdm(ishells, desc="[generate] generating ra, dec from density"):
             self._generate_pos(catalog, ishell, ikappas=ikappas)
 
         # Third sample redshifts within shells
@@ -2047,24 +2158,24 @@ class CatalogSourceClusteredPoisson(CatalogSourceClustered):
             catalog[ikappa]['z'] = np.concatenate(catalog[ikappa]['z'])
             catalog[ikappa]['idx_shell'] = np.concatenate(catalog[ikappa]['idx_shell'])
             catalog[ikappa]['chi'] = builder.cosmo.comoving_radial_distance(1. / (1. + catalog[ikappa]['z']))
-            for k in self.interp_list:
+            for k in self.interp_fields:
                 catalog[ikappa][k] = np.zeros_like(catalog[ikappa]['z'])
 
-    def _generate_pos(self, catalog, ishell, ikappas=None):
+    def _generate_pos(self, catalog: dict[int, dict[str, np.ndarray]], ishell: int, ikappas: int | Iterable[int] | None = None) -> None:
         """Sample galaxy positions in one shell using pixel-wise Poisson draws.
 
         Parameters
         ----------
-        catalog : list of dict
+        catalog : dict
             Per-bin dictionaries updated in-place.
         ishell : int
             Shell index.
         ikappas : int or array_like of int or None, optional
             Tomographic-bin indices to process.
         """
-        # unsmoothed density contrast, relative to the cosmic mean
+        # density contrast used to place galaxies ('positions' smoothing)
         _, ipix_mask = self.snap_lensing.shell_builder.get_mask(return_ipix=True)
-        density_masked = self.snap_lensing.shell_builder.get_field_hspmap(ishell).get_values_pix(ipix_mask)
+        density_masked = self._density_map(ishell, self.smoothing['positions']).get_values_pix(ipix_mask)
 
         # Loop over tomographic bins
         for ikappa in self.lensing.tqdm(ikappas, leave=False):
@@ -2088,12 +2199,12 @@ class CatalogSourceClusteredPoisson(CatalogSourceClustered):
             catalog[ikappa]['ra'].append(ra)
             catalog[ikappa]['dec'].append(dec)
 
-    def _generate_z(self, catalog, ikappa, ishells):
+    def _generate_z(self, catalog: dict[int, dict[str, np.ndarray]], ikappa: int, ishells: list[int] | None) -> None:
         """Sample galaxy redshifts within each shell for one tomographic bin.
 
         Parameters
         ----------
-        catalog : list of dict
+        catalog : dict
             Per-bin dictionaries updated in-place, with one entry of
             ``catalog[ikappa]['ra']`` per shell of ``ishells``.
         ikappa : int
@@ -2121,7 +2232,7 @@ class CatalogSourceClusteredPoisson(CatalogSourceClustered):
             catalog[ikappa]['idx_shell'].append(np.full(ngal, ishell))
 
 
-def generate_radec_in_pix(nside, ipix, rng, log2nside_high=29):
+def generate_radec_in_pix(nside: int, ipix: np.ndarray, rng: np.random.Generator, log2nside_high: int = 29) -> tuple[np.ndarray, np.ndarray]:
     """Sample random (RA, DEC) coordinates uniformly within Healpix pixels.
 
     This uses an approximation: pixels are upsampled to a very high nside
@@ -2162,5 +2273,16 @@ class CatalogAugmentor:
     in their ``__init__``.
     """
 
-    def augment_catalog(self, cosmo, catalog, **kwargs):
+    def augment_catalog(self, cosmo: pyccl.Cosmology, catalog: dict[str, np.ndarray], **kwargs: Any) -> None:
+        """Add the augmentor's columns to the catalog of one tomographic bin, in place.
+
+        Parameters
+        ----------
+        cosmo : pyccl.Cosmology
+            Cosmology.
+        catalog : dict[str, np.ndarray]
+            Catalog of one tomographic bin.
+        **kwargs
+            Per-bin options (``augmentor_kwargs`` of the catalog generator, e.g. ``ikappa``).
+        """
         raise NotImplementedError

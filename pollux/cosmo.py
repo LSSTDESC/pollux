@@ -10,9 +10,16 @@ The module-level cosmologies are convenience definitions for examples/tests and
 are not used by the main pipeline, which reads cosmology from simulation metadata.
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Callable
+
 import numpy as np
 import pyccl
 import sacc
+
+if TYPE_CHECKING:
+    import pymaster
 
 cosmo_slics = pyccl.Cosmology(
     Omega_c=0.2905 - 0.0447,
@@ -55,7 +62,7 @@ class MyCMBLensingTracer(pyccl.Tracer):
         Number of samples used internally to tabulate the kernel.
     """
 
-    def __init__(self, cosmo, z_source, n_samples=100):
+    def __init__(self, cosmo: pyccl.Cosmology, z_source: float, n_samples: int = 100) -> None:
         super().__init__()
 
         # we need the distance functions at the C layer
@@ -88,31 +95,47 @@ class Tracer:
         Linear bias, constant in redshift, for ``'density'``. Default is 1.
     z_source : float or None, optional
         Source redshift, for ``'convergence'``.
+    smooth_Mpc : float or None, optional
+        Comoving scale of a Gaussian smoothing of the field (e.g. galaxies placed
+        from a smoothed density), for ``'density'``. Predictions multiply the matter
+        power spectrum by ``exp(-k**2 smooth_Mpc**2 / 2)`` per smoothed tracer, which
+        is exact in Limber for a transverse smoothing. Default is None.
     """
 
     KINDS = ('density', 'shear', 'convergence')
 
-    def __init__(self, name, kind, z=None, nz=None, bias=1., z_source=None):
+    def __init__(
+            self,
+            name: str,
+            kind: str,
+            z: np.ndarray | None = None,
+            nz: np.ndarray | None = None,
+            bias: float = 1.,
+            z_source: float | None = None,
+            smooth_Mpc: float | None = None) -> None:
         if kind not in self.KINDS:
             raise ValueError(f"kind must be one of {self.KINDS}, got {kind!r}")
         if kind == 'convergence' and z_source is None:
             raise ValueError("z_source is required for kind='convergence'")
         if kind != 'convergence' and (z is None or nz is None):
             raise ValueError(f"z and nz are required for kind={kind!r}")
+        if smooth_Mpc and kind != 'density':
+            raise ValueError("smooth_Mpc is only supported for kind='density'")
         self.name = name
         self.kind = kind
         self.z = None if z is None else np.asarray(z)
         self.nz = None if nz is None else np.asarray(nz)
         self.bias = bias
         self.z_source = z_source
+        self.smooth_Mpc = smooth_Mpc or None
         self._ccl = None
 
     @property
-    def spin(self):
+    def spin(self) -> int:
         """Spin of the field (2 for shear, 0 otherwise)."""
         return 2 if self.kind == 'shear' else 0
 
-    def ccl(self, cosmo):
+    def ccl(self, cosmo: pyccl.Cosmology) -> pyccl.Tracer:
         """Return the CCL tracer for this field (cached for a given cosmology).
 
         Parameters
@@ -135,7 +158,7 @@ class Tracer:
             self._ccl = (cosmo, tracer)
         return self._ccl[1]
 
-    def sacc(self):
+    def sacc(self) -> sacc.tracers.BaseTracer:
         """Return the SACC tracer for this field.
 
         Returns
@@ -147,14 +170,14 @@ class Tracer:
             return sacc.tracers.MiscTracer(self.name)
         return sacc.tracers.NZTracer(self.name, self.z, self.nz)
 
-    def mean_z(self):
+    def mean_z(self) -> float:
         """Mean redshift of the field (the source redshift for ``'convergence'``)."""
         if self.kind == 'convergence':
             return self.z_source
         return np.trapz(self.nz * self.z, self.z) / np.trapz(self.nz, self.z)
 
-    def __getstate__(self):
-        # CCL tracers are rebuilt on demand (keeps tracers pickle-friendly)
+    def __getstate__(self) -> dict:
+        """Return the state for pickling, without the cached CCL tracer (rebuilt on demand)."""
         state = self.__dict__.copy()
         state['_ccl'] = None
         return state
@@ -179,11 +202,12 @@ class Theory:
         ('convergence', 'convergence'): 'NN',
     }
 
-    def __init__(self, cosmo, p_of_k_a=None):
+    def __init__(self, cosmo: pyccl.Cosmology, p_of_k_a: pyccl.Pk2D | None = None) -> None:
         self.cosmo = cosmo
         self.p_of_k_a = p_of_k_a
+        self._smoothed_pk = {}  # matter power spectra with a Gaussian smoothing, keyed by sigma**2
 
-    def angular_cl(self, t1, t2, ell):
+    def angular_cl(self, t1: Tracer, t2: Tracer, ell: np.ndarray) -> np.ndarray:
         """Return the angular power spectrum of two tracers.
 
         Parameters
@@ -196,15 +220,25 @@ class Theory:
         Returns
         -------
         ndarray
-            C_ell (E-mode for shear; no pixel window).
+            C_ell (E-mode for shear; no pixel window), with the Gaussian smoothing of the
+            tracers (see :class:`Tracer`).
         """
         ccl1, ccl2 = t1.ccl(self.cosmo), t2.ccl(self.cosmo)
+        pk = self.p_of_k_a
+        sigma2 = (t1.smooth_Mpc or 0.)**2 + (t2.smooth_Mpc or 0.)**2
+        if sigma2 > 0.:
+            if sigma2 not in self._smoothed_pk:
+                # same grid as the unsmoothed power spectrum, Gaussian filter applied to log P (no underflow)
+                a_arr, lk_arr, pk_arr = (pk if pk is not None else self.cosmo.get_nonlin_power()).get_spline_arrays()
+                log_pk = np.log(pk_arr) - np.exp(2. * lk_arr)[None, :] * sigma2 / 2.
+                self._smoothed_pk[sigma2] = pyccl.Pk2D(a_arr=a_arr, lk_arr=lk_arr, pk_arr=log_pk, is_logp=True)
+            pk = self._smoothed_pk[sigma2]
         try:
-            return pyccl.angular_cl(self.cosmo, ccl1, ccl2, ell, p_of_k_a=self.p_of_k_a)
+            return pyccl.angular_cl(self.cosmo, ccl1, ccl2, ell, p_of_k_a=pk)
         except pyccl.CCLError:
-            return pyccl.angular_cl(self.cosmo, ccl1, ccl2, ell, p_of_k_a=self.p_of_k_a, limber_integration_method='spline')
+            return pyccl.angular_cl(self.cosmo, ccl1, ccl2, ell, p_of_k_a=pk, limber_integration_method='spline')
 
-    def binned_cl(self, t1, t2, b, bpws=None, f_ell=None):
+    def binned_cl(self, t1: Tracer, t2: Tracer, b: pymaster.NmtBin, bpws: np.ndarray | None = None, f_ell: np.ndarray | None = None) -> np.ndarray:
         """Return the angular power spectrum of two tracers, binned into bandpowers.
 
         Parameters
@@ -234,8 +268,22 @@ class Theory:
             return bpws[:, :, 0, :] @ cl
         return b.bin_cell(cl[None, :])
 
-    def predict_cls(self, pairs, b=None, ell=None, binning='wsp', bpws=None, f_ell=None, noise=None, add_noise=False,
-                    error_bars=False, stacked=False, fsky=1., cross_covariance=True, all_components=False, progress=None):
+    def predict_cls(
+            self,
+            pairs: dict,
+            *,
+            b: pymaster.NmtBin | None = None,
+            ell: np.ndarray | None = None,
+            binning: str = 'wsp',
+            bpws: np.ndarray | dict | None = None,
+            f_ell: np.ndarray | None = None,
+            noise: dict | None = None,
+            error_bars: bool = False,
+            stacked: bool = False,
+            fsky: float = 1.,
+            cross_covariance: bool = True,
+            all_components: bool = False,
+            progress: Callable | None = None) -> tuple:
         """Predict angular power spectra of tracer pairs, with optional Gaussian errors and covariance.
 
         Parameters
@@ -259,16 +307,13 @@ class Theory:
         f_ell : ndarray or None, optional
             Field window (e.g. pixel window), multiplying C_ell by ``f_ell**2``.
         noise : dict or None, optional
-            White noise level N_ell of each tracer, keyed by tracer name; used for
-            ``add_noise`` and error bars (zero for missing tracers).
-        add_noise : bool, optional
-            If True, add the noise bias to the predicted auto-spectra (error bars
-            include the noise either way).
+            White noise level N_ell of each tracer, keyed by tracer name, for the
+            error bars (zero for missing tracers).
         error_bars : bool, optional
             If True, also return Gaussian error bars (diagonal in ell),
             ``cov(ab, cd) = (C_ac C_bd + C_ad C_bc) / ((2 ell + 1) fsky n_ell)``,
-            with ``C_ell + N_ell`` for auto-spectra whatever ``add_noise`` (computing
-            the C_ell of other tracer pairs as needed).
+            with ``C_ell + N_ell`` for auto-spectra (computing the C_ell of other
+            tracer pairs as needed).
         stacked : bool, optional
             If True, also return the spectra stacked into one vector (in the order
             of ``pairs``), and with ``error_bars`` their covariance.
@@ -298,6 +343,8 @@ class Theory:
             raise ValueError(f"binning must be 'wsp', 'average' or 'unbinned', not {binning!r}")
         if binning == 'wsp' and bpws is None:
             raise ValueError("binning='wsp' needs the bandpower windows bpws")
+
+        # multipoles: those given (unbinned), or the effective ones of the bandpowers, whose widths set the errors
         unbinned = binning == 'unbinned'
         nell = None
         if ell is None:
@@ -307,19 +354,23 @@ class Theory:
             raise ValueError("ell can only be given with binning='unbinned'")
         if error_bars and nell is None:
             raise ValueError("error bars need the bandpower widths: use ell=None")
-        noise = noise or {}
-        self.cosmo.compute_growth()
 
-        def bpws_of(key):
+        noise = noise or {}
+        self.cosmo.compute_growth()  # once, for all tracers
+
+        def bpws_of(key: tuple | None) -> np.ndarray | None:
+            # bandpower windows of one pair (None for bandpower averages)
             if binning != 'wsp':
                 return None
             return bpws[key] if isinstance(bpws, dict) else bpws
 
-        def predict(t1, t2, w=None):
+        def predict(t1: Tracer, t2: Tracer, w: np.ndarray | None = None) -> np.ndarray:
+            # C_ell of two tracers, unbinned or binned
             if unbinned:
                 return self.angular_cl(t1, t2, ell)
             return self.binned_cl(t1, t2, b, bpws=w, f_ell=f_ell)
 
+        # spectra of the pairs (all components with bandpower windows if all_components), keeping the first one per tracer pair
         cl = {}
         signal = {}  # first component of the C_ell of tracer pairs, keyed by tracer names
         for key, (t1, t2) in (progress or (lambda x, **k: x))(pairs.items(), desc="[predict_cls]"):
@@ -327,32 +378,20 @@ class Theory:
             res = predict(t1, t2, w)
             first = res if unbinned else res[0]
             signal[t1.name, t2.name] = signal[t2.name, t1.name] = first
-            out = res if (all_components and not unbinned) else np.copy(first)
-            if add_noise and t1.name == t2.name and t1.name in noise:
-                if unbinned:
-                    out += noise[t1.name]
-                else:
-                    nl = noise[t1.name] * np.ones(b.lmax + 1)
-                    if f_ell is not None:
-                        nl *= f_ell**2
-                    nl_binned = w[0, :, 0, :] @ nl if w is not None else b.bin_cell(nl[None, :])[0]
-                    if out.ndim == 2:
-                        out[0] += nl_binned
-                    else:
-                        out += nl_binned
-            cl[key] = out
+            cl[key] = res if (all_components and not unbinned) else np.copy(first)
 
         outputs = [ell, cl]
         if error_bars or stacked:
             tracers = {t.name: t for t1, t2 in pairs.values() for t in (t1, t2)}
 
-            def total(a, c):
+            def total(a: str, c: str) -> np.ndarray:
                 # signal (computed if needed) plus noise for an auto-spectrum
                 if (a, c) not in signal:
                     res = predict(tracers[a], tracers[c], None if isinstance(bpws, dict) else bpws_of(None))
                     signal[a, c] = signal[c, a] = res if unbinned else res[0]
                 return signal[a, c] + (noise.get(a, 0.) if a == c else 0.)
 
+            # Gaussian errors cov(ab, cd) = (C_ac C_bd + C_ad C_bc) / ((2 ell + 1) fsky n_ell), from signal plus noise
             names = {key: (t1.name, t2.name) for key, (t1, t2) in pairs.items()}
             if error_bars:
                 norm = (2 * ell + 1.) * fsky * nell
@@ -361,6 +400,7 @@ class Theory:
                     dcl[key] = np.sqrt((total(a, a) * total(bb, bb) + total(a, bb)**2) / norm)
                 outputs.append(dcl)
             if stacked:
+                # spectra stacked in the order of pairs, with their block-diagonal-in-ell covariance
                 keys = list(pairs)
                 n = len(ell)
                 cl_stacked = np.concatenate([np.ravel(cl[key] if cl[key].ndim == 1 else cl[key][0]) for key in keys])
@@ -378,15 +418,16 @@ class Theory:
                     outputs.append(cov)
         return tuple(outputs)
 
-    def correlation(self, t1, t2, theta, lmax, nell=500):
-        """Return the real-space correlation function(s) of two tracers.
+    def predict_2pt(self, pairs: dict, theta: np.ndarray | dict, lmax: int, nell: int = 500) -> dict:
+        """Predict real-space correlation functions of tracer pairs.
 
         Parameters
         ----------
-        t1, t2 : Tracer
-            Tracers; for a density-shear pair, ``t1`` is the density (lens) field.
-        theta : array_like
-            Angular separations in arcmin.
+        pairs : dict
+            Tracer pairs to predict, ``{key: (t1, t2)}``, as in :meth:`predict_cls`; for a
+            density-shear pair, ``t1`` is the density (lens) field. Outputs are keyed the same way.
+        theta : array_like or dict
+            Angular separations in arcmin, shared by all pairs or keyed like ``pairs``.
         lmax : int
             Maximum multipole of the C_ell used for the Hankel transform.
         nell : int, optional
@@ -394,14 +435,16 @@ class Theory:
 
         Returns
         -------
-        ndarray or tuple of ndarray
-            ``w(theta)`` (density-density), ``gamma_t(theta)`` (density-shear), or
+        dict
+            Per pair, ``w(theta)`` (density-density), ``gamma_t(theta)`` (density-shear), or
             ``(xi_plus, xi_minus)`` (shear-shear).
         """
-        corr = self._CORRELATION_TYPES[t1.kind, t2.kind]
         ell = np.geomspace(1, lmax, nell)
-        cl = self.angular_cl(t1, t2, ell)
-        theta_deg = np.asarray(theta) / 60.
-        if isinstance(corr, tuple):
-            return tuple(pyccl.correlation(self.cosmo, ell=ell, C_ell=cl, theta=theta_deg, type=c) for c in corr)
-        return pyccl.correlation(self.cosmo, ell=ell, C_ell=cl, theta=theta_deg, type=corr)
+        xi = {}
+        for key, (t1, t2) in pairs.items():
+            corr = self._CORRELATION_TYPES[t1.kind, t2.kind]
+            cl = self.angular_cl(t1, t2, ell)
+            theta_deg = np.asarray(theta[key] if isinstance(theta, dict) else theta) / 60.
+            res = [pyccl.correlation(self.cosmo, ell=ell, C_ell=cl, theta=theta_deg, type=c) for c in np.atleast_1d(corr)]
+            xi[key] = tuple(res) if isinstance(corr, tuple) else res[0]
+        return xi

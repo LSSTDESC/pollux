@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+from typing import Any
+
 import numpy as np
 import pyccl
 
@@ -24,11 +28,13 @@ class IACalculator(CatalogAugmentor):
         IA model to use. Supported values are 'TA', 'TT', or 'TATT'.
         Default is 'TA'.
     model_params : dict, optional
-        Dictionary of model parameters. Supported keys include:
-        - 'A_TA' : float, amplitude for TA model (default 1.0)
-        - 'A_TT' : float, amplitude for TT model (default 1.0)
-        - 'delta_b_TA' : float, bias parameter for density-dependent TA model (default 0.0)
-        - 'delta_b_TT' : float, bias parameter for density-dependent TT model (default 0.0)
+        Model parameters:
+
+        - ``'A_TA'``: amplitude of the TA model (default 1.0);
+        - ``'A_TT'``: amplitude of the TT model (default 1.0);
+        - ``'delta_b_TA'``: bias of the density-dependent TA model (default 0.0);
+        - ``'delta_b_TT'``: bias of the density-dependent TT model (default 0.0).
+
     Notes
     -----
     The TA (Tidal Alignment) model computes IA shear proportional to the
@@ -41,7 +47,7 @@ class IACalculator(CatalogAugmentor):
     https://arxiv.org/abs/2509.25166v1
     """
 
-    def __init__(self, model='TA', model_params=None):
+    def __init__(self, model: str = 'TA', model_params: dict | None = None) -> None:
         if model not in ['TA', 'TT', 'TATT']:
             raise ValueError(f"IA model '{model}' not recognized. Supported: 'TA', 'TT', 'TATT'.")
 
@@ -61,27 +67,24 @@ class IACalculator(CatalogAugmentor):
             new_columns += ['e1_ia_tt', 'e2_ia_tt']
         self.new_columns = new_columns
 
-    def augment_catalog(self, cosmo: 'pyccl.Cosmology', catalog: dict[str, np.ndarray], **kwargs) -> None:
+    def augment_catalog(self, cosmo: pyccl.Cosmology, catalog: dict[str, np.ndarray], **kwargs: Any) -> None:
         """Compute and add intrinsic alignment shear components to a catalog.
 
         Parameters
         ----------
-        cosmo : ``pyccl.Cosmology`` object
-            Cosmology object with methods ``rho_x(a, species='matter')`` and
-            ``growth_factor(a)``, and attribute ``h`` (reduced Hubble constant).
+        cosmo : pyccl.Cosmology
+            Cosmology.
         catalog : dict[str, np.ndarray]
-            Dictionary containing galaxy catalog data. Must include:
-            - 'z' : redshift array
-            - 't11', 't22', 't12' : tidal field components
-            - 'density' : density contrast (only if delta_b terms are non-zero)
+            Catalog of one tomographic bin, updated in place. Must include ``'z'``
+            (redshift), ``'t11'``, ``'t22'``, ``'t12'`` (tidal field), and
+            ``'density'`` (density contrast) if a ``delta_b`` parameter is non-zero.
+        **kwargs
+            Unused (other augmentor options).
 
         Notes
         -----
-        This method modifies the input catalog in-place by adding new columns:
-        - 'e1_ia_ta', 'e2_ia_ta' : IA ellipticity from TA model
-        - 'e1_ia_tt', 'e2_ia_tt' : IA ellipticity from TT model
-
-        The columns added depend on the selected model ('TA', 'TT', or 'TATT').
+        Adds ``'e1_ia_ta'``, ``'e2_ia_ta'`` (TA model) and/or ``'e1_ia_tt'``,
+        ``'e2_ia_tt'`` (TT model), depending on the model.
         """
         z = catalog['z']
         a = 1.0 / (1.0 + z)
@@ -143,22 +146,22 @@ class CatalogAugmentorShear(CatalogAugmentor):
         If True, include IA contributions in lensed shapes. Default is True.
     sigma_e : float, optional
         Standard deviation of the intrinsic ellipticity distribution. Default is 0.3.
-    rng_seed : int, optional
+    seed : int, optional
         Seed of the intrinsic shapes: the galaxies of tomographic bin ``ikappa``
-        in shell ``ishell`` use ``np.random.default_rng([rng_seed, ikappa, ishell])``,
+        in shell ``ishell`` use ``np.random.default_rng([seed, ikappa, ishell])``,
         so shapes do not depend on how the catalog is split into shells. Default is 42.
     """
 
     def __init__(
         self,
-        compute_reduced_shear=True,
-        compute_magnification=False,
-        generate_intrinsic=False,
-        compute_observed=False,
-        include_ia=True,
-        sigma_e=0.3,
-        rng_seed=42,
-    ):
+        compute_reduced_shear: bool = True,
+        compute_magnification: bool = False,
+        generate_intrinsic: bool = False,
+        compute_observed: bool = False,
+        include_ia: bool = True,
+        sigma_e: float = 0.3,
+        seed: int = 42,
+    ) -> None:
         if compute_observed and not generate_intrinsic:
             raise ValueError("Intrinsic shapes must be generated to compute observed shapes.")
 
@@ -168,7 +171,7 @@ class CatalogAugmentorShear(CatalogAugmentor):
         self.compute_observed = compute_observed
         self.include_ia = include_ia
         self.sigma_e = sigma_e
-        self.rng_seed = rng_seed
+        self.seed = seed
         self.name = 'shear_derived'
         self.required_interp_fields = ['kappa', 'gamma1', 'gamma2']
 
@@ -183,7 +186,7 @@ class CatalogAugmentorShear(CatalogAugmentor):
             new_columns += ['e1_obs', 'e2_obs']
         self.new_columns = new_columns
 
-    def augment_catalog(self, cosmo, catalog, ikappa=0, **kwargs):
+    def augment_catalog(self, cosmo: pyccl.Cosmology, catalog: dict[str, np.ndarray], ikappa: int = 0, **kwargs: Any) -> None:
         """Compute derived shear quantities and add them to the catalog.
 
         Parameters
@@ -195,14 +198,18 @@ class CatalogAugmentorShear(CatalogAugmentor):
             ``'gamma2'`` and ``'idx_shell'``; updated in place.
         ikappa : int, optional
             Tomographic-bin index, used to seed the intrinsic shapes.
+        **kwargs
+            Unused (other augmentor options).
         """
         kappa = catalog['kappa']
         gamma1, gamma2 = catalog['gamma1'], catalog['gamma2']
 
         if self.compute_magnification:
+            # magnification 1 / ((1 - kappa)^2 - |gamma|^2)
             catalog['mu'] = 1. / ((1. - kappa)**2 - gamma1**2 - gamma2**2)
 
         if self.compute_reduced_shear:
+            # reduced shear g = gamma / (1 - kappa)
             denom = 1. - kappa
             g1 = gamma1 / denom
             g2 = gamma2 / denom
@@ -213,21 +220,24 @@ class CatalogAugmentorShear(CatalogAugmentor):
             g2 = gamma2
 
         if self.generate_intrinsic:
+            # Gaussian intrinsic shapes, drawn per shell so that they do not depend on how the generation is split
             idx_shell = catalog['idx_shell']
             catalog['e1_int'] = np.empty(len(idx_shell))
             catalog['e2_int'] = np.empty(len(idx_shell))
             for ishell in np.unique(idx_shell):
                 w = np.flatnonzero(idx_shell == ishell)
-                rng = np.random.default_rng([self.rng_seed, ikappa, ishell])
+                rng = np.random.default_rng([self.seed, ikappa, ishell])
                 catalog['e1_int'][w] = rng.normal(0., self.sigma_e, size=len(w))
                 catalog['e2_int'][w] = rng.normal(0., self.sigma_e, size=len(w))
 
         if self.compute_observed:
+            # source ellipticity, plus the intrinsic alignments if computed
             e_int = catalog['e1_int'] + 1j * catalog['e2_int']
             if 'e1_ia_ta' in catalog:
                 e_int += catalog['e1_ia_ta'] + 1j * catalog['e2_ia_ta']
             if 'e1_ia_tt' in catalog:
                 e_int += catalog['e1_ia_tt'] + 1j * catalog['e2_ia_tt']
+            # observed ellipticity e = (g + e_s) / (1 + g* e_s)
             g = g1 + 1j * g2
             e_obs = (g + e_int) / (1. + np.conj(g) * e_int)
             catalog['e1_obs'] = e_obs.real

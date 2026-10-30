@@ -109,10 +109,14 @@ class ShellBuilder(MapBuilder):
     add_orphans : bool
         Whether orphan particles should be added in :meth:`combine_maps_subs`.
         ``False`` here; overridden to ``True`` in :class:`SnapshotInterpBuilder`.
+    smoothed_field_what : str
+        ``what`` of the smoothed density maps (``'density'``), see
+        :meth:`~pollux.map_builder.MapBuilder.compute_maps_from_alms`.
     """
 
     add_orphans = False
     kind = 'snapshot'
+    smoothed_field_what = 'density'
 
     def __init__(
             self,
@@ -285,6 +289,27 @@ class ShellBuilder(MapBuilder):
         else:
             raise ValueError
 
+    def mean_z(self, ishell: int) -> float:
+        """Compute the volume-weighted mean redshift of a shell.
+
+        Parameters
+        ----------
+        ishell : int
+            Shell index.
+
+        Returns
+        -------
+        float
+            Mean redshift in the shell, weighted by the comoving volume element.
+        """
+        z_edges = self.shell_edges_redshift
+        zmin = z_edges[ishell]
+        zmax = z_edges[ishell + 1]
+
+        dVdz = lambda z: pyccl.comoving_angular_distance(self.cosmo, 1. / (1. + z))**2 / pyccl.background.h_over_h0(self.cosmo, 1. / (1. + z))
+
+        return quad(lambda z: z * dVdz(z), zmin, zmax) / quad(dVdz, zmin, zmax)
+
     def shell_info(self, fname: str | None = None) -> np.ndarray:
         """Compute and optionally save a structured summary of shell metadata.
 
@@ -416,46 +441,6 @@ class ShellBuilder(MapBuilder):
         else:
             logger.debug("Found existing simulation info file at %s, skipping.", fname)
 
-    def _create_tracers(self) -> list[Tracer]:
-        """Create one density tracer per shell, with a volume-weighted top-hat redshift distribution (1000 redshifts per shell).
-
-        Returns
-        -------
-        list of pollux.cosmo.Tracer
-            ``'density'`` tracers named ``density_{ishell}``, of length ``nshells``.
-        """
-        z_edges = self.shell_edges_redshift
-
-        tracers = []
-        for ishell in range(self.nshells):
-            zz = np.linspace(z_edges[ishell], z_edges[ishell + 1], 1000)
-            aa = 1. / (1. + zz)
-            dVdz = pyccl.comoving_angular_distance(self.cosmo, aa)**2 / pyccl.background.h_over_h0(self.cosmo, aa)
-            tracers.append(Tracer(f"density_{ishell}", 'density', z=zz, nz=dVdz / np.trapz(dVdz, zz)))
-
-        return tracers
-
-    def mean_z(self, ishell: int) -> float:
-        """Compute the volume-weighted mean redshift of a shell.
-
-        Parameters
-        ----------
-        ishell : int
-            Shell index.
-
-        Returns
-        -------
-        float
-            Mean redshift in the shell, weighted by the comoving volume element.
-        """
-        z_edges = self.shell_edges_redshift
-        zmin = z_edges[ishell]
-        zmax = z_edges[ishell + 1]
-
-        dVdz = lambda z: pyccl.comoving_angular_distance(self.cosmo, 1. / (1. + z))**2 / pyccl.background.h_over_h0(self.cosmo, 1. / (1. + z))
-
-        return quad(lambda z: z * dVdz(z), zmin, zmax) / quad(dVdz, zmin, zmax)
-
     def random_isometries(self, group_isometries: bool | float | None = None, get_shell_identifier: bool = False) -> list:
         """Generate random affine isometries for shells.
 
@@ -539,6 +524,25 @@ class ShellBuilder(MapBuilder):
         shell_volume = 4. / 3. * np.pi * (chi_edges[ishell + 1]**3 - chi_edges[ishell]**3) * self.fsky
 
         return shell_volume / box_volume
+
+    def get_valid_replicas(self) -> list:
+        """Return valid replica indices for each (snapshot, sub-volume) job.
+
+        Reads only box edges (no particle data) and calls
+        :meth:`_get_valid_replicas` to determine which periodic-box replicas
+        overlap each shell.
+
+        Returns
+        -------
+        list
+            List of tuples ``(ijob, replicates)`` where ``replicates`` is a list
+            of (ix, iy, iz) replica indices that may overlap the shell.
+        """
+        replicates = []
+        for ijob in trange(self.reader.njobs, desc='[get_valid_replicas]'):
+            ishell, isub = self.reader.job_args(ijob)
+            replicates.append((ijob, self._valid_replicas_sub(ishell, isub)))
+        return replicates
 
     def _valid_replicas_sub(self, ishell: int, isub: int) -> list[tuple]:
         """Return replica indices (ix, iy, iz) that may overlap a given shell.
@@ -654,25 +658,6 @@ class ShellBuilder(MapBuilder):
         logger.debug("Shell %d: %d valid replicates out of %d.", ishell, len(valid), len(replicas))
 
         return valid
-
-    def get_valid_replicas(self) -> list:
-        """Return valid replica indices for each (snapshot, sub-volume) job.
-
-        Reads only box edges (no particle data) and calls
-        :meth:`_get_valid_replicas` to determine which periodic-box replicas
-        overlap each shell.
-
-        Returns
-        -------
-        list
-            List of tuples ``(ijob, replicates)`` where ``replicates`` is a list
-            of (ix, iy, iz) replica indices that may overlap the shell.
-        """
-        replicates = []
-        for ijob in trange(self.reader.njobs, desc='[get_valid_replicas]'):
-            ishell, isub = self.reader.job_args(ijob)
-            replicates.append((ijob, self._valid_replicas_sub(ishell, isub)))
-        return replicates
 
     def subsample_ratio(self, ishell: int) -> float:
         """Return the particle subsampling ratio applied for a given shell.
@@ -801,38 +786,35 @@ class ShellBuilder(MapBuilder):
         area = hp.nside2pixarea(self.nside, degrees=degrees)
         return self.pixel_density(ishell) / area
 
-    def _count_to_shell(self, count: np.ndarray) -> hsp.HealSparseMap:
-        """Convert dense per-pixel particle counts into a HealSparse shell map.
+    def construct_maps(self, imaps: int | Iterable[int] | None = None, **kwargs: Any) -> hsp.HealSparseMap | dict[int, hsp.HealSparseMap]:
+        """Construct all requested shell maps.
+
+        This constructs sub-maps for each (shell, subvolume) and then calls
+        :meth:`combine_maps_subs` to produce final shell maps.
 
         Parameters
         ----------
-        count : ndarray of int
-            Dense RING-ordered array of length ``self.npix`` holding the number of
-            particles per pixel (e.g. accumulated with :func:`_count_pix`).
+        imaps : int or array_like of int or None, optional
+            Shell indices to construct. If None, constructs all shells.
+        **kwargs
+            Forwarded to :meth:`construct_maps_sub`.
 
         Returns
         -------
-        hsp.HealSparseMap
-            Shell map of dtype ``self.dtype`` whose valid pixels are the non-empty
-            pixels of ``count`` inside the padded footprint.
-
-        Notes
-        -----
-        The footprint mask is applied here, on non-empty pixels only, which is
-        equivalent to (and cheaper than) filtering every particle hit.
+        hsp.HealSparseMap or dict
+            - If ``imaps`` is a single int: returns a single combined
+              ``HealSparseMap``.
+            - If ``imaps`` is ``None`` or an iterable: returns a dict keyed
+              by shell index with combined ``HealSparseMap`` values.
         """
-        shell = hsp.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
-        uipix = np.flatnonzero(count)
-        # drop out-of-footprint pixels (equivalent to filtering every particle)
-        if self.footprint is not None and len(uipix) > 0:
-            uipix = uipix[self.get_mask(nest=False, padded=True)[uipix]]
-        if len(uipix) > 0:
-            c = count[uipix]
-            shell.update_values_pix(hp.ring2nest(self.nside, uipix), c.astype(self.dtype), nest=True)
-            logger.debug("Found %d particles in the shell.", int(c.sum(dtype=np.int64)))
-        else:
-            logger.debug("Found no particle in the shell.")
-        return shell
+        # first construct shells on simulation subs
+        for ishell in self.tqdm(imaps, desc="[construct_maps]"):
+            isubs = self.reader.isubs_for_snapshot(ishell)
+            for isub in tqdm(isubs, desc=f"[construct_maps: shell {ishell}]", leave=False):
+                self.construct_maps_sub(ishell, isub, **kwargs)
+
+        # then combine into final shells
+        return self.combine_maps_subs(imaps)
 
     def combine_maps_subs(self,
                           ishells: int | Iterable[int] | None = None,
@@ -879,42 +861,44 @@ class ShellBuilder(MapBuilder):
                 shell_sum.add(sub_map)
             shell = shell_sum.to_map()
 
-            shell.write(fname, clobber=True, format=self.save_format, nocompress=self.nocompress)
-            logger.debug("Saved to file %s.", fname)
+            self._save_map(shell, fname)
 
             shells[ishell] = shell
 
         return shells[ishells] if np.isscalar(ishells) else shells
 
-    def construct_maps(self, imaps: int | Iterable[int] | None = None, **kwargs: Any) -> hsp.HealSparseMap | dict[int, hsp.HealSparseMap]:
-        """Construct all requested shell maps.
-
-        This constructs sub-maps for each (shell, subvolume) and then calls
-        :meth:`combine_maps_subs` to produce final shell maps.
+    def _count_to_shell(self, count: np.ndarray) -> hsp.HealSparseMap:
+        """Convert dense per-pixel particle counts into a HealSparse shell map.
 
         Parameters
         ----------
-        imaps : int or array_like of int or None, optional
-            Shell indices to construct. If None, constructs all shells.
-        **kwargs
-            Forwarded to :meth:`construct_maps_sub`.
+        count : ndarray of int
+            Dense RING-ordered array of length ``self.npix`` holding the number of
+            particles per pixel (e.g. accumulated with :func:`_count_pix`).
 
         Returns
         -------
-        hsp.HealSparseMap or dict
-            - If ``imaps`` is a single int: returns a single combined
-              ``HealSparseMap``.
-            - If ``imaps`` is ``None`` or an iterable: returns a dict keyed
-              by shell index with combined ``HealSparseMap`` values.
-        """
-        # first construct shells on simulation subs
-        for ishell in self.tqdm(imaps, desc="[construct_maps]"):
-            isubs = self.reader.isubs_for_snapshot(ishell)
-            for isub in tqdm(isubs, desc=f"[construct_maps: shell {ishell}]", leave=False):
-                self.construct_maps_sub(ishell, isub, **kwargs)
+        hsp.HealSparseMap
+            Shell map of dtype ``self.dtype`` whose valid pixels are the non-empty
+            pixels of ``count`` inside the padded footprint.
 
-        # then combine into final shells
-        return self.combine_maps_subs(imaps)
+        Notes
+        -----
+        The footprint mask is applied here, on non-empty pixels only, which is
+        equivalent to (and cheaper than) filtering every particle hit.
+        """
+        shell = hsp.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
+        uipix = np.flatnonzero(count)
+        # drop out-of-footprint pixels (equivalent to filtering every particle)
+        if self.footprint is not None and len(uipix) > 0:
+            uipix = uipix[self.get_mask(nest=False, padded=True)[uipix]]
+        if len(uipix) > 0:
+            c = count[uipix]
+            shell.update_values_pix(hp.ring2nest(self.nside, uipix), c.astype(self.dtype), nest=True)
+            logger.debug("Found %d particles in the shell.", int(c.sum(dtype=np.int64)))
+        else:
+            logger.debug("Found no particle in the shell.")
+        return shell
 
     def field_hspmap(self, ishell: int) -> hsp.HealSparseMap:
         """Return the density contrast of one shell as a HealSparse map.
@@ -939,25 +923,7 @@ class ShellBuilder(MapBuilder):
         density.update_values_pix(spix, (shell[spix] / self.pixel_density(ishell) - 1.).astype(self.dtype), nest=True)
         return density
 
-    def _noise_cls(self, ishell: int) -> float:
-        """Return the Poisson shot-noise level for shell density maps.
-
-        Parameters
-        ----------
-        ishell : int
-            Shell index.
-
-        Returns
-        -------
-        float
-            White noise level N_ell = 1 / nbar, where nbar is the expected sky
-            density for this shell (per steradian).
-        """
-        return 1. / self.sky_density(ishell)
-
-    smoothed_field_what = 'density'
-
-    def _smoothing_sigma(self, ishell: int, smooth_Mpc: float) -> float:
+    def _smooth_sigma(self, ishell: int, smooth_Mpc: float) -> float:
         """Return the angular width (radians) of a comoving smoothing scale at the far edge of a shell."""
         return smooth_Mpc / self.shell_edges_comoving_distance[ishell + 1]
 
@@ -979,7 +945,7 @@ class ShellBuilder(MapBuilder):
             Shell indices to process. If None, process all.
         smooth_Mpc : float or None, optional
             Comoving Gaussian smoothing scale in Mpc of the density a_lm (angular width
-            at the shell's far edge, see :meth:`_smoothing_sigma`).
+            at the shell's far edge, see :meth:`_smooth_sigma`).
         lmax : int or None, optional
             Maximum multipole used for harmonic transforms. Defaults to
             ``3*nside - 1``.
@@ -1016,12 +982,12 @@ class ShellBuilder(MapBuilder):
             alm = self.compute_alms(ishell, pol=False, lmax=lmax)
 
             if smooth_Mpc is not None:
+                # smoothed density, from the a_lm smoothed in place (reused for the tidal field below)
+                self._smooth_alms(ishell, alm, smooth_Mpc, lmax)
+                density_hsp = self._alm2hspmap(alm, ipix, lmax, mean=self._alm_field_mean(ishell))
                 if save_field_map:
-                    density_hsp = self._save_smoothed_field(ishell, alm, smooth_Mpc, ipix, lmax)
-                else:
-                    density_hsp = self._smooth_alms(alm, self._smoothing_sigma(ishell, smooth_Mpc), ipix, lmax, mean=self.transform_mean(ishell))
+                    self._save_map(density_hsp, self.get_fname(ishell, what=self.smoothed_field_what, smooth_Mpc=smooth_Mpc))
                 density = density_hsp.get_values_pix(ipix, nest=False)
-                # alm is now smoothed inplace — reuse for spin-2 transform below
             else:
                 density = self.field_map(ishell, nest=False)[ipix]
 
@@ -1047,11 +1013,45 @@ class ShellBuilder(MapBuilder):
                 hsmap = hsp.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
                 hsmap.update_values_pix(ipix, val.astype(self.dtype), nest=False)
                 tensor_fname = self.get_fname(ishell, what=what, smooth_Mpc=smooth_Mpc)
-                hsmap.write(tensor_fname, clobber=True, format=self.save_format, nocompress=self.nocompress)
-                logger.debug("Saved to file %s.", tensor_fname)
+                self._save_map(hsmap, tensor_fname)
                 ts[ishell].append(hsmap)
 
         return ts[ishells] if np.isscalar(ishells) else ts
+
+    def _create_tracers(self) -> list[Tracer]:
+        """Create one density tracer per shell, with a volume-weighted top-hat redshift distribution (1000 redshifts per shell).
+
+        Returns
+        -------
+        list of pollux.cosmo.Tracer
+            ``'density'`` tracers named ``density_{ishell}``, of length ``nshells``.
+        """
+        z_edges = self.shell_edges_redshift
+
+        tracers = []
+        for ishell in range(self.nshells):
+            zz = np.linspace(z_edges[ishell], z_edges[ishell + 1], 1000)
+            aa = 1. / (1. + zz)
+            dVdz = pyccl.comoving_angular_distance(self.cosmo, aa)**2 / pyccl.background.h_over_h0(self.cosmo, aa)
+            tracers.append(Tracer(f"density_{ishell}", 'density', z=zz, nz=dVdz / np.trapz(dVdz, zz)))
+
+        return tracers
+
+    def _noise_cls(self, ishell: int) -> float:
+        """Return the Poisson shot-noise level for shell density maps.
+
+        Parameters
+        ----------
+        ishell : int
+            Shell index.
+
+        Returns
+        -------
+        float
+            White noise level N_ell = 1 / nbar, where nbar is the expected sky
+            density for this shell (per steradian).
+        """
+        return 1. / self.sky_density(ishell)
 
     def snapshot_lensing_builder(self, tag: str | None = 'zsnapshots') -> SnapshotBornLensingBuilder:
         """Return a lensing builder with one convergence map per shell snapshot.
@@ -1190,8 +1190,7 @@ class SnapshotShellBuilder(ShellBuilder):
         else:
             logger.debug("No valid replica — skipping particle load.")
 
-        shell.write(fname, clobber=True, format=self.save_format, nocompress=self.nocompress)
-        logger.debug("Saved to file %s.", fname)
+        self._save_map(shell, fname)
 
         return shell
 
@@ -1585,8 +1584,7 @@ class LightconeSlicingBuilder(ShellBuilder):
         shell = self._count_to_shell(count)
         del count, ipix, buf
 
-        shell.write(fname, clobber=True, format=self.save_format, nocompress=self.nocompress)
-        logger.debug("Saved to file %s.", fname)
+        self._save_map(shell, fname)
 
         return shell
 
@@ -1675,8 +1673,7 @@ class SnapshotInterpBuilder(ShellBuilder):
             valid_replicas = np.array(self._valid_replicas_sub(ishell, isub), dtype=np.int64).reshape(-1, 3)
             if len(valid_replicas) == 0:
                 shell = hsp.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
-                shell.write(fname, clobber=True, format=self.save_format, nocompress=self.nocompress)
-                logger.debug("Saved to file %s.", fname)
+                self._save_map(shell, fname)
                 return shell
 
         # read particles
@@ -1777,8 +1774,7 @@ class SnapshotInterpBuilder(ShellBuilder):
         shell = self._count_to_shell(count)
         del count, ipix, buf
 
-        shell.write(fname, clobber=True, format=self.save_format, nocompress=self.nocompress)
-        logger.debug("Saved to file %s.", fname)
+        self._save_map(shell, fname)
 
         return shell
 

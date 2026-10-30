@@ -49,33 +49,6 @@ cosmo_hacc = pyccl.Cosmology(
 )
 
 
-class MyCMBLensingTracer(pyccl.Tracer):
-    """CCL tracer for the lensing convergence of a single source plane.
-
-    Parameters
-    ----------
-    cosmo : pyccl.Cosmology
-        Cosmology object.
-    z_source : float
-        Source redshift defining the lensing kernel.
-    n_samples : int, optional
-        Number of samples used internally to tabulate the kernel.
-    """
-
-    def __init__(self, cosmo: pyccl.Cosmology, z_source: float, n_samples: int = 100) -> None:
-        super().__init__()
-
-        # we need the distance functions at the C layer
-        cosmo.compute_distances()
-        kernel = pyccl.get_kappa_kernel(cosmo, z_source=z_source, n_samples=n_samples)
-        if (cosmo['sigma_0'] == 0):
-            self.add_tracer(cosmo, kernel=kernel, der_bessel=-1, der_angles=1)
-        else:
-            self._MG_add_tracer(cosmo, kernel, z_source, der_bessel=-1, der_angles=1)
-
-        self.z_source = z_source
-
-
 class Tracer:
     """An observable field, from which CCL and SACC tracers are derived.
 
@@ -146,7 +119,8 @@ class Tracer:
         Returns
         -------
         pyccl.Tracer
-            ``NumberCountsTracer``, ``WeakLensingTracer`` or :class:`MyCMBLensingTracer`.
+            ``NumberCountsTracer``, ``WeakLensingTracer`` or ``CMBLensingTracer`` (the convergence
+            of a single source plane, at any redshift).
         """
         if self._ccl is None or self._ccl[0] is not cosmo:
             if self.kind == 'density':
@@ -154,7 +128,7 @@ class Tracer:
             elif self.kind == 'shear':
                 tracer = pyccl.WeakLensingTracer(cosmo, dndz=(self.z, self.nz))
             else:
-                tracer = MyCMBLensingTracer(cosmo, self.z_source)
+                tracer = pyccl.CMBLensingTracer(cosmo, z_source=self.z_source)
             self._ccl = (cosmo, tracer)
         return self._ccl[1]
 

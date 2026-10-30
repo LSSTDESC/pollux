@@ -123,37 +123,6 @@ class BaryonifiedShellBuilder(ShellBuilder):
         self._interpolator_ishell = None  # shell index currently tabulated in self.model
         self._pk2d = None
 
-    def _setup_interpolator(self, ishell: int) -> None:
-        """(Re)build the interpolator of the baryonification model for one shell.
-
-        Parameters
-        ----------
-        ishell : int
-            Shell index.
-
-        Notes
-        -----
-        Sets ``proj_cutoff`` to half the shell's comoving thickness (Anbajagane,
-        Pandey & Chang 2024, Eq. 25), since the projection depth must match the
-        shell's line-of-sight extent, so the interpolator is rebuilt per shell.
-        """
-        if self._interpolator_ishell == ishell:
-            return
-
-        z_edges = self.shell_edges_redshift
-        chi_edges = self.shell_edges_comoving_distance
-        proj_cutoff = (chi_edges[ishell + 1] - chi_edges[ishell]) / 2.
-        self.model.DMO.set_parameter('proj_cutoff', proj_cutoff)
-        self.model.DMB.set_parameter('proj_cutoff', proj_cutoff)
-
-        interpolator_kwargs = dict(self._interpolator_kwargs)
-        interpolator_kwargs.setdefault('N_samples_z', 2)
-        interpolator_kwargs.setdefault('z_linear_sampling', True)
-        interpolator_kwargs.setdefault('z_min', max(1e-3, z_edges[ishell]))  # Avoid z=0 because binning is log-spaced in z
-        interpolator_kwargs.setdefault('z_max', max(z_edges[ishell + 1], z_edges[ishell] + 1e-3))
-        self.model.setup_interpolator(**interpolator_kwargs)
-        self._interpolator_ishell = ishell
-
     def construct_maps(
         self,
         ishells: int | Iterable[int] | None = None,
@@ -212,12 +181,42 @@ class BaryonifiedShellBuilder(ShellBuilder):
             # Save the baryonified map
             shell = hsp.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
             shell.update_values_pix(ipix, baryonified_count[ipix].astype(self.dtype), nest=False)
-            shell.write(fname, clobber=True, format=self.save_format, nocompress=self.nocompress)
-            logger.debug("Saved to file %s.", fname)
+            self._save_map(shell, fname)
 
             shells[ishell] = shell
 
         return shells[ishells] if np.isscalar(ishells) else shells
+
+    def _setup_interpolator(self, ishell: int) -> None:
+        """(Re)build the interpolator of the baryonification model for one shell.
+
+        Parameters
+        ----------
+        ishell : int
+            Shell index.
+
+        Notes
+        -----
+        Sets ``proj_cutoff`` to half the shell's comoving thickness (Anbajagane,
+        Pandey & Chang 2024, Eq. 25), since the projection depth must match the
+        shell's line-of-sight extent, so the interpolator is rebuilt per shell.
+        """
+        if self._interpolator_ishell == ishell:
+            return
+
+        z_edges = self.shell_edges_redshift
+        chi_edges = self.shell_edges_comoving_distance
+        proj_cutoff = (chi_edges[ishell + 1] - chi_edges[ishell]) / 2.
+        self.model.DMO.set_parameter('proj_cutoff', proj_cutoff)
+        self.model.DMB.set_parameter('proj_cutoff', proj_cutoff)
+
+        interpolator_kwargs = dict(self._interpolator_kwargs)
+        interpolator_kwargs.setdefault('N_samples_z', 2)
+        interpolator_kwargs.setdefault('z_linear_sampling', True)
+        interpolator_kwargs.setdefault('z_min', max(1e-3, z_edges[ishell]))  # Avoid z=0 because binning is log-spaced in z
+        interpolator_kwargs.setdefault('z_max', max(z_edges[ishell + 1], z_edges[ishell] + 1e-3))
+        self.model.setup_interpolator(**interpolator_kwargs)
+        self._interpolator_ishell = ishell
 
     def matter_power_spectrum(self, nk: int = 128, na: int = 32) -> pyccl.Pk2D:
         """Return the baryon-corrected matter power spectrum consistent with the baryonified shells.

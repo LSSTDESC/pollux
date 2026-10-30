@@ -111,6 +111,16 @@ class Reader(ABC):
 
         self.dtype = dtype
 
+    @property
+    @abstractmethod
+    def boxsize(self) -> float:
+        """Comoving box side length in Mpc."""
+
+    @property
+    def box_comoving_density(self) -> float:
+        """Comoving particle number density in Mpc^-3, consistent with :attr:`boxsize`."""
+        return self.nparticles / self.boxsize**3
+
     def job_args(self, ijob: int) -> tuple[int, int]:
         """Return ``(isnapshot, isub)`` for a global job index.
 
@@ -129,7 +139,7 @@ class Reader(ABC):
         return self._job_args[ijob]
 
     def isubs_for_snapshot(self, isnapshot: int) -> NDArray:
-        """Return global job indices for all sub-volumes of one snapshot.
+        """Return the sub-volume indices of the jobs of one snapshot.
 
         Parameters
         ----------
@@ -139,9 +149,9 @@ class Reader(ABC):
         Returns
         -------
         ndarray of int
-            Job indices whose snapshot component equals ``isnapshot``.
+            Sub-volume indices ``isub`` of the jobs whose snapshot is ``isnapshot``.
         """
-        return np.array([x[1] for x in self._job_args if x[0] == isnapshot])  # in case self._jobs_args is overwritten in subclasses
+        return np.array([x[1] for x in self._job_args if x[0] == isnapshot])  # in case self._job_args is overwritten in subclasses
 
     def ijobs_for_snapshot(self, isnapshot: int) -> NDArray:
         """Return global job indices for all sub-volumes of one snapshot.
@@ -156,17 +166,7 @@ class Reader(ABC):
         ndarray of int
             Job indices whose snapshot component equals ``isnapshot``.
         """
-        return np.array([i for i, x in enumerate(self._job_args) if x[0] == isnapshot])  # in case self._jobs_args is overwritten in subclasses
-
-    @property
-    @abstractmethod
-    def boxsize(self) -> float:
-        """Comoving box side length in Mpc."""
-
-    @property
-    def box_comoving_density(self) -> float:
-        """Comoving particle number density in Mpc^-3, consistent with :attr:`boxsize`."""
-        return self.nparticles / self.boxsize**3
+        return np.array([i for i, x in enumerate(self._job_args) if x[0] == isnapshot])  # in case self._job_args is overwritten in subclasses
 
     @abstractmethod
     def read_sub(

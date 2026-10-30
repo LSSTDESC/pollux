@@ -75,8 +75,8 @@ class MapBuilder(ABC):
     nlb : int, optional
         Number of bandpowers when constructing bins lazily. Default is 20.
     remove_monopole : bool, optional
-        If True (default), subtract the (weighted) mean of maps within the transform
-        mask before harmonic transforms (:meth:`transform_map`). Other uses of
+        If True (default), subtract the (weighted) mean of maps over the alm
+        weights before harmonic transforms (:meth:`_alm_field`). Other uses of
         maps (:meth:`field_map`) keep their mean.
     nocompress : bool, optional
         If True, disable HealSparse compression. Default is True.
@@ -88,7 +88,7 @@ class MapBuilder(ABC):
         If given (and the footprint is not the full sky), maps are built on the
         footprint dilated by this angle (the padded footprint, see :meth:`get_mask`),
         and harmonic transforms use the padded footprint apodized over the padding
-        (:meth:`transform_weights`), equal to 1 on the footprint. Analyses
+        (:attr:`_alm_weights`), equal to 1 on the footprint. Analyses
         (catalogs, sky fraction) use the footprint itself. Default is None (no padding).
     apotype : {'C1', 'C2', 'Smooth'} or None, optional
         Apodization of the padded footprint (see :func:`pymaster.mask_apodization`),
@@ -99,7 +99,7 @@ class MapBuilder(ABC):
         (then upgraded to ``nside``). Default is 512.
     replicate_octant : bool, optional
         If True, harmonic transforms use the octant footprint replicated to the
-        full sky (by reflections, see :meth:`octant_to_fullsky_ipix`) instead of
+        full sky (by reflections, see :meth:`_octant_to_fullsky_ipix`) instead of
         the masked octant. Requires the octant footprint without padding. Default is False.
 
     Notes
@@ -107,6 +107,9 @@ class MapBuilder(ABC):
     Healpix ordering: this codebase uses NESTED pixel ordering by default for
     internal Healpix/HealSparse operations and IO unless otherwise stated.
     """
+
+    # ``what`` of the smoothed field maps (e.g. 'density' for shells; None for convergence maps)
+    smoothed_field_what: str | None = None
 
     def __init__(
         self,
@@ -163,8 +166,7 @@ class MapBuilder(ABC):
 
         # Cached attributes (lazy-initialized)
         self._masks = {}  # (padded, nest) -> [mask, ipix]
-        self._transform_weights = None
-        self.ipix_oct_fullsky = None
+        self._ipix_oct_fullsky = None
         self.predicted_cls = None
 
         # Make sure folder exists
@@ -291,72 +293,6 @@ class MapBuilder(ABC):
             subs_dir = os.path.join(self.save_dir, 'subs')
             os.makedirs(subs_dir, exist_ok=True)
             return os.path.join(subs_dir, fname)
-
-    @abstractmethod
-    def _create_tracers(self) -> list:
-        """Create the tracers describing the maps.
-
-        Returns
-        -------
-        list of pollux.cosmo.Tracer
-            One tracer per map.
-        """
-
-    @cached_property
-    def tracers(self) -> list:
-        """Return (and lazily create) the tracers describing the maps.
-
-        Returns
-        -------
-        list of pollux.cosmo.Tracer
-            One tracer per map, from which CCL (:attr:`tracers_ccl`) and SACC
-            (:attr:`tracers_sacc`) tracers are derived.
-        """
-        return self._create_tracers()
-
-    @property
-    def tracers_ccl(self) -> list:
-        """Return the CCL tracers of the maps.
-
-        Returns
-        -------
-        list of pyccl.Tracer
-        """
-        return [t.ccl(self.cosmo) for t in self.tracers]
-
-    @cached_property
-    def tracers_sacc(self) -> list:
-        """Return the SACC tracers used to store measured spectra.
-
-        Returns
-        -------
-        list of sacc.tracers.BaseTracer
-        """
-        return [t.sacc() for t in self.tracers]
-
-    def matter_power_spectrum(self) -> pyccl.Pk2D | None:
-        """Return the matter power spectrum consistent with the maps, for predictions.
-
-        Returns
-        -------
-        pyccl.Pk2D or None
-            None (CCL's nonlinear matter power spectrum) by default; overridden
-            by builders whose maps follow another one (e.g.
-            :class:`~pollux.baryons.BaryonifiedShellBuilder`, or lensing builders
-            using their shell builder's).
-        """
-        return None
-
-    @cached_property
-    def theory(self) -> Theory:
-        """Return the theory predictor of the maps.
-
-        Returns
-        -------
-        pollux.cosmo.Theory
-            With the builder's cosmology and :meth:`matter_power_spectrum`.
-        """
-        return Theory(self.cosmo, p_of_k_a=self.matter_power_spectrum())
 
     @abstractmethod
     def construct_maps(self, imaps: int | Iterable[int] | None = None, **kwargs: Any) -> hsp.HealSparseMap | dict[int, hsp.HealSparseMap]:
@@ -527,6 +463,19 @@ class MapBuilder(ABC):
             hsmap = hsp.HealSparseMap.read(fname, nside_coverage=self.nside_c)
             logger.debug("Found and loaded map at %s.", fname)
             yield index, hsmap
+
+    def _save_map(self, hsmap: hsp.HealSparseMap, fname: str) -> None:
+        """Save a HealSparse map with the builder's format and compression.
+
+        Parameters
+        ----------
+        hsmap : hsp.HealSparseMap
+            Map to save.
+        fname : str
+            Output path (typically from :meth:`get_fname`).
+        """
+        hsmap.write(fname, clobber=True, format=self.save_format, nocompress=self.nocompress)
+        logger.debug("Saved to file %s.", fname)
 
     def plot_maps(
             self,
@@ -703,6 +652,22 @@ class MapBuilder(ABC):
             cache[1] = ipix_nest if nest else hp.nest2ring(self.nside, ipix_nest)
         return cache[0], cache[1]
 
+    @property
+    def fsky(self) -> float:
+        """Sky fraction covered by the footprint mask.
+
+        Computed from the actual number of kept pixels and their areas, so it
+        accounts for edge effects (e.g. HEALPix pixels only partially inside
+        the octant boundary that are dropped by :meth:`_create_mask`).
+
+        Returns
+        -------
+        float
+            Fraction of the full sky inside the footprint (between 0 and 1).
+        """
+        _, ipix = self.get_mask(return_ipix=True)
+        return len(ipix) / self.npix
+
     def _create_mask(self) -> np.ndarray:
         """Create a footprint mask at ``self.nside``.
 
@@ -760,11 +725,11 @@ class MapBuilder(ABC):
         return mask | (hp.ud_grade(padded_lowres.astype(np.float64), self.nside, order_in='NESTED', order_out='NESTED') > 0.)
 
     def _padding_fname(self, what: str) -> str:
-        """Return the path of the padded footprint or transform weights saved by :meth:`compute_padding`.
+        """Return the path of the padded footprint or alm weights saved by :meth:`compute_padding`.
 
         Parameters
         ----------
-        what : {'padded_mask', 'transform_weights'}
+        what : {'padded_mask', 'alm_weights'}
             Product.
 
         Returns
@@ -772,26 +737,26 @@ class MapBuilder(ABC):
         str
             ``{wsp_dir}/{what}_nside{nside}_pad{padding_deg}[{apotype}]_res{padding_nside}.fits``.
         """
-        apotype = (self.apotype or '') if what == 'transform_weights' else ''
+        apotype = (self.apotype or '') if what == 'alm_weights' else ''
         return os.path.join(self.wsp_dir, f'{what}_nside{self.nside}_pad{self.padding_deg:g}{apotype}_res{self.padding_nside}.fits')
 
     def compute_padding(self) -> None:
-        """Compute and save the padded footprint and the transform weights, if not on disk.
+        """Compute and save the padded footprint and the alm weights, if not on disk.
 
         Notes
         -----
         Does nothing without ``padding_deg``. The products (:meth:`get_mask` with
-        ``padded=True``, :meth:`transform_weights`) are then read from disk
+        ``padded=True``, :attr:`_alm_weights`) are then read from disk
         (:meth:`_padding_fname`) instead of recomputed by every builder.
         """
         if self.padding_deg is None:
             return
         _, ipix = self.get_mask(nest=True, return_ipix=True, padded=True)
-        for what in ('padded_mask', 'transform_weights'):
+        for what in ('padded_mask', 'alm_weights'):
             fname = self._padding_fname(what)
-            if os.path.exists(fname) or (what == 'transform_weights' and self.apotype is None):
+            if os.path.exists(fname) or (what == 'alm_weights' and self.apotype is None):
                 continue
-            values = np.ones(len(ipix), dtype=bool) if what == 'padded_mask' else self.transform_weights()[hp.nest2ring(self.nside, ipix)]
+            values = np.ones(len(ipix), dtype=bool) if what == 'padded_mask' else self._alm_weights[hp.nest2ring(self.nside, ipix)]
             hsmap = hsp.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=values.dtype)
             hsmap.update_values_pix(ipix, values, nest=True)
             # via a temporary file, so readers never see a partial file
@@ -800,70 +765,7 @@ class MapBuilder(ABC):
             os.replace(tmp, fname)
             logger.info("Saved to file %s.", fname)
 
-    def transform_weights(self) -> np.ndarray:
-        """Return the weights applied to maps before harmonic transforms.
-
-        Returns
-        -------
-        ndarray
-            Dense weight map in RING ordering, length ``self.npix``:
-
-            - without padding, the footprint mask (the full sky with ``replicate_octant``);
-            - with ``padding_deg``, the padded footprint apodized over the padding
-              (``apotype``, unapodized if None), equal to 1 on the footprint.
-
-        Notes
-        -----
-        Padding keeps transforms (e.g. shear from convergence, smoothing) from being
-        truncated at the footprint edges. The apodization is computed at ``padding_nside``
-        and interpolated bilinearly at ``nside`` (avoiding steps at the ``padding_nside``
-        pixel scale). The result is cached, and read from disk if saved by
-        :meth:`compute_padding`.
-        """
-        fname = self._padding_fname('transform_weights') if self.padding_deg is not None else None
-        if self._transform_weights is None:
-            if self.replicate_octant:
-                weights = np.ones(self.npix)
-            elif self.padding_deg is None or self.apotype is None:
-                weights = self.get_mask(nest=False, padded=True).astype(np.float64)
-            elif os.path.exists(fname):
-                hsmap = hsp.HealSparseMap.read(fname)
-                ipix = hsmap.valid_pixels
-                weights = np.zeros(self.npix)
-                weights[hp.nest2ring(self.nside, ipix)] = hsmap[ipix]
-                logger.debug("Found and loaded transform weights at %s.", fname)
-            else:
-                padded_lowres = (
-                    hp.ud_grade(self.get_mask(nest=True, padded=True).astype(np.float64), self.padding_nside, order_in='NESTED', order_out='RING')
-                    > 0.).astype(np.float64)
-                apo_lowres = nmt.mask_apodization(padded_lowres, self.padding_deg, apotype=self.apotype)
-                # 1 on the footprint, and the apodization interpolated (bilinearly) in the padding
-                footprint = self.get_mask(nest=False)
-                weights = footprint.astype(np.float64)
-                ipix_padding = np.flatnonzero(self.get_mask(nest=False, padded=True) & ~footprint)
-                for ipix in np.array_split(ipix_padding, max(1, len(ipix_padding) // 10_000_000)):
-                    theta, phi = hp.pix2ang(self.nside, ipix)
-                    weights[ipix] = np.clip(hp.get_interp_val(apo_lowres, theta, phi), 0., 1.)
-            self._transform_weights = weights
-        return self._transform_weights
-
-    @property
-    def fsky(self) -> float:
-        """Sky fraction covered by the footprint mask.
-
-        Computed from the actual number of kept pixels and their areas, so it
-        accounts for edge effects (e.g. HEALPix pixels only partially inside
-        the octant boundary that are dropped by :meth:`_create_mask`).
-
-        Returns
-        -------
-        float
-            Fraction of the full sky inside the footprint (between 0 and 1).
-        """
-        _, ipix = self.get_mask(return_ipix=True)
-        return len(ipix) / self.npix
-
-    def octant_to_fullsky_ipix(self, nest: bool = True) -> np.ndarray:
+    def _octant_to_fullsky_ipix(self, nest: bool = True) -> np.ndarray:
         """Return a mapping from octant pixels to their full-sky replicas.
 
         Parameters
@@ -886,7 +788,7 @@ class MapBuilder(ABC):
         if not self.octant_only:
             raise ValueError("Only defined for octant builders (octant_only=True)")
 
-        if self.ipix_oct_fullsky is None:
+        if self._ipix_oct_fullsky is None:
             # geometric mapping: reflect southern hemisphere and reflect phi into first quadrant
             # (triangle wave, continuous across quadrant boundaries)
             theta, phi = hp.pix2ang(self.nside, np.arange(self.npix), nest=nest)
@@ -905,9 +807,9 @@ class MapBuilder(ABC):
                     if np.any(in_mask):
                         ipix_mapped[bad[i]] = valid[in_mask][0]
 
-            self.ipix_oct_fullsky = ipix_mapped
+            self._ipix_oct_fullsky = ipix_mapped
 
-        return self.ipix_oct_fullsky
+        return self._ipix_oct_fullsky
 
     def field_hspmap(self, imap: int) -> hsp.HealSparseMap:
         """Return the field of one map as a HealSparse map.
@@ -938,13 +840,59 @@ class MapBuilder(ABC):
         -------
         ndarray
             Dense Healpix map of length ``hp.nside2npix(self.nside)``, UNSEEN outside the
-            map's valid pixels, with its mean (see :meth:`transform_map` for maps
-            prepared for harmonic transforms).
+            map's valid pixels, with its mean (see :meth:`_alm_field` for the field
+            prepared for its a_lm).
         """
         return self.field_hspmap(imap).generate_healpix_map(nest=nest)
 
-    def transform_map(self, imap: int) -> tuple[np.ndarray, np.ndarray]:
-        """Return a map prepared for harmonic transforms, and its weights (RING ordering).
+    @cached_property
+    def _alm_weights(self) -> np.ndarray:
+        """Weights applied to maps before computing their a_lm.
+
+        Returns
+        -------
+        ndarray
+            Dense weight map in RING ordering, length ``self.npix``:
+
+            - without padding, the footprint mask (the full sky with ``replicate_octant``);
+            - with ``padding_deg``, the padded footprint apodized over the padding
+              (``apotype``, unapodized if None), equal to 1 on the footprint.
+
+        Notes
+        -----
+        Padding keeps transforms (e.g. shear from convergence, smoothing) from being
+        truncated at the footprint edges. The apodization is computed at ``padding_nside``
+        and interpolated bilinearly at ``nside`` (avoiding steps at the ``padding_nside``
+        pixel scale). The result is cached, and read from disk if saved by
+        :meth:`compute_padding`.
+        """
+        fname = self._padding_fname('alm_weights') if self.padding_deg is not None else None
+        if self.replicate_octant:
+            weights = np.ones(self.npix)
+        elif self.padding_deg is None or self.apotype is None:
+            weights = self.get_mask(nest=False, padded=True).astype(np.float64)
+        elif os.path.exists(fname):
+            hsmap = hsp.HealSparseMap.read(fname)
+            ipix = hsmap.valid_pixels
+            weights = np.zeros(self.npix)
+            weights[hp.nest2ring(self.nside, ipix)] = hsmap[ipix]
+            logger.debug("Found and loaded alm weights at %s.", fname)
+        else:
+            padded_lowres = (
+                hp.ud_grade(self.get_mask(nest=True, padded=True).astype(np.float64), self.padding_nside, order_in='NESTED', order_out='RING')
+                > 0.).astype(np.float64)
+            apo_lowres = nmt.mask_apodization(padded_lowres, self.padding_deg, apotype=self.apotype)
+            # 1 on the footprint, and the apodization interpolated (bilinearly) in the padding
+            footprint = self.get_mask(nest=False)
+            weights = footprint.astype(np.float64)
+            ipix_padding = np.flatnonzero(self.get_mask(nest=False, padded=True) & ~footprint)
+            for ipix in np.array_split(ipix_padding, max(1, len(ipix_padding) // 10_000_000)):
+                theta, phi = hp.pix2ang(self.nside, ipix)
+                weights[ipix] = np.clip(hp.get_interp_val(apo_lowres, theta, phi), 0., 1.)
+        return weights
+
+    def _alm_field(self, imap: int) -> tuple[np.ndarray, np.ndarray]:
+        """Return the alm weights and the field prepared for its a_lm (RING ordering): ``map2alm(field * weights)``.
 
         Parameters
         ----------
@@ -954,24 +902,24 @@ class MapBuilder(ABC):
         Returns
         -------
         weights : ndarray
-            Transform weights (:meth:`transform_weights`).
+            Alm weights (:attr:`_alm_weights`).
         _map : ndarray
             Field map (replicated to the full sky with ``replicate_octant``), with its
             weighted mean over the weights removed if ``self.remove_monopole``, and
             zero where the weights vanish (not multiplied by the weights).
         """
-        weights = self.transform_weights()
+        weights = self._alm_weights
         _map = self.field_map(imap, nest=False)
         if self.replicate_octant:
-            _map = _map[self.octant_to_fullsky_ipix(nest=False)]
+            _map = _map[self._octant_to_fullsky_ipix(nest=False)]
         good = weights > 0.
         _map = np.where(good, _map, 0.)
         if self.remove_monopole:
             _map[good] -= np.average(_map[good], weights=weights[good])
         return weights, _map
 
-    def transform_mean(self, imap: int) -> float:
-        """Return the weighted mean removed from a map by :meth:`transform_map`.
+    def _alm_field_mean(self, imap: int) -> float:
+        """Return the weighted mean removed from the field by :meth:`_alm_field` (to add back after smoothing).
 
         Parameters
         ----------
@@ -981,15 +929,15 @@ class MapBuilder(ABC):
         Returns
         -------
         float
-            Mean of the field map weighted by the transform weights, or 0 without
+            Mean of the field map weighted by the alm weights, or 0 without
             ``remove_monopole``. Adding it back to a smoothed map (a Gaussian
             smoothing keeps constants) restores the original mean.
         """
         if not self.remove_monopole:
             return 0.
-        weights = self.transform_weights()
+        weights = self._alm_weights
         if self.replicate_octant:
-            values = self.field_map(imap, nest=False)[self.octant_to_fullsky_ipix(nest=False)]
+            values = self.field_map(imap, nest=False)[self._octant_to_fullsky_ipix(nest=False)]
             return float(np.average(values, weights=weights))
         ipix = np.flatnonzero(weights > 0.)
         values = self.field_hspmap(imap).get_values_pix(hp.ring2nest(self.nside, ipix), nest=True)
@@ -1027,7 +975,7 @@ class MapBuilder(ABC):
 
         Notes
         -----
-        The a_lm are those of :meth:`transform_map` times the transform weights.
+        The a_lm are those of :meth:`_alm_field` times the alm weights.
         Results are cached (:meth:`_alm_fname`): a pre-existing file is loaded
         instead of recomputing, and a freshly computed alm is saved for later calls.
         """
@@ -1042,7 +990,7 @@ class MapBuilder(ABC):
                 except Exception as e:
                     warnings.warn(f"Cannot read alms at {fname}: {e}.")
 
-            weights, _map = self.transform_map(imap)
+            weights, _map = self._alm_field(imap)
             alms[imap] = hp.map2alm(_map * weights, **map2alm_kwargs)
 
             hp.write_alm(fname, alms[imap], overwrite=True)
@@ -1050,46 +998,7 @@ class MapBuilder(ABC):
 
         return alms[imaps] if np.isscalar(imaps) else alms
 
-    def _smooth_alms(self, alm: np.ndarray, sigma: float, ipix: np.ndarray, lmax: int, mean: float = 0.) -> hsp.HealSparseMap:
-        """Smooth alm in-place and return a HealSparse map over the footprint.
-
-        The pixel window function is deconvolved so that *sigma* is the sole
-        effective smoothing in the output map — pixel smoothing is removed.
-        ``alm`` is modified in-place and can be reused for further transforms
-        (e.g. spin-2) after this call.
-
-        Parameters
-        ----------
-        alm : array_like
-            Spherical harmonic coefficients.  Modified in-place.
-        sigma : float
-            Gaussian smoothing width in radians (typically ``smooth_Mpc / chi``).
-            This is the *only* smoothing present in the output.
-        ipix : array_like of int
-            Ring-ordered HEALPix pixel indices of the survey footprint.
-        lmax : int
-            Maximum multipole used for the back-transform ``alm2map``.
-        mean : float, optional
-            Constant added to the smoothed map, e.g. the mean removed before the
-            transform (:meth:`transform_mean`). Default is 0.
-
-        Returns
-        -------
-        hsp.HealSparseMap
-            Smoothed map restricted to the survey footprint.
-        """
-        ell = np.arange(lmax + 1)
-        fl = np.exp(-0.5 * (ell * (ell + 1)) * sigma**2) / hp.pixwin(self.nside, pol=False, lmax=lmax)
-        hp.almxfl(alm, fl, inplace=True)
-        values = hp.alm2map(alm, self.nside, lmax=lmax)[ipix] + mean
-        hsmap = hsp.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
-        hsmap.update_values_pix(ipix, values.astype(self.dtype), nest=False)
-        return hsmap
-
-    # ``what`` of the smoothed field maps (e.g. 'density' for shells; None for convergence maps)
-    smoothed_field_what: str | None = None
-
-    def _smoothing_sigma(self, imap: int, smooth_Mpc: float) -> float:
+    def _smooth_sigma(self, imap: int, smooth_Mpc: float) -> float:
         """Return the angular width (radians) of a comoving smoothing scale for one map.
 
         Parameters
@@ -1106,30 +1015,50 @@ class MapBuilder(ABC):
         """
         raise NotImplementedError(f"{type(self).__name__} maps have no distance to convert a smoothing scale in Mpc to an angle.")
 
-    def _save_smoothed_field(self, imap: int, alm: np.ndarray, smooth_Mpc: float, ipix: np.ndarray, lmax: int) -> hsp.HealSparseMap:
-        """Smooth the a_lm of one map in place and save the smoothed field map (with its mean added back).
+    def _smooth_alms(self, imap: int, alm: np.ndarray, smooth_Mpc: float, lmax: int) -> None:
+        """Smooth the a_lm of one map in place, with a Gaussian of comoving scale ``smooth_Mpc``.
+
+        The pixel window function is deconvolved, so that the Gaussian is the only
+        smoothing of maps made from the smoothed a_lm (:meth:`_alm2hspmap`).
 
         Parameters
         ----------
         imap : int
-            Map index.
+            Map index, setting the angular scale of the smoothing (:meth:`_smooth_sigma`).
         alm : ndarray
-            a_lm of the map (:meth:`compute_alms`), smoothed in place.
+            Spherical harmonic coefficients, modified in place.
         smooth_Mpc : float
             Comoving Gaussian smoothing scale in Mpc.
-        ipix : ndarray of int
-            RING pixels of the output map (the padded footprint).
         lmax : int
-            Maximum multipole of the back-transform.
+            Maximum multipole of ``alm``.
+        """
+        ell = np.arange(lmax + 1)
+        sigma = self._smooth_sigma(imap, smooth_Mpc)
+        fl = np.exp(-0.5 * (ell * (ell + 1)) * sigma**2) / hp.pixwin(self.nside, pol=False, lmax=lmax)
+        hp.almxfl(alm, fl, inplace=True)
+
+    def _alm2hspmap(self, alm: np.ndarray, ipix: np.ndarray, lmax: int, mean: float = 0.) -> hsp.HealSparseMap:
+        """Return the map of a_lm as a HealSparse map on the given pixels.
+
+        Parameters
+        ----------
+        alm : ndarray
+            Spherical harmonic coefficients.
+        ipix : ndarray of int
+            RING pixels of the output map (e.g. the padded footprint).
+        lmax : int
+            Maximum multipole of ``alm``.
+        mean : float, optional
+            Constant added to the map, e.g. the mean removed before the transform
+            (:meth:`_alm_field_mean`). Default is 0.
 
         Returns
         -------
         hsp.HealSparseMap
         """
-        hsmap = self._smooth_alms(alm, self._smoothing_sigma(imap, smooth_Mpc), ipix, lmax, mean=self.transform_mean(imap))
-        fname = self.get_fname(imap, what=self.smoothed_field_what, smooth_Mpc=smooth_Mpc)
-        hsmap.write(fname, clobber=True, format=self.save_format, nocompress=self.nocompress)
-        logger.debug("Saved to file %s.", fname)
+        values = hp.alm2map(alm, self.nside, lmax=lmax, pol=False)[ipix] + mean
+        hsmap = hsp.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
+        hsmap.update_values_pix(ipix, values.astype(self.dtype), nest=False)
         return hsmap
 
     def compute_maps_from_alms(self,
@@ -1144,7 +1073,7 @@ class MapBuilder(ABC):
             Map indices. If None, uses all maps.
         smooth_Mpc : float or None, optional
             Comoving Gaussian smoothing scale in Mpc (converted to an angle per map,
-            see :meth:`_smoothing_sigma`). If given, the smoothed maps (pixel window
+            see :meth:`_smooth_sigma`). If given, the smoothed maps (pixel window
             deconvolved) are saved (``what=smoothed_field_what``), or read if
             already on disk; if None, the maps are only reconstructed in memory.
         lmax : int or None, optional
@@ -1158,7 +1087,7 @@ class MapBuilder(ABC):
         Notes
         -----
         The a_lm are those of the weighted map (:meth:`compute_alms`), so the maps
-        are the field (with its mean added back, see :meth:`transform_mean`) on
+        are the field (with its mean added back, see :meth:`_alm_field_mean`) on
         the footprint, but tapered in the padding.
         """
         if lmax is None:
@@ -1167,20 +1096,86 @@ class MapBuilder(ABC):
 
         maps = {}
         for imap in self.tqdm(imaps, desc="[compute_maps_from_alms]"):
-            if smooth_Mpc is not None:
-                existing = self.check_maps(read=True, fname=self.get_fname(imap, what=self.smoothed_field_what, smooth_Mpc=smooth_Mpc))
-                if existing is not None:
-                    maps[imap] = existing
-                    continue
+            # smoothed maps are saved, and reused if on disk
+            fname = self.get_fname(imap, what=self.smoothed_field_what, smooth_Mpc=smooth_Mpc) if smooth_Mpc is not None else None
+            if fname is not None and (existing := self.check_maps(read=True, fname=fname)) is not None:
+                maps[imap] = existing
+                continue
+
             alm = self.compute_alms(imap, pol=False, lmax=lmax)
             if smooth_Mpc is not None:
-                maps[imap] = self._save_smoothed_field(imap, alm, smooth_Mpc, ipix, lmax)
-            else:
-                values = hp.alm2map(alm, nside=self.nside, lmax=lmax, pol=False)[ipix] + self.transform_mean(imap)
-                maps[imap] = hsp.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
-                maps[imap].update_values_pix(ipix, values.astype(self.dtype), nest=False)
+                self._smooth_alms(imap, alm, smooth_Mpc, lmax)
+            maps[imap] = self._alm2hspmap(alm, ipix, lmax, mean=self._alm_field_mean(imap))
+            if fname is not None:
+                self._save_map(maps[imap], fname)
 
         return maps[imaps] if np.isscalar(imaps) else maps
+
+    @abstractmethod
+    def _create_tracers(self) -> list:
+        """Create the tracers describing the maps.
+
+        Returns
+        -------
+        list of pollux.cosmo.Tracer
+            One tracer per map.
+        """
+
+    @cached_property
+    def tracers(self) -> list:
+        """Return (and lazily create) the tracers describing the maps.
+
+        Returns
+        -------
+        list of pollux.cosmo.Tracer
+            One tracer per map, from which CCL (:attr:`tracers_ccl`) and SACC
+            (:attr:`tracers_sacc`) tracers are derived.
+        """
+        return self._create_tracers()
+
+    @property
+    def tracers_ccl(self) -> list:
+        """Return the CCL tracers of the maps.
+
+        Returns
+        -------
+        list of pyccl.Tracer
+        """
+        return [t.ccl(self.cosmo) for t in self.tracers]
+
+    @cached_property
+    def tracers_sacc(self) -> list:
+        """Return the SACC tracers used to store measured spectra.
+
+        Returns
+        -------
+        list of sacc.tracers.BaseTracer
+        """
+        return [t.sacc() for t in self.tracers]
+
+    def matter_power_spectrum(self) -> pyccl.Pk2D | None:
+        """Return the matter power spectrum consistent with the maps, for predictions.
+
+        Returns
+        -------
+        pyccl.Pk2D or None
+            None (CCL's nonlinear matter power spectrum) by default; overridden
+            by builders whose maps follow another one (e.g.
+            :class:`~pollux.baryons.BaryonifiedShellBuilder`, or lensing builders
+            using their shell builder's).
+        """
+        return None
+
+    @cached_property
+    def theory(self) -> Theory:
+        """Return the theory predictor of the maps.
+
+        Returns
+        -------
+        pollux.cosmo.Theory
+            With the builder's cosmology and :meth:`matter_power_spectrum`.
+        """
+        return Theory(self.cosmo, p_of_k_a=self.matter_power_spectrum())
 
     @cached_property
     def b(self) -> nmt.NmtBin:
@@ -1224,7 +1219,7 @@ class MapBuilder(ABC):
             wsp.read_from(fname)
             logger.info("Found and loaded workspace at %s.", fname)
         else:
-            mask = self.transform_weights()
+            mask = self._alm_weights
             b = self.b
             dummy_f = nmt.NmtField(mask, [np.zeros_like(mask)], lite=True)
             wsp.compute_coupling_matrix(dummy_f, dummy_f, b)
@@ -1323,7 +1318,7 @@ class MapBuilder(ABC):
             for i, j in self.tqdm(pairs, desc="[compute_cls]"):
                 for k in (i, j):
                     if fields[k] is None:
-                        weights, _map = self.transform_map(k)
+                        weights, _map = self._alm_field(k)
                         fields[k] = nmt.NmtField(weights, [_map])
                 cl[i, j] = nmt.compute_full_master(fields[i], fields[j], b, workspace=wsp)[0]
 
@@ -1759,8 +1754,7 @@ class MapBuilder(ABC):
 
                 # Save map
                 fname = self.get_fname(imap)
-                hsmap.write(fname, clobber=True, format=self.save_format, nocompress=self.nocompress)
-                logger.debug("Saved to file %s.", fname)
+                self._save_map(hsmap, fname)
 
         else:
             # Generate full-sky Gaussian map
@@ -1774,8 +1768,7 @@ class MapBuilder(ABC):
 
                 # Save map
                 fname = self.get_fname(imap)
-                hsmap.write(fname, clobber=True, format=self.save_format, nocompress=self.nocompress)
-                logger.debug("Saved to file %s.", fname)
+                self._save_map(hsmap, fname)
 
 
 class MapSum:

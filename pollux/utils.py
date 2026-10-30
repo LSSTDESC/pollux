@@ -84,6 +84,125 @@ def powspace(start: float, stop: float, num: int, power: float) -> np.ndarray:
     return np.power(np.linspace(start, stop, num=num), 1.0 / power)
 
 
+def arange_endpoint(start: float, end: float, step: float) -> np.ndarray:
+    """Like :func:`numpy.arange`, but force the last element to equal ``end``.
+
+    Parameters
+    ----------
+    start, end, step : float
+        Same meaning as in :func:`numpy.arange`.
+
+    Returns
+    -------
+    ndarray
+        Array starting at ``start`` with steps of ``step``, whose last value is
+        set exactly to ``end``.
+
+    Notes
+    -----
+    This is useful when floating rounding could otherwise miss the endpoint.
+    """
+    out = np.arange(start, end, step)
+    out[-1] = end
+    return out
+
+
+def trim(a: np.ndarray, mindiff: float, return_indices: bool = False) -> np.ndarray | tuple[np.ndarray, list[int]]:
+    """Downsample a monotonically increasing array with a minimum spacing constraint.
+
+    The algorithm keeps elements such that adjacent kept values are separated by
+    at least ``mindiff`` whenever possible, while always keeping the first and
+    last elements.
+
+    Parameters
+    ----------
+    a : array_like
+        Monotonically increasing 1D array.
+    mindiff : float
+        Minimum desired spacing between retained points.
+    return_indices : bool, optional
+        If True, also return the indices of retained elements in the input array.
+
+    Returns
+    -------
+    trimmed : ndarray
+        Trimmed array.
+    indices : list of int, optional
+        Only if ``return_indices=True``.
+
+    Notes
+    -----
+    This is a greedy procedure; it does not guarantee a globally optimal subset
+    under all possible criteria, but is fast and deterministic.
+    """
+    x = [a[0]]
+    idx = [0]
+    for i in range(1, len(a) - 1):
+        if a[i + 1] - x[-1] > mindiff:
+            x.append(a[i])
+            idx.append(i)
+    x.append(a[i + 1])
+    idx.append(i + 1)
+    if return_indices:
+        return np.array(x), idx
+    else:
+        return np.array(x)
+
+
+def split_bins(x: np.ndarray, func: Callable | None = None, ifunc: Callable | None = None, zmax: float | None = None) -> np.ndarray:
+    """Compute bin edges from sample centers using a midpoint rule in transformed space.
+
+    Given an array of bin centers ``x`` (monotonic), this constructs edges such that
+    edges are midpoints between adjacent centers in the space defined by ``func``
+    (or equivalently via its inverse ``ifunc``):
+
+        edge[i] = ifunc( 0.5 * (func(x[i-1]) + func(x[i])) )
+
+    The last edge is extrapolated symmetrically, unless ``zmax`` is provided
+    to clamp it.
+
+    Parameters
+    ----------
+    x : array_like
+        Monotonically increasing bin centers.
+    func : callable or None, optional
+        Monotonic transform function. If None, it is inferred as the inverse of
+        ``ifunc``.
+    ifunc : callable or None, optional
+        Inverse transform. If None, inferred as the inverse of ``func``.
+    zmax : float or None, optional
+        If provided, use this value as the final/high edge.
+
+    Returns
+    -------
+    ndarray
+        Array of length ``len(x)+1`` containing bin edges.
+
+    Raises
+    ------
+    ValueError
+        If both ``func`` and ``ifunc`` are None.
+    """
+    if not (func or ifunc):
+        raise ValueError("func or ifunc must be given")
+
+    if func is None:
+        func = inversefunc(ifunc, domain=[0.0, None], image=[0.0, None])
+    if ifunc is None:
+        ifunc = inversefunc(func, domain=[0.0, None], image=[0.0, None])
+
+    n = len(x)
+    bins = np.zeros(n + 1)
+    bins[1:n] = ifunc(0.5 * (func(x[:-1]) + func(x[1:])))
+
+    if zmax is None:
+        bins[n] = ifunc(2 * func(x[-1]) - func(bins[n - 1]))
+    else:
+        bins[n] = zmax
+
+    return bins
+
+
 def radec2thetaphi(ra: np.ndarray, dec: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Convert (RA, Dec) in degrees to Healpix angles (theta, phi) in radians.
 
@@ -550,187 +669,6 @@ def make_nmtbin_powspaced(nside: int, lmin: int, lmax: int, n_ell_bins: int, pow
     return make_nmtbin(nside, lmin, lmax, n_ell_bins, bin_func=partial(powspace, power=power), f_ell=f_ell, **kwargs)
 
 
-def split_bins(x: np.ndarray, func: Callable | None = None, ifunc: Callable | None = None, zmax: float | None = None) -> np.ndarray:
-    """Compute bin edges from sample centers using a midpoint rule in transformed space.
-
-    Given an array of bin centers ``x`` (monotonic), this constructs edges such that
-    edges are midpoints between adjacent centers in the space defined by ``func``
-    (or equivalently via its inverse ``ifunc``):
-
-        edge[i] = ifunc( 0.5 * (func(x[i-1]) + func(x[i])) )
-
-    The last edge is extrapolated symmetrically, unless ``zmax`` is provided
-    to clamp it.
-
-    Parameters
-    ----------
-    x : array_like
-        Monotonically increasing bin centers.
-    func : callable or None, optional
-        Monotonic transform function. If None, it is inferred as the inverse of
-        ``ifunc``.
-    ifunc : callable or None, optional
-        Inverse transform. If None, inferred as the inverse of ``func``.
-    zmax : float or None, optional
-        If provided, use this value as the final/high edge.
-
-    Returns
-    -------
-    ndarray
-        Array of length ``len(x)+1`` containing bin edges.
-
-    Raises
-    ------
-    ValueError
-        If both ``func`` and ``ifunc`` are None.
-    """
-    if not (func or ifunc):
-        raise ValueError("func or ifunc must be given")
-
-    if func is None:
-        func = inversefunc(ifunc, domain=[0.0, None], image=[0.0, None])
-    if ifunc is None:
-        ifunc = inversefunc(func, domain=[0.0, None], image=[0.0, None])
-
-    n = len(x)
-    bins = np.zeros(n + 1)
-    bins[1:n] = ifunc(0.5 * (func(x[:-1]) + func(x[1:])))
-
-    if zmax is None:
-        bins[n] = ifunc(2 * func(x[-1]) - func(bins[n - 1]))
-    else:
-        bins[n] = zmax
-
-    return bins
-
-
-def read_params(fname: str) -> dict[str, str]:
-    """Read a HACC-style parameter file into a dict.
-
-    The expected format is one entry per line::
-
-        KEY value...
-
-    Comment lines starting with ``#`` and blank lines are ignored.
-
-    Parameters
-    ----------
-    fname : str
-        File path to the parameter file.
-
-    Returns
-    -------
-    dict
-        Mapping from parameter names to raw string values.
-
-    Notes
-    -----
-    Values are not parsed to numeric types here; callers are expected to cast
-    them to float/int as needed.
-    """
-    with open(fname, 'r') as f:
-        params = {}
-        for x in f:
-            if not (x.startswith('#') or x.startswith('\n')):
-                try:
-                    k, v = x.rstrip().split(' ', 1)
-                    params[k] = v
-                except ValueError:
-                    pass
-    return params
-
-
-def save_dict_fits_file(fname: str, cat: dict[str, np.ndarray]) -> None:
-    """Write a dictionary of 1D float arrays to a FITS binary table.
-
-    Parameters
-    ----------
-    fname : str
-        Output file path. Existing files are overwritten.
-    cat : dict
-        Dictionary mapping column name to 1D numpy array.
-
-    Notes
-    -----
-    Columns are written with FITS format='E' (32-bit float). If you need other
-    dtypes, extend this helper accordingly.
-    """
-    hdul = [fits.PrimaryHDU()]
-    header = fits.Header()
-
-    cols = []
-    for name, array in cat.items():
-        cols.append(fits.Column(name=name, format='E', array=array))
-    hdul.append(fits.BinTableHDU.from_columns(cols, header))
-
-    fits.HDUList(hdul).writeto(fname, overwrite=True)
-
-
-def trim(a: np.ndarray, mindiff: float, return_indices: bool = False) -> np.ndarray | tuple[np.ndarray, list[int]]:
-    """Downsample a monotonically increasing array with a minimum spacing constraint.
-
-    The algorithm keeps elements such that adjacent kept values are separated by
-    at least ``mindiff`` whenever possible, while always keeping the first and
-    last elements.
-
-    Parameters
-    ----------
-    a : array_like
-        Monotonically increasing 1D array.
-    mindiff : float
-        Minimum desired spacing between retained points.
-    return_indices : bool, optional
-        If True, also return the indices of retained elements in the input array.
-
-    Returns
-    -------
-    trimmed : ndarray
-        Trimmed array.
-    indices : list of int, optional
-        Only if ``return_indices=True``.
-
-    Notes
-    -----
-    This is a greedy procedure; it does not guarantee a globally optimal subset
-    under all possible criteria, but is fast and deterministic.
-    """
-    x = [a[0]]
-    idx = [0]
-    for i in range(1, len(a) - 1):
-        if a[i + 1] - x[-1] > mindiff:
-            x.append(a[i])
-            idx.append(i)
-    x.append(a[i + 1])
-    idx.append(i + 1)
-    if return_indices:
-        return np.array(x), idx
-    else:
-        return np.array(x)
-
-
-def arange_endpoint(start: float, end: float, step: float) -> np.ndarray:
-    """Like :func:`numpy.arange`, but force the last element to equal ``end``.
-
-    Parameters
-    ----------
-    start, end, step : float
-        Same meaning as in :func:`numpy.arange`.
-
-    Returns
-    -------
-    ndarray
-        Array starting at ``start`` with steps of ``step``, whose last value is
-        set exactly to ``end``.
-
-    Notes
-    -----
-    This is useful when floating rounding could otherwise miss the endpoint.
-    """
-    out = np.arange(start, end, step)
-    out[-1] = end
-    return out
-
-
 def trunc_norm(myclip_a: float, myclip_b: float, loc: float, scale: float) -> Any:
     """Construct a SciPy truncated normal distribution.
 
@@ -836,3 +774,65 @@ def sample_pdf(x: np.ndarray, pdf: np.ndarray, n: int, rng: np.random.Generator)
     cdf = np.insert(cdf, 0, 0.0)
     u = rng.uniform(size=n)
     return np.interp(u, cdf, x)
+
+
+def read_params(fname: str) -> dict[str, str]:
+    """Read a HACC-style parameter file into a dict.
+
+    The expected format is one entry per line::
+
+        KEY value...
+
+    Comment lines starting with ``#`` and blank lines are ignored.
+
+    Parameters
+    ----------
+    fname : str
+        File path to the parameter file.
+
+    Returns
+    -------
+    dict
+        Mapping from parameter names to raw string values.
+
+    Notes
+    -----
+    Values are not parsed to numeric types here; callers are expected to cast
+    them to float/int as needed.
+    """
+    with open(fname, 'r') as f:
+        params = {}
+        for x in f:
+            if not (x.startswith('#') or x.startswith('\n')):
+                try:
+                    k, v = x.rstrip().split(' ', 1)
+                    params[k] = v
+                except ValueError:
+                    pass
+    return params
+
+
+def save_dict_fits_file(fname: str, cat: dict[str, np.ndarray]) -> None:
+    """Write a dictionary of 1D float arrays to a FITS binary table.
+
+    Parameters
+    ----------
+    fname : str
+        Output file path. Existing files are overwritten.
+    cat : dict
+        Dictionary mapping column name to 1D numpy array.
+
+    Notes
+    -----
+    Columns are written with FITS format='E' (32-bit float). If you need other
+    dtypes, extend this helper accordingly.
+    """
+    hdul = [fits.PrimaryHDU()]
+    header = fits.Header()
+
+    cols = []
+    for name, array in cat.items():
+        cols.append(fits.Column(name=name, format='E', array=array))
+    hdul.append(fits.BinTableHDU.from_columns(cols, header))
+
+    fits.HDUList(hdul).writeto(fname, overwrite=True)

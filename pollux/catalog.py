@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import warnings
+from abc import ABC, abstractmethod
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, Iterable
 
@@ -25,7 +26,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class CatalogSourceGenerator:
+class CatalogSourceGenerator(ABC):
     """Generic generator for mock source-galaxy catalogs for lensing analyses.
 
     This class generates positions and redshifts for galaxies in each tomographic
@@ -82,6 +83,11 @@ class CatalogSourceGenerator:
     header_dict : dict
         FITS header keyword/value pairs stored in the output catalogs.
     """
+
+    # fields that can be interpolated at the galaxies
+    FIELDS = ('kappa', 'gamma1', 'gamma2', 'density', 't11', 't22', 't12')
+    # fields made together by the builders, which must share their smoothing
+    _SMOOTHED_TOGETHER = (('t11', 't22', 't12'), ('gamma1', 'gamma2'))
 
     def __init__(
         self,
@@ -161,6 +167,37 @@ class CatalogSourceGenerator:
         logger.info("  - Number of catalogs = %d.", self.ncats)
         logger.info("  - Catalogs saved to %s.", self._catalog_dir)
 
+    @classmethod
+    def smoothing_scales(cls, smooth_fields: tuple[str, ...], smooth_Mpc: float | dict[str, float] | None) -> dict[str, float | None]:
+        """Return the smoothing scale of every field (see ``smooth_fields`` and ``smooth_Mpc``).
+
+        Parameters
+        ----------
+        smooth_fields : tuple of str
+            Fields smoothed by a single scale ``smooth_Mpc``.
+        smooth_Mpc : float or dict or None
+            Smoothing scale, or scales per field.
+
+        Returns
+        -------
+        dict
+            Scale (Mpc) or None of each of ``FIELDS`` and ``'positions'``, e.g. to
+            schedule the smoothed maps needed by a catalog.
+        """
+        names = cls.FIELDS + ('positions',)
+        if isinstance(smooth_Mpc, dict):
+            scales = dict(smooth_Mpc)
+        else:
+            scales = {k: smooth_Mpc for k in smooth_fields} if smooth_Mpc else {}
+        unknown = set(scales) - set(names)
+        if unknown:
+            raise ValueError(f"Unknown fields {sorted(unknown)} for smoothing, must be among {names}")
+        scales = {k: scales.get(k) or None for k in names}
+        for group in cls._SMOOTHED_TOGETHER:
+            if len({scales[k] for k in group}) > 1:
+                raise ValueError(f"Fields {group} are made together and must share their smoothing scale")
+        return scales
+
     def generate(self, ikappas: int | Iterable[int] | None = None, ishell: int | None = None) -> None:
         """Generate mock catalogs and interpolate requested map quantities.
 
@@ -223,9 +260,10 @@ class CatalogSourceGenerator:
             fits.HDUList(hdul).writeto(fname, overwrite=True)
             logger.debug("Saved to file %s.", fname)
 
+    @abstractmethod
     def _generate_galaxies(
             self, catalog: dict[int, dict[str, np.ndarray]], ikappas: int | Iterable[int] | None = None, ishells: list[int] | None = None) -> None:
-        """Populate a catalog container with galaxy properties.
+        """Populate a catalog container with galaxy properties (redshifts and positions).
 
         Parameters
         ----------
@@ -235,13 +273,7 @@ class CatalogSourceGenerator:
             Tomographic-bin indices to generate.
         ishells : list of int or None, optional
             Shells whose galaxies are generated. If None, all shells.
-
-        Raises
-        ------
-        NotImplementedError
-            Must be implemented by subclasses.
         """
-        raise NotImplementedError
 
     def _generate_z(self, catalog: dict[int, dict[str, np.ndarray]], ikappa: int) -> None:
         """Draw redshifts from the tracer n(z) via inverse-CDF sampling.
@@ -309,43 +341,6 @@ class CatalogSourceGenerator:
                     map_low = self._load_interp_map(k, ishell - 1) if ishell > 0 and 'delta' not in k else None
                     map_high = self._load_interp_map(k, ishell)
                     self._interpolate_shell(catalog, k, ishell, map_low, map_high, ikappas=ikappas)
-
-    # fields that can be interpolated at the galaxies
-    FIELDS = ('kappa', 'gamma1', 'gamma2', 'density', 't11', 't22', 't12')
-
-    # fields made together by the builders, which must share their smoothing
-    _SMOOTHED_TOGETHER = (('t11', 't22', 't12'), ('gamma1', 'gamma2'))
-
-    @classmethod
-    def smoothing_scales(cls, smooth_fields: tuple[str, ...], smooth_Mpc: float | dict[str, float] | None) -> dict[str, float | None]:
-        """Return the smoothing scale of every field (see ``smooth_fields`` and ``smooth_Mpc``).
-
-        Parameters
-        ----------
-        smooth_fields : tuple of str
-            Fields smoothed by a single scale ``smooth_Mpc``.
-        smooth_Mpc : float or dict or None
-            Smoothing scale, or scales per field.
-
-        Returns
-        -------
-        dict
-            Scale (Mpc) or None of each of ``FIELDS`` and ``'positions'``, e.g. to
-            schedule the smoothed maps needed by a catalog.
-        """
-        names = cls.FIELDS + ('positions',)
-        if isinstance(smooth_Mpc, dict):
-            scales = dict(smooth_Mpc)
-        else:
-            scales = {k: smooth_Mpc for k in smooth_fields} if smooth_Mpc else {}
-        unknown = set(scales) - set(names)
-        if unknown:
-            raise ValueError(f"Unknown fields {sorted(unknown)} for smoothing, must be among {names}")
-        scales = {k: scales.get(k) or None for k in names}
-        for group in cls._SMOOTHED_TOGETHER:
-            if len({scales[k] for k in group}) > 1:
-                raise ValueError(f"Fields {group} are made together and must share their smoothing scale")
-        return scales
 
     def _density_map(self, ishell: int, smooth_Mpc: float | None) -> hsp.HealSparseMap:
         """Return the density contrast of one shell, smoothed by ``smooth_Mpc`` (Mpc) if not None.
@@ -2265,7 +2260,7 @@ def generate_radec_in_pix(nside: int, ipix: np.ndarray, rng: np.random.Generator
     return hp.pix2ang(nside_high, ipix_high, nest=True, lonlat=True)  # ra, dec
 
 
-class CatalogAugmentor:
+class CatalogAugmentor(ABC):
     """Base class for catalog augmentors that add fields to existing catalogs.
 
     Subclasses must implement the ``augment_catalog`` method and set
@@ -2273,6 +2268,7 @@ class CatalogAugmentor:
     in their ``__init__``.
     """
 
+    @abstractmethod
     def augment_catalog(self, cosmo: pyccl.Cosmology, catalog: dict[str, np.ndarray], **kwargs: Any) -> None:
         """Add the augmentor's columns to the catalog of one tomographic bin, in place.
 
@@ -2285,4 +2281,3 @@ class CatalogAugmentor:
         **kwargs
             Per-bin options (``augmentor_kwargs`` of the catalog generator, e.g. ``ikappa``).
         """
-        raise NotImplementedError

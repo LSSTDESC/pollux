@@ -117,29 +117,7 @@ class LensingBuilder(MapBuilder):
         super().__init__(
             nside=shell_builder.nside, dtype=dtype, save_dir=save_dir, base_fname=base_fname, nmaps=self.nkappas, sacc_type="galaxy_convergence_cl", **kwargs)
 
-    def _create_tracers(self) -> list[Tracer]:
-        """Create one lensing tracer per source redshift distribution (callables tabulated on 1000 redshifts).
-
-        Returns
-        -------
-        list of pollux.cosmo.Tracer
-            ``'shear'`` tracers named ``kappa_{i}`` (length ``self.nmaps``).
-        """
-        z_edges = self.shell_builder.shell_edges_redshift
-        tracers = []
-        for i, nz in enumerate(self.nzs):
-            if callable(nz):
-                zz = np.linspace(0, z_edges[-1], 1000)
-                tracers.append(Tracer(f"kappa_{i}", 'shear', z=zz, nz=nz(zz)))
-            else:
-                tracers.append(Tracer(f"kappa_{i}", 'shear', z=nz[0], nz=nz[1]))
-        return tracers
-
-    def matter_power_spectrum(self) -> pyccl.Pk2D | None:
-        """Return the matter power spectrum of the shell builder (see :meth:`MapBuilder.matter_power_spectrum`)."""
-        return self.shell_builder.matter_power_spectrum()
-
-    def _smoothing_sigma(self, ikappa: int, smooth_Mpc: float) -> float:
+    def _smooth_sigma(self, ikappa: int, smooth_Mpc: float) -> float:
         """Return the angular width (radians) of a comoving smoothing scale at the source plane of a per-shell convergence map."""
         if self.nzs != 'zsnapshots':
             raise ValueError(
@@ -162,7 +140,7 @@ class LensingBuilder(MapBuilder):
         smooth_Mpc : float or None, optional
             Comoving Gaussian smoothing scale in Mpc of the convergence a_lm before
             deriving shear (angular width at the source plane, see
-            :meth:`_smoothing_sigma`; only for per-shell maps, ``nzs='zsnapshots'``).
+            :meth:`_smooth_sigma`; only for per-shell maps, ``nzs='zsnapshots'``).
             Shear maps are saved with the suffix ``_{smooth_Mpc}Mpc``.
         lmax : int or None, optional
             Maximum multipole used in harmonic transforms. Defaults to
@@ -198,12 +176,14 @@ class LensingBuilder(MapBuilder):
                 gammas[ikappa] = [g1, g2]
                 continue
 
-            # Get harmonic coefficients of convergence map, smoothed in place if requested
+            # Get harmonic coefficients of convergence map, smoothed in place if requested (and the smoothed convergence saved)
             klm = self.compute_alms(ikappa, pol=False, lmax=lmax)
-            if save_field_map:
-                self._save_smoothed_field(ikappa, klm, smooth_Mpc, ipix, lmax)
-            elif smooth_Mpc is not None:
-                self._smooth_alms(klm, self._smoothing_sigma(ikappa, smooth_Mpc), ipix, lmax)
+            if smooth_Mpc is not None:
+                self._smooth_alms(ikappa, klm, smooth_Mpc, lmax)
+                if save_field_map:
+                    self._save_map(
+                        self._alm2hspmap(klm, ipix, lmax, mean=self._alm_field_mean(ikappa)),
+                        self.get_fname(ikappa, what=self.smoothed_field_what, smooth_Mpc=smooth_Mpc))
 
             # Convert to shear
             glm_E = hp.almxfl(klm, fl)
@@ -219,14 +199,34 @@ class LensingBuilder(MapBuilder):
 
             gamma1_fname = self.get_fname(ikappa, what='gamma1', smooth_Mpc=smooth_Mpc)
             gamma2_fname = self.get_fname(ikappa, what='gamma2', smooth_Mpc=smooth_Mpc)
-            gamma1.write(gamma1_fname, clobber=True, format=self.save_format, nocompress=self.nocompress)
-            gamma2.write(gamma2_fname, clobber=True, format=self.save_format, nocompress=self.nocompress)
-            logger.debug("Saved to file %s.", gamma1_fname)
-            logger.debug("Saved to file %s.", gamma2_fname)
+            self._save_map(gamma1, gamma1_fname)
+            self._save_map(gamma2, gamma2_fname)
 
             gammas[ikappa] = [gamma1, gamma2]
 
         return gammas[ikappas] if np.isscalar(ikappas) else gammas
+
+    def _create_tracers(self) -> list[Tracer]:
+        """Create one lensing tracer per source redshift distribution (callables tabulated on 1000 redshifts).
+
+        Returns
+        -------
+        list of pollux.cosmo.Tracer
+            ``'shear'`` tracers named ``kappa_{i}`` (length ``self.nmaps``).
+        """
+        z_edges = self.shell_builder.shell_edges_redshift
+        tracers = []
+        for i, nz in enumerate(self.nzs):
+            if callable(nz):
+                zz = np.linspace(0, z_edges[-1], 1000)
+                tracers.append(Tracer(f"kappa_{i}", 'shear', z=zz, nz=nz(zz)))
+            else:
+                tracers.append(Tracer(f"kappa_{i}", 'shear', z=nz[0], nz=nz[1]))
+        return tracers
+
+    def matter_power_spectrum(self) -> pyccl.Pk2D | None:
+        """Return the matter power spectrum of the shell builder (see :meth:`MapBuilder.matter_power_spectrum`)."""
+        return self.shell_builder.matter_power_spectrum()
 
     def _noise_cls(self, imap: int) -> float:
         """Return the (white) shape-noise power spectrum.
@@ -287,57 +287,6 @@ class BornLensingBuilder(LensingBuilder):
             self.dndz_norm = [quad(lambda z: t.ccl(self.cosmo).get_dndz(z), 0., zmax) if t.kind == 'shear' else np.nan for t in self.tracers]
             self.zlens = [self.shell_builder.mean_z(ishell) for ishell in range(self.nshells)]
 
-    def compute_weight(self, ishell: int, ikappa: int) -> float:
-        """Compute the shell weight contributing to a given convergence map.
-
-        Parameters
-        ----------
-        ishell : int
-            Shell index.
-        ikappa : int
-            Convergence map index.
-
-        Returns
-        -------
-        float
-            Scalar weight applied to the shell density/contrast when summing into
-            the convergence map.
-        """
-        tracer = self.tracers[ikappa]
-
-        if self.multiple_planes:
-            zmax = self.shell_builder.shell_edges_redshift[-1]
-            zlens = self.zlens[ishell]
-
-            if zlens is None:
-                zlens = self.shell_builder.mean_z(ishell)
-
-            d_A_lens = pyccl.angular_diameter_distance(self.cosmo, 1. / (1. + zlens))  # needed to obtain surface mass density in 1/Mpc^2
-
-            if tracer.kind == 'shear':
-
-                def integrand(zsource: float, zlens: float, tracer: pyccl.Tracer) -> float:
-                    # source n(z) over the critical surface density
-                    sigma_critical = pyccl.background.sigma_critical(self.cosmo, a_lens=1. / (1. + zlens), a_source=1. / (1. + zsource))  # in Msun / Mpc^2
-                    return tracer.get_dndz(zsource) / sigma_critical
-
-                w = quad(integrand, zlens, zmax, args=(zlens, tracer.ccl(self.cosmo))) / self.dndz_norm[ikappa]
-
-            elif tracer.kind == 'convergence':
-                zsource = tracer.z_source
-                if zsource > zlens:
-                    w = 1. / pyccl.background.sigma_critical(self.cosmo, 1. / (1. + zlens), 1. / (1. + zsource))  # in Msun / Mpc^2
-                else:
-                    w = 0.
-            else:
-                raise ValueError
-
-            return w * self.mpart_over_area / d_A_lens**2
-        else:
-            chi_min, chi_max = self.shell_builder.shell_edges_comoving_distance[ishell:ishell + 2]
-            tracer_ccl = tracer.ccl(self.cosmo)
-            return quad(lambda chi: tracer_ccl.get_kernel(chi), chi_min, chi_max)
-
     def construct_maps(self, ikappas: int | Iterable[int] | None = None) -> hsp.HealSparseMap | dict[int, hsp.HealSparseMap]:
         """Construct and save convergence maps by summing weighted shells.
 
@@ -392,10 +341,60 @@ class BornLensingBuilder(LensingBuilder):
         kappas = {ikappa: kappa_sum.to_map() for ikappa, kappa_sum in kappa_sums.items()}
         for ikappa, kappa in kappas.items():
             fname = self.get_fname(ikappa)
-            kappa.write(fname, clobber=True, format=self.save_format, nocompress=self.nocompress)
-            logger.debug("Saved to file %s.", fname)
+            self._save_map(kappa, fname)
 
         return kappas[ikappas] if np.isscalar(ikappas) else kappas
+
+    def compute_weight(self, ishell: int, ikappa: int) -> float:
+        """Compute the shell weight contributing to a given convergence map.
+
+        Parameters
+        ----------
+        ishell : int
+            Shell index.
+        ikappa : int
+            Convergence map index.
+
+        Returns
+        -------
+        float
+            Scalar weight applied to the shell density/contrast when summing into
+            the convergence map.
+        """
+        tracer = self.tracers[ikappa]
+
+        if self.multiple_planes:
+            zmax = self.shell_builder.shell_edges_redshift[-1]
+            zlens = self.zlens[ishell]
+
+            if zlens is None:
+                zlens = self.shell_builder.mean_z(ishell)
+
+            d_A_lens = pyccl.angular_diameter_distance(self.cosmo, 1. / (1. + zlens))  # needed to obtain surface mass density in 1/Mpc^2
+
+            if tracer.kind == 'shear':
+
+                def integrand(zsource: float, zlens: float, tracer: pyccl.Tracer) -> float:
+                    # source n(z) over the critical surface density
+                    sigma_critical = pyccl.background.sigma_critical(self.cosmo, a_lens=1. / (1. + zlens), a_source=1. / (1. + zsource))  # in Msun / Mpc^2
+                    return tracer.get_dndz(zsource) / sigma_critical
+
+                w = quad(integrand, zlens, zmax, args=(zlens, tracer.ccl(self.cosmo))) / self.dndz_norm[ikappa]
+
+            elif tracer.kind == 'convergence':
+                zsource = tracer.z_source
+                if zsource > zlens:
+                    w = 1. / pyccl.background.sigma_critical(self.cosmo, 1. / (1. + zlens), 1. / (1. + zsource))  # in Msun / Mpc^2
+                else:
+                    w = 0.
+            else:
+                raise ValueError
+
+            return w * self.mpart_over_area / d_A_lens**2
+        else:
+            chi_min, chi_max = self.shell_builder.shell_edges_comoving_distance[ishell:ishell + 2]
+            tracer_ccl = tracer.ccl(self.cosmo)
+            return quad(lambda chi: tracer_ccl.get_kernel(chi), chi_min, chi_max)
 
 
 class SnapshotBornLensingBuilder(BornLensingBuilder):

@@ -380,16 +380,16 @@ class CatalogSourceGenerator(ABC):
         smooth_Mpc = self.smoothing[k]
         # Fields that live in the shell builder (density/tidal), vs the snapshot lensing builder
         if k == 'density':
-            hsmap = self._density_map(ishell, smooth_Mpc)
+            hspmap = self._density_map(ishell, smooth_Mpc)
         elif k in ('t11', 't22', 't12'):
-            hsmap = self.lensing.shell_builder.load_maps(ishell, what=k, smooth_Mpc=smooth_Mpc)
+            hspmap = self.lensing.shell_builder.load_maps(ishell, what=k, smooth_Mpc=smooth_Mpc)
         else:
             # kappa, gamma1, gamma2: live in the snapshot lensing builder.
             # kappa is the default product (what=None); gamma* use what=k.
             what = None if k == 'kappa' else k
-            hsmap = self.snap_lensing.load_maps(ishell, what=what, smooth_Mpc=smooth_Mpc)
+            hspmap = self.snap_lensing.load_maps(ishell, what=what, smooth_Mpc=smooth_Mpc)
 
-        return hsmap
+        return hspmap
 
     def _interpolate_shell(
             self,
@@ -1988,6 +1988,32 @@ class CatalogSourceClustered(CatalogSourceGenerator):
         for i, b in enumerate(self.bias):
             self.header_dict[f'BIAS_{i}'] = b
 
+    def _density_weight(self, density: np.ndarray, ikappa: int, ishell: int) -> np.ndarray:
+        """Return the relative galaxy density ``1 + b * delta`` per pixel, clipped at zero.
+
+        With ``b > 1`` the linear bias model is negative in underdense pixels, where no
+        galaxies can be placed; a warning gives the fraction of such pixels.
+
+        Parameters
+        ----------
+        density : ndarray
+            Density contrast per pixel.
+        ikappa : int
+            Tomographic-bin index, setting the bias.
+        ishell : int
+            Shell index, for the warning.
+
+        Returns
+        -------
+        ndarray
+            Non-negative weights, same shape as ``density``.
+        """
+        weight = 1. + self.bias[ikappa] * density
+        fraction = np.mean(weight < 0.)
+        if fraction > 0.:
+            warnings.warn(f"1 + b * delta < 0 in {100. * fraction:.3g}% of the pixels (bin {ikappa}, shell {ishell}, b = {self.bias[ikappa]:g}): clipped to 0.")
+        return np.clip(weight, 0., None)
+
 
 class CatalogSourceClusteredMultinomial(CatalogSourceClustered):
     """Generate clustered source galaxies using multinomial sampling.
@@ -2065,7 +2091,7 @@ class CatalogSourceClusteredMultinomial(CatalogSourceClustered):
             if np.any(w):
                 # Multinomial sampling of number of galaxies per pixels
                 n = np.sum(w)
-                p = np.clip(1. + self.bias[ikappa] * density_masked, 0., None)
+                p = self._density_weight(density_masked, ikappa, ishell)
                 p /= np.sum(p)
 
                 ipix = rng.choice(ipix_mask, size=n, replace=True, p=p)
@@ -2183,7 +2209,7 @@ class CatalogSourceClusteredPoisson(CatalogSourceClustered):
                 continue
 
             # Poisson sampling
-            p = np.clip(1. + self.bias[ikappa] * density_masked, 0., None)
+            p = self._density_weight(density_masked, ikappa, ishell)
             lam = p * self.nbar_per_pix_per_bin[ikappa][ishell]
             n_per_pix = rng.poisson(lam=lam)
             ipix = np.repeat(ipix_mask, n_per_pix)

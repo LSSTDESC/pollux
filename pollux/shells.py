@@ -164,6 +164,9 @@ class ShellBuilder(MapBuilder):
         super().__init__(
             nside=nside, dtype=dtype, save_dir=save_dir, base_fname=base_fname, nmaps=self.nshells, sacc_type="galaxy_density_cl", mask=mask, **kwargs)
 
+        # Healpix geometry passed to the pixelization kernels: nside, order, ncap, npix (see _loc2pix)
+        self._healpix_geometry = (nside, hp.nside2order(nside), (nside * nside - nside) << 1, self.npix)
+
         # Particle subsampling
         if not (subsample_box is None or isinstance(subsample_box, (dict, numbers.Real))):
             raise TypeError(f"subsample_box must be None, a float or a dict, not {subsample_box!r}")
@@ -887,18 +890,13 @@ class ShellBuilder(MapBuilder):
         The footprint mask is applied here, on non-empty pixels only, which is
         equivalent to (and cheaper than) filtering every particle hit.
         """
-        shell = hsp.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
         uipix = np.flatnonzero(count)
         # drop out-of-footprint pixels (equivalent to filtering every particle)
-        if self.footprint is not None and len(uipix) > 0:
+        if self.footprint is not None:
             uipix = uipix[self.get_mask(nest=False, padded=True)[uipix]]
-        if len(uipix) > 0:
-            c = count[uipix]
-            shell.update_values_pix(hp.ring2nest(self.nside, uipix), c.astype(self.dtype), nest=True)
-            logger.debug("Found %d particles in the shell.", int(c.sum(dtype=np.int64)))
-        else:
-            logger.debug("Found no particle in the shell.")
-        return shell
+        c = count[uipix]
+        logger.debug("Found %d particles in the shell.", int(c.sum(dtype=np.int64)))
+        return self._make_hspmap(hp.ring2nest(self.nside, uipix), c, nest=True)
 
     def field_hspmap(self, ishell: int) -> hsp.HealSparseMap:
         """Return the density contrast of one shell as a HealSparse map.
@@ -917,8 +915,8 @@ class ShellBuilder(MapBuilder):
         """
         shell = self.load_maps(ishell)
         _, ipix = self.get_mask(nest=True, return_ipix=True, padded=True)
-        density = hsp.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
-        density.update_values_pix(ipix, np.full(len(ipix), -1., dtype=self.dtype), nest=True)
+        # -1 (no particle) on the padded footprint, then the density contrast where there are particles
+        density = self._make_hspmap(ipix, np.full(len(ipix), -1.), nest=True)
         spix = shell.valid_pixels
         density.update_values_pix(spix, (shell[spix] / self.pixel_density(ishell) - 1.).astype(self.dtype), nest=True)
         return density
@@ -984,10 +982,10 @@ class ShellBuilder(MapBuilder):
             if smooth_Mpc is not None:
                 # smoothed density, from the a_lm smoothed in place (reused for the tidal field below)
                 self._smooth_alms(ishell, alm, smooth_Mpc, lmax)
-                density_hsp = self._alm2hspmap(alm, ipix, lmax, mean=self._alm_field_mean(ishell))
+                density_hspmap = self._alm2hspmap(alm, ipix, lmax, mean=self._alm_field_mean(ishell))
                 if save_field_map:
-                    self._save_map(density_hsp, self.get_fname(ishell, what=self.smoothed_field_what, smooth_Mpc=smooth_Mpc))
-                density = density_hsp.get_values_pix(ipix, nest=False)
+                    self._save_map(density_hspmap, self.get_fname(ishell, what=self.smoothed_field_what, smooth_Mpc=smooth_Mpc))
+                density = density_hspmap.get_values_pix(ipix, nest=False)
             else:
                 density = self.field_map(ishell, nest=False)[ipix]
 
@@ -1010,11 +1008,10 @@ class ShellBuilder(MapBuilder):
 
             ts[ishell] = []
             for what, val in zip(whats, vals, strict=True):
-                hsmap = hsp.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
-                hsmap.update_values_pix(ipix, val.astype(self.dtype), nest=False)
+                hspmap = self._make_hspmap(ipix, val)
                 tensor_fname = self.get_fname(ishell, what=what, smooth_Mpc=smooth_Mpc)
-                self._save_map(hsmap, tensor_fname)
-                ts[ishell].append(hsmap)
+                self._save_map(hspmap, tensor_fname)
+                ts[ishell].append(hspmap)
 
         return ts[ishells] if np.isscalar(ishells) else ts
 
@@ -1144,13 +1141,6 @@ class SnapshotShellBuilder(ShellBuilder):
         # precompute valid replicas (reads only box edges) before loading particles
         valid_replicas = np.array(self._valid_replicas_sub(ishell, isub), dtype=np.int64).reshape(-1, 3)
 
-        # initialize shell
-        shell = hsp.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
-        nside = self.nside
-        order = hp.nside2order(nside)
-        ncap = (nside * nside - nside) << 1
-        npix = self.npix
-
         if len(valid_replicas) > 0:
             # read box
             xyz, _ = self.reader.read_sub(ishell, isub)
@@ -1168,8 +1158,8 @@ class SnapshotShellBuilder(ShellBuilder):
             elif not self.apply_replicate_rotflip:
                 xyz_work = xyz
 
-            count = np.zeros(npix, dtype=np.int32)  # per-pixel counts: int32 is enough
-            ipix = np.empty(len(xyz), dtype=np.int32 if npix < 2**31 else np.int64)  # reused for all replicas
+            count = np.zeros(self.npix, dtype=np.int32)  # per-pixel counts: int32 is enough
+            ipix = np.empty(len(xyz), dtype=np.int32 if self.npix < 2**31 else np.int64)  # reused for all replicas
             buf = np.empty_like(ipix)  # buffer for scatter-add operation
             for ix, iy, iz in valid_replicas:
                 shift_orig = np.expand_dims(np.array([ix, iy, iz]) * boxsize, 0).astype(dtype)
@@ -1179,7 +1169,7 @@ class SnapshotShellBuilder(ShellBuilder):
 
                 # bin particles into healpix pixels
                 _vec2pix(
-                    ipix, nside, order, ncap, npix, xyz_work[:, 0], xyz_work[:, 1], xyz_work[:, 2], shift[0, 0], shift[0, 1], shift[0, 2], rmin2, rmax2,
+                    ipix, *self._healpix_geometry, xyz_work[:, 0], xyz_work[:, 1], xyz_work[:, 2], shift[0, 0], shift[0, 1], shift[0, 2], rmin2, rmax2,
                     self.octant_only)
 
                 # scatter-add (out-of-shell particles have ipix = -1 and are skipped)
@@ -1189,6 +1179,7 @@ class SnapshotShellBuilder(ShellBuilder):
             del count, ipix, buf
         else:
             logger.debug("No valid replica — skipping particle load.")
+            shell = self._make_hspmap()
 
         self._save_map(shell, fname)
 
@@ -1557,13 +1548,6 @@ class LightconeSlicingBuilder(ShellBuilder):
                 "shell radial distance range [%.3f, %.3f] Mpc, %d particles in box.", ishell, zmin, zmax, np.sqrt(rmin2_xyz), np.sqrt(rmax2_xyz),
                 np.sqrt(rmin2), np.sqrt(rmax2), len(xyz))
 
-        # initialize shell
-        shell = hsp.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
-        nside = self.nside
-        order = hp.nside2order(nside)
-        ncap = (nside * nside - nside) << 1
-        npix = self.npix
-
         # lightcone-slicing builder stacks particles from multiple snapshots without replication
         A, b = self.Abs[ishell]
         dtype = xyz.dtype
@@ -1572,13 +1556,13 @@ class LightconeSlicingBuilder(ShellBuilder):
         shift = _Ax(A, shift_orig) if self.apply_grid_isometry else shift_orig
 
         # bin particles into healpix pixels
-        ipix = np.empty(len(xyz), dtype=np.int32 if npix < 2**31 else np.int64)
+        ipix = np.empty(len(xyz), dtype=np.int32 if self.npix < 2**31 else np.int64)
         buf = np.empty_like(ipix)
         _vec2pix(
-            ipix, nside, order, ncap, npix, xyz_work[:, 0], xyz_work[:, 1], xyz_work[:, 2], shift[0, 0], shift[0, 1], shift[0, 2], rmin2, rmax2,
+            ipix, *self._healpix_geometry, xyz_work[:, 0], xyz_work[:, 1], xyz_work[:, 2], shift[0, 0], shift[0, 1], shift[0, 2], rmin2, rmax2,
             self.octant_only)
 
-        count = np.zeros(npix, dtype=np.int32)  # per-pixel counts: int32 is enough
+        count = np.zeros(self.npix, dtype=np.int32)  # per-pixel counts: int32 is enough
         # scatter-add (out-of-shell particles have ipix = -1 and are skipped)
         _count_pix(count, ipix, buf)
         shell = self._count_to_shell(count)
@@ -1672,7 +1656,7 @@ class SnapshotInterpBuilder(ShellBuilder):
         if do_orphan_ishell is None:
             valid_replicas = np.array(self._valid_replicas_sub(ishell, isub), dtype=np.int64).reshape(-1, 3)
             if len(valid_replicas) == 0:
-                shell = hsp.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
+                shell = self._make_hspmap()
                 self._save_map(shell, fname)
                 return shell
 
@@ -1732,13 +1716,6 @@ class SnapshotInterpBuilder(ShellBuilder):
         # particle sub-sampling
         xyz_i, xyz_f = self._subsample(ishell, xyz_i, xyz_f)
 
-        # initialize shell
-        shell = hsp.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
-        nside = self.nside
-        order = hp.nside2order(nside)
-        ncap = (nside * nside - nside) << 1
-        npix = self.npix
-
         # for the orphan case box_edges_original spans all subs and is only known after loading
         if do_orphan_ishell is not None:
             valid_replicas = np.array(self._valid_replicas_box(ishell, box_edges_original), dtype=np.int64).reshape(-1, 3)
@@ -1753,8 +1730,8 @@ class SnapshotInterpBuilder(ShellBuilder):
             xyz_i_work = xyz_i
             xyz_f_work = xyz_f
 
-        count = np.zeros(npix, dtype=np.int32)  # per-pixel counts: int32 is enough
-        ipix = np.empty(len(xyz_i), dtype=np.int32 if npix < 2**31 else np.int64)  # reused for all replicas
+        count = np.zeros(self.npix, dtype=np.int32)  # per-pixel counts: int32 is enough
+        ipix = np.empty(len(xyz_i), dtype=np.int32 if self.npix < 2**31 else np.int64)  # reused for all replicas
         buf = np.empty_like(ipix)
         for ix, iy, iz in valid_replicas:
             shift_orig = np.expand_dims(np.array([ix, iy, iz]) * boxsize, 0).astype(dtype)
@@ -1765,7 +1742,7 @@ class SnapshotInterpBuilder(ShellBuilder):
 
             # bin particles into healpix pixels
             _worldline2pix(
-                ipix, nside, order, ncap, npix, a_lc, chi2_lc, xyz_i_work[:, 0], xyz_i_work[:, 1], xyz_i_work[:, 2], xyz_f_work[:, 0], xyz_f_work[:, 1],
+                ipix, *self._healpix_geometry, a_lc, chi2_lc, xyz_i_work[:, 0], xyz_i_work[:, 1], xyz_i_work[:, 2], xyz_f_work[:, 0], xyz_f_work[:, 1],
                 xyz_f_work[:, 2], shift[0, 0], shift[0, 1], shift[0, 2], rmin2, rmax2, self.octant_only)
 
             # scatter-add (out-of-shell particles have ipix = -1 and are skipped)

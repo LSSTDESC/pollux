@@ -460,21 +460,45 @@ class MapBuilder(ABC):
                     raise FileNotFoundError(f"Map not found at {fname}.")
                 logger.info("Skipping missing map at %s.", fname)
                 continue
-            hsmap = hsp.HealSparseMap.read(fname, nside_coverage=self.nside_c)
+            hspmap = hsp.HealSparseMap.read(fname, nside_coverage=self.nside_c)
             logger.debug("Found and loaded map at %s.", fname)
-            yield index, hsmap
+            yield index, hspmap
 
-    def _save_map(self, hsmap: hsp.HealSparseMap, fname: str) -> None:
+    def _make_hspmap(self, ipix: np.ndarray | None = None, values: np.ndarray | None = None, nest: bool = False, dtype: Any = None) -> hsp.HealSparseMap:
+        """Return a HealSparse map at the builder's resolution, empty or with values on given pixels.
+
+        Parameters
+        ----------
+        ipix : ndarray of int or None, optional
+            Pixels of the values (e.g. the padded footprint). If None, the map is empty.
+        values : ndarray or None, optional
+            Values on ``ipix`` (not a full-sky map), cast to ``dtype``.
+        nest : bool, optional
+            Ordering of ``ipix``. Default is False (RING).
+        dtype : data-type or None, optional
+            Data type of the map. Default is the builder's ``dtype``.
+
+        Returns
+        -------
+        hsp.HealSparseMap
+        """
+        dtype = self.dtype if dtype is None else dtype
+        hspmap = hsp.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=dtype)
+        if ipix is not None:
+            hspmap.update_values_pix(ipix, np.asarray(values).astype(dtype), nest=nest)
+        return hspmap
+
+    def _save_map(self, hspmap: hsp.HealSparseMap, fname: str) -> None:
         """Save a HealSparse map with the builder's format and compression.
 
         Parameters
         ----------
-        hsmap : hsp.HealSparseMap
+        hspmap : hsp.HealSparseMap
             Map to save.
         fname : str
             Output path (typically from :meth:`get_fname`).
         """
-        hsmap.write(fname, clobber=True, format=self.save_format, nocompress=self.nocompress)
+        hspmap.write(fname, clobber=True, format=self.save_format, nocompress=self.nocompress)
         logger.debug("Saved to file %s.", fname)
 
     def plot_maps(
@@ -757,11 +781,10 @@ class MapBuilder(ABC):
             if os.path.exists(fname) or (what == 'alm_weights' and self.apotype is None):
                 continue
             values = np.ones(len(ipix), dtype=bool) if what == 'padded_mask' else self._alm_weights[hp.nest2ring(self.nside, ipix)]
-            hsmap = hsp.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=values.dtype)
-            hsmap.update_values_pix(ipix, values, nest=True)
+            hspmap = self._make_hspmap(ipix, values, nest=True, dtype=values.dtype)
             # via a temporary file, so readers never see a partial file
             tmp = fname[:-len('.fits')] + '.tmp.fits'
-            hsmap.write(tmp, clobber=True, nocompress=self.nocompress)
+            hspmap.write(tmp, clobber=True, nocompress=self.nocompress)
             os.replace(tmp, fname)
             logger.info("Saved to file %s.", fname)
 
@@ -872,10 +895,10 @@ class MapBuilder(ABC):
         elif self.padding_deg is None or self.apotype is None:
             weights = self.get_mask(nest=False, padded=True).astype(np.float64)
         elif os.path.exists(fname):
-            hsmap = hsp.HealSparseMap.read(fname)
-            ipix = hsmap.valid_pixels
+            hspmap = hsp.HealSparseMap.read(fname)
+            ipix = hspmap.valid_pixels
             weights = np.zeros(self.npix)
-            weights[hp.nest2ring(self.nside, ipix)] = hsmap[ipix]
+            weights[hp.nest2ring(self.nside, ipix)] = hspmap[ipix]
             logger.debug("Found and loaded alm weights at %s.", fname)
         else:
             padded_lowres = (
@@ -1057,9 +1080,8 @@ class MapBuilder(ABC):
         hsp.HealSparseMap
         """
         values = hp.alm2map(alm, self.nside, lmax=lmax, pol=False)[ipix] + mean
-        hsmap = hsp.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
-        hsmap.update_values_pix(ipix, values.astype(self.dtype), nest=False)
-        return hsmap
+        hspmap = self._make_hspmap(ipix, values)
+        return hspmap
 
     def compute_maps_from_alms(self,
                                imaps: int | Iterable[int] | None = None,
@@ -1734,15 +1756,15 @@ class MapBuilder(ABC):
 
         Notes
         -----
-        Maps are generated full-sky and then restricted to the analysis mask
-        pixels before writing as HealSparse maps.
+        Maps are generated full-sky and then restricted to the padded footprint
+        (like the maps they stand for) before writing as HealSparse maps.
         """
         imaps = list(self.iter(imaps))
 
         # Compute theory Cl's
         _, cls = self.predict_cls(binning='unbinned', auto_only=auto_only, ell=np.arange(3 * self.nside))
 
-        _, ipix = self.get_mask(nest=False, return_ipix=True)
+        _, ipix = self.get_mask(nest=False, return_ipix=True, padded=True)
 
         if auto_only:
             for imap in self.tqdm(imaps, desc="[generate_gaussian_maps]"):
@@ -1750,12 +1772,11 @@ class MapBuilder(ABC):
                 out = nmt.utils.synfast_spherical(self.nside, [cls[imap, imap]], spin_arr=[0], seed=seed)[0]
 
                 # Store in HealSparse map
-                hsmap = hsp.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
-                hsmap.update_values_pix(ipix, out[ipix].astype(self.dtype), nest=False)
+                hspmap = self._make_hspmap(ipix, out[ipix])
 
                 # Save map
                 fname = self.get_fname(imap)
-                self._save_map(hsmap, fname)
+                self._save_map(hspmap, fname)
 
         else:
             # Generate full-sky Gaussian map
@@ -1764,12 +1785,11 @@ class MapBuilder(ABC):
 
             for imap, out in zip(imaps, outs, strict=True):
                 # Store in HealSparse map
-                hsmap = hsp.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
-                hsmap.update_values_pix(ipix, out[ipix].astype(self.dtype), nest=False)
+                hspmap = self._make_hspmap(ipix, out[ipix])
 
                 # Save map
                 fname = self.get_fname(imap)
-                self._save_map(hsmap, fname)
+                self._save_map(hspmap, fname)
 
 
 class MapSum:
@@ -1806,22 +1826,22 @@ class MapSum:
         self.sparse = np.full((len(cov_pix) + 1) * self.nfine, self.sentinel, dtype=dtype)
         self.sparse[self.nfine:].reshape(-1, self.nfine)[mask_blocks[cov_pix]] = 0
 
-    def add(self, hsmap: hsp.HealSparseMap, scale: float = 1., offset: float = 0.) -> None:
-        """Add ``scale * hsmap + offset`` on the valid pixels of ``hsmap``.
+    def add(self, hspmap: hsp.HealSparseMap, scale: float = 1., offset: float = 0.) -> None:
+        """Add ``scale * hspmap + offset`` on the valid pixels of ``hspmap``.
 
         Parameters
         ----------
-        hsmap : hsp.HealSparseMap
+        hspmap : hsp.HealSparseMap
             Map to add, with the same ``nside_sparse`` and ``nside_coverage`` and
             valid pixels inside the footprint.
         scale : float, optional
             Factor applied to the map values.
         offset : float, optional
-            Constant added on each valid pixel of ``hsmap``.
+            Constant added on each valid pixel of ``hspmap``.
         """
-        src_cov = np.flatnonzero(hsmap.coverage_mask)
+        src_cov = np.flatnonzero(hspmap.coverage_mask)
         src_cov = src_cov[self.cov.coverage_mask[src_cov]]  # inputs lie in the footprint, so this drops nothing
-        _add_blocks(self.sparse, self.cov_index, hsmap._sparse_map, hsmap._cov_map[:], src_cov, self.nfine, hsmap._sentinel, scale, offset)
+        _add_blocks(self.sparse, self.cov_index, hspmap._sparse_map, hspmap._cov_map[:], src_cov, self.nfine, hspmap._sentinel, scale, offset)
 
     def to_map(self) -> hsp.HealSparseMap:
         """Return the sum as a HealSparse map (sharing memory with this accumulator).

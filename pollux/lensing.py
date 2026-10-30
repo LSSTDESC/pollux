@@ -191,11 +191,8 @@ class LensingBuilder(MapBuilder):
             # Generate shear map (ring-ordered)
             g1, g2 = hp.sphtfunc.alm2map_spin([glm_E, np.zeros_like(glm_E)], nside=self.nside, spin=2, lmax=lmax)
 
-            gamma1 = hsp.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
-            gamma2 = hsp.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
-
-            gamma1.update_values_pix(ipix, g1[ipix].astype(self.dtype), nest=False)
-            gamma2.update_values_pix(ipix, g2[ipix].astype(self.dtype), nest=False)
+            gamma1 = self._make_hspmap(ipix, g1[ipix])
+            gamma2 = self._make_hspmap(ipix, g2[ipix])
 
             gamma1_fname = self.get_fname(ikappa, what='gamma1', smooth_Mpc=smooth_Mpc)
             gamma2_fname = self.get_fname(ikappa, what='gamma2', smooth_Mpc=smooth_Mpc)

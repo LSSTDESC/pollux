@@ -179,8 +179,7 @@ class BaryonifiedShellBuilder(ShellBuilder):
                 baryonified_count = count
 
             # Save the baryonified map
-            shell = hsp.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
-            shell.update_values_pix(ipix, baryonified_count[ipix].astype(self.dtype), nest=False)
+            shell = self._make_hspmap(ipix, baryonified_count[ipix])
             self._save_map(shell, fname)
 
             shells[ishell] = shell

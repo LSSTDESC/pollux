@@ -1530,10 +1530,11 @@ class MapBuilder(ABC):
         -------
         dict
             ``theta_box`` (arcmin) and ``ell_box``, and ``theta_smooth``, ``ell_smooth``
-            with ``smooth_Mpc``, one value per map (at the mean redshift of its tracer).
+            with ``smooth_Mpc``, one value per map, at the redshift where its signal comes
+            from (:meth:`pollux.cosmo.Tracer.mean_z_kernel`, e.g. the lenses for lensing maps).
         """
-        mean_z = np.array([t.mean_z() for t in self.tracers])
-        d_a = pyccl.comoving_angular_distance(self.cosmo, 1. / (1. + mean_z))
+        z_kernel = np.array([t.mean_z_kernel(self.cosmo) for t in self.tracers])
+        d_a = pyccl.comoving_angular_distance(self.cosmo, 1. / (1. + z_kernel))
         rad2arcmin = 180. * 60. / np.pi
         ell_box = 2. * np.pi / self.reader.boxsize * d_a
         scales = dict(theta_box=rad2arcmin * np.pi / ell_box, ell_box=ell_box)

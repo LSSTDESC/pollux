@@ -289,7 +289,7 @@ class ShellBuilder(MapBuilder):
         else:
             raise ValueError
 
-    def mean_z(self, ishell: int) -> float:
+    def mean_z_volume(self, ishell: int) -> float:
         """Compute the volume-weighted mean redshift of a shell.
 
         Parameters
@@ -687,7 +687,7 @@ class ShellBuilder(MapBuilder):
                 if 'densitymax_z' in self.subsample_box.keys():
                     snr_pix = 1. / np.sqrt(ngal_pix)  # S/N per pixel
                     # S/N at redshift subsample_box_auto_z
-                    snr_pix_cut = np.interp(self.subsample_box['densitymax_z'], [self.mean_z(ishell) for ishell in range(self.nshells)], snr_pix)
+                    snr_pix_cut = np.interp(self.subsample_box['densitymax_z'], [self.mean_z_volume(ishell) for ishell in range(self.nshells)], snr_pix)
                     # fraction of particles to maintain S/N of z>subsample_box_auto_z
                     self.subsample_ratios = np.minimum(1., (snr_pix / snr_pix_cut)**2)
                 elif 'clmax_r' in self.subsample_box.keys():

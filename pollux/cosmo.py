@@ -144,11 +144,39 @@ class Tracer:
             return sacc.tracers.MiscTracer(self.name)
         return sacc.tracers.NZTracer(self.name, self.z, self.nz)
 
-    def mean_z(self) -> float:
-        """Mean redshift of the field (the source redshift for ``'convergence'``)."""
+    def mean_z_nz(self) -> float:
+        """Mean redshift of the n(z) of the field (the source redshift for ``'convergence'``).
+
+        For lensing fields this is the redshift of the sources, not of the structures
+        they probe: see :meth:`mean_z_kernel`.
+        """
         if self.kind == 'convergence':
             return self.z_source
         return np.trapz(self.nz * self.z, self.z) / np.trapz(self.nz, self.z)
+
+    def mean_z_kernel(self, cosmo: pyccl.Cosmology, nchi: int = 1000) -> float:
+        """Mean redshift weighted by the radial kernel of the field, i.e. where its signal comes from.
+
+        Equal to :meth:`mean_z_nz` for density fields (whose kernel is their n(z)); for
+        lensing fields, the mean redshift of the lensing efficiency, between the
+        observer and the sources.
+
+        Parameters
+        ----------
+        cosmo : pyccl.Cosmology
+            Cosmology.
+        nchi : int, optional
+            Number of comoving distances sampled up to the farthest source. Default is 1000.
+
+        Returns
+        -------
+        float
+        """
+        zmax = self.z_source if self.kind == 'convergence' else np.max(self.z)
+        chi = np.linspace(0., pyccl.comoving_radial_distance(cosmo, 1. / (1. + zmax)), nchi + 1)[1:]
+        kernel = np.sum(self.ccl(cosmo).get_kernel(chi), axis=0)
+        z = 1. / pyccl.scale_factor_of_chi(cosmo, chi) - 1.
+        return np.trapz(z * kernel, chi) / np.trapz(kernel, chi)
 
     def __getstate__(self) -> dict:
         """Return the state for pickling, without the cached CCL tracer (rebuilt on demand)."""

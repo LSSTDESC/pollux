@@ -285,7 +285,7 @@ class BornLensingBuilder(LensingBuilder):
 
             zmax = self.shell_builder.shell_edges_redshift[-1]
             self.dndz_norm = [quad(lambda z: t.ccl(self.cosmo).get_dndz(z), 0., zmax) if t.kind == 'shear' else np.nan for t in self.tracers]
-            self.zlens = [self.shell_builder.mean_z(ishell) for ishell in range(self.nshells)]
+            self.zlens = [self.shell_builder.mean_z_volume(ishell) for ishell in range(self.nshells)]
 
     def construct_maps(self, ikappas: int | Iterable[int] | None = None) -> hsp.HealSparseMap | dict[int, hsp.HealSparseMap]:
         """Construct and save convergence maps by summing weighted shells.
@@ -368,7 +368,7 @@ class BornLensingBuilder(LensingBuilder):
             zlens = self.zlens[ishell]
 
             if zlens is None:
-                zlens = self.shell_builder.mean_z(ishell)
+                zlens = self.shell_builder.mean_z_volume(ishell)
 
             d_A_lens = pyccl.angular_diameter_distance(self.cosmo, 1. / (1. + zlens))  # needed to obtain surface mass density in 1/Mpc^2
 

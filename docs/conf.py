@@ -30,6 +30,7 @@ napoleon_google_docstring = False
 napoleon_numpy_docstring = True
 napoleon_include_private_members = False
 napoleon_include_special_members = False
+napoleon_use_ivar = True
 
 # Autodoc settings
 autodoc_member_order = 'bysource'
@@ -42,6 +43,8 @@ autosummary_generate_overwrite = False
 # Mock imports for heavy dependencies
 autodoc_mock_imports = [
     'astropy',
+    'BaryonForge',
+    'fitsio',
     'healpy',
     'healsparse',
     'matplotlib',
@@ -52,10 +55,12 @@ autodoc_mock_imports = [
     'pygio',
     'pymaster',
     'pynverse',
-    'pymaster',
     'sacc',
     'scipy',
+    'skyproj',
     'tqdm',
+    'treecorr',
+    'yaml',
 ]
 
 # Intersphinx mapping for external libraries

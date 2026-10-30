@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import copy
 import logging
 import os
@@ -327,7 +329,7 @@ class _MassThreshold(bfg.Profiles.Base.BaseBFGProfiles):
     """Profile equal to 1 for halo masses above ``M_threshold`` and 0 otherwise (to select halos in profile arithmetic)."""
 
     # a hyper parameter, so that profile arithmetic (which rebuilds profiles from their parameters) keeps it
-    hyper_param_names = bfg.Profiles.Base.hyper_params + ['M_threshold']
+    hyper_param_names = [*bfg.Profiles.Base.hyper_params, 'M_threshold']
 
     def __init__(self, M_threshold: float | None = None, **kwargs: Any) -> None:
         self.M_threshold = M_threshold

@@ -56,6 +56,7 @@ class MapBuilder(ABC):
         HealSparse coverage nside. Default is 32.
     mask : ndarray or str or None, optional
         Footprint specification:
+
         - ``None``: full sky (no mask applied).
         - ``'octant'``: restrict to the positive octant (x>0, y>0, z>0).
         - ndarray: binary HEALPix mask of length ``hp.nside2npix(nside)``; pixels
@@ -63,6 +64,7 @@ class MapBuilder(ABC):
         - str (other than ``'octant'``): path to a FITS file containing a
           binary HEALPix mask in NESTED ordering, read lazily inside
           :meth:`_create_mask`.
+
         Default is ``None``.
     save_format : str, optional
         HealSparse file format (e.g. 'fits'). Default is 'fits'.

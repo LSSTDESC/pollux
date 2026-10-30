@@ -6,5 +6,5 @@ setup(name='pollux',
       author='Cyrille Doux',
       author_email='doux@lpsc.in2p3.fr',
       url='https://github.com/LSSTDESC/pollux',
-      packages=['pollux'],
+      packages=['pollux', 'pollux.pipeline'],
      )

@@ -848,7 +848,12 @@ def save_dict_fits_file(fname: str, cat: dict[str, np.ndarray]) -> None:
 def _git(*args: str) -> str | None:
     """Return the output of a git command in the repository of this package, or None if it fails."""
     try:
-        return subprocess.run(['git', *args], cwd=os.path.dirname(os.path.abspath(__file__)), capture_output=True, text=True, check=True, timeout=60).stdout
+        return subprocess.run(['git', '-c', 'safe.directory=*', *args],
+                              cwd=os.path.dirname(os.path.abspath(__file__)),
+                              capture_output=True,
+                              text=True,
+                              check=True,
+                              timeout=60).stdout
     except (OSError, subprocess.SubprocessError):
         return None
 
@@ -868,7 +873,7 @@ def code_version() -> dict[str, str | bool | None]:
     return dict(commit=commit and commit.strip(), branch=branch and branch.strip(), dirty=bool(status))
 
 
-def save_code_version(out_dir: str, files: Iterable[str] = ()) -> str:
+def save_code_version(out_dir: str, files: Iterable[str] = (), require_clean: bool = False) -> str:
     """Record the code and environment of a run in a new ``{out_dir}/code_version/{date}`` folder.
 
     Each call has its own folder, so that resuming a run keeps the record of the earlier
@@ -880,6 +885,9 @@ def save_code_version(out_dir: str, files: Iterable[str] = ()) -> str:
         Output directory of the run.
     files : iterable of str, optional
         Files to copy in the record, e.g. the run script and its configuration.
+    require_clean : bool, optional
+        If True, refuse to run with uncommitted changes (or outside a git repository),
+        so that outputs always come from a known commit. Default is False.
 
     Returns
     -------
@@ -892,11 +900,14 @@ def save_code_version(out_dir: str, files: Iterable[str] = ()) -> str:
         - ``conda_packages.txt``: the conda packages of the environment, if any;
         - the copied ``files``.
     """
+    version = code_version()
+    if require_clean and (version['dirty'] or version['commit'] is None):
+        raise RuntimeError(f"pollux has uncommitted changes or no git version: {version}")
+
     now = datetime.datetime.now()
     folder = os.path.join(out_dir, 'code_version', now.strftime('%Y-%m-%dT%H-%M-%S'))
     os.makedirs(folder, exist_ok=True)
 
-    version = code_version()
     record = dict(version, date=now.isoformat(timespec='seconds'), host=socket.gethostname(), command=sys.argv, python=sys.version, prefix=sys.prefix)
     with open(os.path.join(folder, 'code_version.yaml'), 'w') as f:
         yaml.safe_dump(record, f, sort_keys=False)

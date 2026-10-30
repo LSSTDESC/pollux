@@ -970,8 +970,9 @@ class CatalogSourceGenerator(ABC):
             Tomographic bin indices to process. If None, uses all bins.
         what : {'shear', 'clustering', 'shear_clustering', 'all'} or list of str, optional
             Which spectra to compute:
-            - 'clustering': galaxy density auto/cross-spectra (dd), symmetric i<=j pairs.
-            - 'shear': shear E/B-mode auto/cross-spectra (ee, bb), symmetric i<=j pairs.
+
+            - 'clustering': galaxy density auto/cross-spectra (dd), symmetric i>=j pairs.
+            - 'shear': shear E/B-mode auto/cross-spectra (ee, bb), symmetric i>=j pairs.
             - 'shear_clustering': density-shear cross-spectrum (de, db), all (i, j)
               ordered pairs since lens-bin i / source-bin j is not symmetric.
             - 'all': compute all three. Default.
@@ -1448,8 +1449,9 @@ class CatalogSourceGenerator(ABC):
             Tomographic bin indices to process. If None, uses all bins.
         what : {'shear', 'clustering', 'shear_clustering', 'all'} or list of str, optional
             Which correlations to compute:
-            - 'clustering': galaxy density autocorrelation ``w(theta)``, symmetric i<=j pairs.
-            - 'shear': shear autocorrelation ``xi_+/-(theta)``, symmetric i<=j pairs.
+
+            - 'clustering': galaxy density autocorrelation ``w(theta)``, symmetric i>=j pairs.
+            - 'shear': shear autocorrelation ``xi_+/-(theta)``, symmetric i>=j pairs.
             - 'shear_clustering': density-shear cross-correlation ``gamma_t/x(theta)``,
               all (i, j) ordered pairs since lens-bin i / source-bin j is not symmetric.
             - 'all': compute all three. Default.

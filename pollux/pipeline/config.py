@@ -17,7 +17,7 @@ nodes_per_block = 1
 
 # Per-executor resources (tasks pick one via @python_app(executors=[...])).
 # Executors differ by the number of tasks sharing a node, chosen so their memory fits
-# in the node's 512 GB; threads are not capped, numba / OpenMP use all cores and
+# in the node's 512 GB. Threads are only capped for 'default'; otherwise numba / OpenMP use all cores and
 # oversubscription fills the cores left idle by serial steps. Sized for nside 8192
 # full sky / 2048^3 particles (run_12 measurements, and run_11 at nside 4096 scaled
 # up for map-level tasks):
@@ -40,10 +40,22 @@ nodes_per_block = 1
 #               must exceed the executor's longest task. None: no draining (tasks
 #               still running at the walltime are killed and retried), for short tasks.
 EXECUTORS = {
-    'default': dict(workers=32, max_blocks=16, walltime='1:00:00', drain_margin=None,
-                    env={'OMP_WAIT_POLICY': 'PASSIVE'}),  # idle OpenMP threads sleep instead of spinning
-    'highmem': dict(workers=4, max_blocks=4, walltime='1:00:00', drain_margin=20 * 60),
-    'heavy': dict(workers=1, max_blocks=8, walltime='1:00:00', drain_margin=15 * 60),
+    # 16 threads per task: about 12% fewer core-hours than uncapped for construct_shell, whose 32 tasks would want 320 threads on 256
+    'default':
+        dict(
+            workers=32,
+            max_blocks=16,
+            walltime='1:00:00',
+            drain_margin=10 * 60,
+            env={
+                'OMP_WAIT_POLICY': 'PASSIVE',
+                'OMP_NUM_THREADS': 16,
+                'NUMBA_NUM_THREADS': 16
+            }),  # idle OpenMP threads sleep instead of spinning
+    'highmem':
+        dict(workers=4, max_blocks=4, walltime='1:00:00', drain_margin=20 * 60),
+    'heavy':
+        dict(workers=1, max_blocks=8, walltime='1:00:00', drain_margin=15 * 60),
 }
 
 # Debug QOS: 30 min walltime, at most 5 submitted and 2 running jobs per user, so the

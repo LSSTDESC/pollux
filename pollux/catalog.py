@@ -16,7 +16,7 @@ import fitsio
 from astropy.io import fits
 
 from .cosmo import Tracer
-from .utils import radec2thetaphi, quad, sample_pdf
+from .utils import code_version, radec2thetaphi, quad, sample_pdf
 
 if TYPE_CHECKING:
     import healsparse as hsp
@@ -81,7 +81,8 @@ class CatalogSourceGenerator(ABC):
     nbar_per_pix : ndarray
         Mean expected counts per pixel per tomographic bin.
     header_dict : dict
-        FITS header keyword/value pairs stored in the output catalogs.
+        FITS header keyword/value pairs stored in the output catalogs, including the
+        code version: ``POLLUXV`` (git commit) and ``DIRTY`` (uncommitted changes).
     """
 
     # fields that can be interpolated at the galaxies
@@ -159,6 +160,8 @@ class CatalogSourceGenerator(ABC):
         self.area_pix = hp.nside2pixarea(self.nside, degrees=False) * (180. * 60. / np.pi)**2
         self.nbar_per_pix = self.nbar * self.area_pix
         self.header_dict = {f'NBAR_{i}': n for i, n in enumerate(self.nbar)}
+        version = code_version()  # code that produced the catalogs
+        self.header_dict.update(POLLUXV=(version['commit'] or 'unknown')[:12], DIRTY=version['dirty'])
 
         logger.info("*** Catalog (%s) ***", self.tag if self.tag is not None else 'default')
         logger.info("  - Catalog class = %s.", self.__class__.__name__)

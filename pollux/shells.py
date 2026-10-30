@@ -616,7 +616,7 @@ class ShellBuilder(MapBuilder):
 
         valid = []
         # replicate the box
-        for (ix, iy, iz) in self.tqdm(replicas, desc=f"[_valid_replicas_box] shell {ishell}"):
+        for (ix, iy, iz) in replicas:
             # compute shift
             shift_original = np.expand_dims(np.array([ix, iy, iz]) * boxsize, 0).astype(dtype)
             shift = _Ax(A, shift_original) if self.apply_grid_isometry else shift_original

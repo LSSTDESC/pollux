@@ -921,9 +921,9 @@ class ShellBuilder(MapBuilder):
         density.update_values_pix(spix, (shell[spix] / self.pixel_density(ishell) - 1.).astype(self.dtype), nest=True)
         return density
 
-    def _smooth_sigma(self, ishell: int, smooth_Mpc: float) -> float:
-        """Return the angular width (radians) of a comoving smoothing scale at the far edge of a shell."""
-        return smooth_Mpc / self.shell_edges_comoving_distance[ishell + 1]
+    def _smooth_distance(self, ishell: int) -> float:
+        """Return the comoving distance of the far edge of a shell, converting smoothing scales to angles."""
+        return self.shell_edges_comoving_distance[ishell + 1]
 
     def compute_tidal_tensor_maps(
             self,

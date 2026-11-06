@@ -332,16 +332,27 @@ def compute_catalog_2pt(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_
 
 @python_app(executors=['highmem'])
 def plot_catalog_stats(
-        kinds, reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict=None, with_dmo_reference=False, cls_kwargs=None, inputs=[]):
+        kinds,
+        reader_dict,
+        shell_dict,
+        lensing_dict,
+        ia_dict,
+        catalog_dict,
+        baryon_dict=None,
+        with_dmo_reference=False,
+        cls_kwargs=None,
+        xlim_2pt=None,
+        inputs=[]):
     # predictions and comparison plots ({catalog_dir}/plots) for kinds in ('2pt', 'cls'); predictions use the matter
     # power spectrum of the catalog's shell builder (S19-corrected with baryon_dict), and with_dmo_reference adds the
-    # ratio to the dark-matter-only catalog's 2pt functions; cls_kwargs are the Cls options (shared_wsp, randoms)
+    # ratio to the dark-matter-only catalog's 2pt functions; cls_kwargs are the Cls options (shared_wsp, randoms),
+    # and xlim_2pt the x limits of the 2pt plots (the edges of the binning, theta_min and theta_max)
     catalog = _make_source_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict)
     reference = None
     if baryon_dict is not None and with_dmo_reference:
         reference = _make_source_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, None)
     if '2pt' in kinds:
-        catalog.plot_2pt(reference=reference)
+        catalog.plot_2pt(reference=reference, xlim=xlim_2pt)
     if 'cls' in kinds:
         catalog.plot_cls(**{k: v for k, v in (cls_kwargs or {}).items() if k in ('shared_wsp', 'randoms')})
     _close_figures()

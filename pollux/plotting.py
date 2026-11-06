@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 
+from matplotlib.lines import Line2D
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -19,6 +20,33 @@ _DEFAULT_YLABELS = {
     'diff_over_error': r'(data $-$ theory) / $\sigma$',
     'ratio_to_reference': r'ratio to reference $- 1$',
 }
+
+# reference scales: line style and legend label
+_SCALE_LINES = {
+    'smooth': (':', 'smoothing'),
+    'box': ('--', 'box size'),
+    'res': ('-.', 'pixel size'),
+}
+
+
+def _plot_capped(ax: plt.Axes, x: np.ndarray, y: np.ndarray, color: str, cap: float = 1.) -> None:
+    """Plot ratios as points, those beyond ``+-cap`` at the cap as arrow markers (bounds).
+
+    Parameters
+    ----------
+    ax : matplotlib.axes.Axes
+        Panel to plot in.
+    x, y : ndarray
+        Positions and ratios.
+    color : str
+        Color of the points.
+    cap : float, optional
+        Largest absolute ratio shown at its value.
+    """
+    x, y = np.asarray(x), np.asarray(y)
+    for sel, value, marker, size in ((np.abs(y) <= cap, y, 'o', 3), (y > cap, cap, '^', 5), (y < -cap, -cap, 'v', 5)):
+        if sel.any():
+            ax.plot(x[sel], np.broadcast_to(value, y.shape)[sel], ls=' ', marker=marker, markersize=size, color=color)
 
 
 def ell_factor_of(x: np.ndarray, ell_factor: int) -> float | np.ndarray:
@@ -61,6 +89,7 @@ def plot_pairs(
         color_theory: str | None = None,
         logx: bool = True,
         logy: bool = False,
+        xlim: tuple | None = None,
         ylim: tuple | None = None,
         xlabel: str = r'$\ell$',
         ylabel: str | None = None,
@@ -86,7 +115,8 @@ def plot_pairs(
         Reference data and theory for ``mode='ratio_to_reference'``.
     mode : {'values', 'ratio', 'diff_over_error', 'ratio_to_reference'}, optional
         - ``'values'`` (default): data and theory, multiplied by the ``ell_factor``;
-        - ``'ratio'``: ``data / theory - 1`` (with the relative theory errors as a band);
+        - ``'ratio'``: ``data / theory - 1`` (with the relative theory errors as a band),
+          with values beyond +-1 shown at +-1 as arrows (bounds), also in ``'ratio_to_reference'``;
         - ``'diff_over_error'``: ``(data - theory) / sigma``, with ``sigma`` the theory
           errors if given, else the data errors;
         - ``'ratio_to_reference'``: ``data / data_ref - 1`` and ``theory / theory_ref - 1``.
@@ -98,15 +128,15 @@ def plot_pairs(
         Factor of the values in ``'values'`` mode, see :func:`ell_factor_of`.
     scales : dict or None, optional
         Reference scales (e.g. :meth:`pollux.map_builder.MapBuilder.reference_scales`),
-        per bin: ``ell_smooth``/``ell_box`` (or ``theta_smooth``/``theta_box`` if ``xlabel``
-        does not contain ``ell``), marked at the geometric mean of the two bins with
-        dotted and dashed lines.
+        per bin: ``ell_smooth``/``ell_box``/``ell_res`` (or ``theta_smooth``/``theta_box``/``theta_res``
+        if ``xlabel`` does not contain ``ell``), marked at the geometric mean of the two bins
+        with dotted, dashed and dash-dotted lines, named in a legend below the figure when within the x range.
     color, color_theory : str, optional
         Colors of the data and theory. ``color_theory`` defaults to ``color``.
     logx, logy : bool, optional
         Logarithmic axes. ``logy`` only applies to ``'values'`` mode.
-    ylim : tuple or None, optional
-        Limits of the y axis.
+    xlim, ylim : tuple or None, optional
+        Limits of the x and y axes. ``xlim`` defaults to the range of ``x``.
     xlabel, ylabel : str or None, optional
         Axis labels. ``ylabel`` defaults to a label of the mode (of ``C_ell`` and the
         ``ell_factor`` in ``'values'`` mode).
@@ -136,12 +166,13 @@ def plot_pairs(
     ncols = int(np.ceil(np.sqrt(nbins))) if auto_only else nbins
     if figaxes is None:
         nrows = int(np.ceil(nbins / ncols)) if auto_only else nbins
-        fig, axes = plt.subplots(nrows, ncols, figsize=(2.5 * ncols, 2.5 * nrows), sharex=True, sharey=sharey, layout='tight', squeeze=False)
+        fig, axes = plt.subplots(nrows, ncols, figsize=(10. / 3. * ncols, 2.5 * nrows), sharex=True, sharey=sharey, layout='tight', squeeze=False)
         xrange = [np.inf, -np.inf]
     else:
         fig, axes = figaxes
         xrange = list(axes[0, 0].get_xlim())
     harmonic = 'ell' in xlabel
+    drawn = {}  # positions of the scale lines
 
     def get(d: dict | None, key: tuple) -> np.ndarray | None:
         # value of a pair, if any
@@ -166,7 +197,7 @@ def plot_pairs(
         elif mode == 'ratio':
             if d is None or th is None:
                 continue
-            ax.plot(xx, d / th - 1., ls=' ', marker='o', markersize=3, color=color)
+            _plot_capped(ax, xx, d / th - 1., color)
             if te is not None:
                 ax.fill_between(xx, -te / np.abs(th), te / np.abs(th), color=color_theory, alpha=0.2, lw=0, zorder=-99)
         elif mode == 'diff_over_error':
@@ -178,7 +209,7 @@ def plot_pairs(
         else:
             dr, tr = get(data_ref, (i, j)), get(theory_ref, (i, j))
             if d is not None and dr is not None:
-                ax.plot(xx, d / dr - 1., ls=' ', marker='o', markersize=3, color=color)
+                _plot_capped(ax, xx, d / dr - 1., color)
             if th is not None and tr is not None:
                 ax.plot(xx, th / tr - 1., ls='--', color=color_theory)
         if mode != 'values':
@@ -186,22 +217,34 @@ def plot_pairs(
         # reference scales of the pair
         if scales is not None:
             prefix = 'ell' if harmonic else 'theta'
-            for key, ls in (('smooth', ':'), ('box', '--')):
+            for key, (ls, _) in _SCALE_LINES.items():
                 values = scales.get(f'{prefix}_{key}')
                 if values is not None:
-                    ax.axvline(np.sqrt(values[i] * values[j]), color='0.2', ls=ls, lw=1)
+                    scale = np.sqrt(values[i] * values[j])
+                    ax.axvline(scale, color='0.2', ls=ls, lw=1)
+                    drawn.setdefault(key, []).append(scale)
         if logx:
             ax.set_xscale('log')
         ax.set_title(title.format(i=i, j=j))
         xrange = [min(xrange[0], np.min(xx) / 1.1), max(xrange[1], np.max(xx) * 1.1)]
 
-    # x range of the data only (scale lines may lie outside); hide panels without pairs
+    # x range of the data only (scale lines may lie outside), unless given; hide panels without pairs
+    xrange = xrange if xlim is None else xlim
     used = np.array([[ax.has_data() for ax in row] for row in axes])
     for ax, u in zip(axes.flat, used.flat):
         ax.axis('on' if u else 'off')
         ax.set_xlim(*xrange)
         if ylim is not None:
             ax.set_ylim(*ylim)
+    # legend of the scale lines within the x range (replacing that of a previous call)
+    handles = [
+        Line2D([], [], color='0.2', ls=_SCALE_LINES[key][0], lw=1, label=_SCALE_LINES[key][1]) for key, values in drawn.items() if any(
+            xrange[0] <= v <= xrange[1] for v in values)
+    ]
+    for legend in list(fig.legends):
+        legend.remove()
+    if handles:
+        fig.legend(handles=handles, loc='upper center', bbox_to_anchor=(0.5, 0.), ncols=len(handles), frameon=False)
     # labels on the first used panel of each row and the last used panel of each column
     for k, row in enumerate(used):
         if row.any():

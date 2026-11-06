@@ -622,11 +622,14 @@ class CatalogSourceGenerator(ABC):
         list of pollux.cosmo.Tracer
             ``'density'`` tracers named ``density_{i}``, with the n(z) of the lensing
             tracers (the galaxies are both lenses and sources), and the smoothing of
-            the density used to place them (``'positions'`` smoothing).
+            the density used to place them (``'positions'`` smoothing, at least the pixel size).
         """
         bias = getattr(self, 'bias', np.ones(self.ncats))
         smooth_Mpc = self.smoothing['positions']
-        return [Tracer(f"density_{i}", 'density', z=t.z, nz=t.nz, bias=bias[i], smooth_Mpc=smooth_Mpc) for i, t in enumerate(self.lensing_tracers)]
+        return [
+            Tracer(f"density_{i}", 'density', z=t.z, nz=t.nz, bias=bias[i], smooth_Mpc=smooth_Mpc, smooth_nside=self.lensing.nside)
+            for i, t in enumerate(self.lensing_tracers)
+        ]
 
     def _noise_cls(self, tracer: Tracer, shear_cols: tuple[str, str] = ('gamma1', 'gamma2'), subsample: float | None = None) -> float:
         """Return the white noise level of one catalog tracer.
@@ -1384,7 +1387,8 @@ class CatalogSourceGenerator(ABC):
                     scales=scales,
                     color=color,
                     logy=logy,
-                    sharey=False if mode == 'values' else 'all',
+                    xlim=(self.b.get_ell_min(0), self.b.get_ell_max(self.b.get_n_bands() - 1)),
+                    sharey=False,
                     fname=os.path.join(plot_dir, name + ('' if mode == 'values' else f'_{mode}') + '.png'))
 
     # tracer roles (density or shear) of the (i, j) legs of each real-space SACC data type
@@ -1786,7 +1790,13 @@ class CatalogSourceGenerator(ABC):
             xi[data_type] = {ij: r if component is None else r[component] for ij, r in res.items()}
         return xi
 
-    def plot_2pt(self, plot_dir: str | None = None, *, modes: tuple[str, ...] = ('values', 'ratio'), reference: CatalogSourceGenerator | None = None) -> None:
+    def plot_2pt(
+            self,
+            plot_dir: str | None = None,
+            *,
+            modes: tuple[str, ...] = ('values', 'ratio'),
+            reference: CatalogSourceGenerator | None = None,
+            xlim: tuple[float, float] | None = None) -> None:
         """Plot the saved two-point functions against their prediction (:meth:`predict_2pt`), one panel per bin pair.
 
         Parameters
@@ -1801,6 +1811,9 @@ class CatalogSourceGenerator(ABC):
             Catalog with saved two-point functions (e.g. dark-matter-only, for a
             baryonified catalog): adds the ``'ratio_to_reference'`` mode, the ratio of the
             two catalogs' functions against the ratio of their predictions.
+        xlim : tuple of float or None, optional
+            Limits of the x axis, e.g. the edges of the binning, ``(theta_min, theta_max)`` of
+            :meth:`compute_2pt`. Default is the range of the measured ``theta``.
 
         Notes
         -----
@@ -1846,7 +1859,8 @@ class CatalogSourceGenerator(ABC):
                         color=color,
                         xlabel=r'$\theta$ (arcmin)',
                         ylabel=ylabel if mode == 'values' else None,
-                        sharey=False if mode == 'values' else 'all',
+                        xlim=xlim,
+                        sharey=False,
                         figaxes=figaxes,
                         fname=os.path.join(plot_dir, name + ('' if mode == 'values' else f'_{mode}') + '.png') if last else None)
 
@@ -1935,9 +1949,18 @@ class CatalogSourceClustered(CatalogSourceGenerator):
     nbar_input : float, array-like, or None, optional
         Galaxy surface density in gal/arcmin^2. Default is None.
     bias : float or array-like, optional
-        Linear galaxy bias per tomographic bin. If a float, the same bias is used
+        Galaxy bias per tomographic bin. If a float, the same bias is used
         for all tomographic bins; if an array-like, it must have length
         ``lensing.nmaps`` and provide a per-bin value.
+    bias_model : {'linear', 'power_law'}, optional
+        Relative galaxy density per pixel, given the density contrast ``delta``
+        (see :meth:`_density_weight`):
+
+        - ``'linear'`` (default): ``1 + b * delta``, clipped at zero where negative
+          (underdense pixels with ``b > 1``);
+        - ``'power_law'``: ``(1 + delta)**b / <(1 + delta)**b>``, the mean over the
+          footprint pixels of the shell, positive everywhere (no clipping), and with
+          linear bias ``b`` on large scales.
     interp_fields, interp_method, smooth_fields, smooth_Mpc : optional
         Interpolation and smoothing of the fields (including the density used to
         place galaxies, ``'positions'``), see :class:`CatalogSourceGenerator`.
@@ -1947,12 +1970,15 @@ class CatalogSourceClustered(CatalogSourceGenerator):
         Binning of the catalog angular power spectra, see :class:`CatalogSourceGenerator`.
     """
 
+    BIAS_MODELS = ('linear', 'power_law')
+
     def __init__(
         self,
         lensing: LensingBuilder,
         tag: str | None = None,
         nbar_input: float | np.ndarray | None = None,
         bias: float | np.ndarray | None = None,
+        bias_model: str = 'linear',
         interp_fields: tuple[str, ...] = ('kappa', 'gamma1', 'gamma2'),
         interp_method: str = 'bilinear',
         smooth_fields: tuple[str, ...] = ('positions', 'density', 't11', 't22', 't12'),
@@ -1976,6 +2002,10 @@ class CatalogSourceClustered(CatalogSourceGenerator):
 
         if bias is None:
             raise ValueError(f'bias must be provided for {self.__class__.__name__}')
+        if bias_model not in self.BIAS_MODELS:
+            raise ValueError(f"bias_model must be one of {self.BIAS_MODELS}, not {bias_model!r}")
+        self.bias_model = bias_model
+        self.header_dict['BIASMOD'] = bias_model
 
         # Normalize bias: accept scalar or per-bin array
         bias_arr = np.atleast_1d(bias).astype(float)
@@ -1994,10 +2024,15 @@ class CatalogSourceClustered(CatalogSourceGenerator):
             self.header_dict[f'BIAS_{i}'] = b
 
     def _density_weight(self, density: np.ndarray, ikappa: int, ishell: int) -> np.ndarray:
-        """Return the relative galaxy density ``1 + b * delta`` per pixel, clipped at zero.
+        """Return the relative galaxy density per pixel of the bias model (``bias_model``).
 
-        With ``b > 1`` the linear bias model is negative in underdense pixels, where no
-        galaxies can be placed; a warning gives the fraction of such pixels.
+        - ``'linear'``: ``1 + b * delta``. With ``b > 1`` it is negative in underdense
+          pixels, where no galaxies can be placed: clipped to zero, with a warning
+          giving the fraction of such pixels.
+        - ``'power_law'``: ``(1 + delta)**b`` divided by its mean over the pixels, so
+          that the mean density is unchanged. It is positive wherever ``1 + delta`` is;
+          pixels with ``1 + delta < 0`` (ringing of the smoothed map) are set to zero,
+          with a warning.
 
         Parameters
         ----------
@@ -2013,10 +2048,19 @@ class CatalogSourceClustered(CatalogSourceGenerator):
         ndarray
             Non-negative weights, same shape as ``density``.
         """
-        weight = 1. + self.bias[ikappa] * density
+        b = self.bias[ikappa]
+        if self.bias_model == 'power_law':
+            weight = 1. + density.astype(float)
+            fraction = np.mean(weight < 0.)
+            if fraction > 0.:
+                warnings.warn(f"1 + delta < 0 in {100. * fraction:.3g}% of the pixels (bin {ikappa}, shell {ishell}): set to 0.")
+            weight = np.clip(weight, 0., None)**b
+            return weight / np.mean(weight)
+
+        weight = 1. + b * density
         fraction = np.mean(weight < 0.)
         if fraction > 0.:
-            warnings.warn(f"1 + b * delta < 0 in {100. * fraction:.3g}% of the pixels (bin {ikappa}, shell {ishell}, b = {self.bias[ikappa]:g}): clipped to 0.")
+            warnings.warn(f"1 + b * delta < 0 in {100. * fraction:.3g}% of the pixels (bin {ikappa}, shell {ishell}, b = {b:g}): clipped to 0.")
         return np.clip(weight, 0., None)
 
 
@@ -2025,7 +2069,8 @@ class CatalogSourceClusteredMultinomial(CatalogSourceClustered):
 
     The total number of galaxies per tomographic bin is fixed, and positions are
     drawn per shell from a multinomial distribution over pixels, proportional to
-    ``1 + b * delta`` where ``delta`` is the density contrast field.
+    the relative density of the bias model (``1 + b * delta`` by default, where ``delta``
+    is the density contrast field, see :class:`CatalogSourceClustered`).
 
     Parameters
     ----------
@@ -2035,8 +2080,8 @@ class CatalogSourceClusteredMultinomial(CatalogSourceClustered):
         Tag used to name the output directory ``catalogs_{tag}/``. Default is None.
     nbar_input : float, array-like, or None, optional
         Galaxy surface density in gal/arcmin^2. Default is None.
-    bias : float or array-like, optional
-        Linear galaxy bias per tomographic bin.
+    bias, bias_model : optional
+        Galaxy bias per tomographic bin, and bias model, see :class:`CatalogSourceClustered`.
     interp_fields, interp_method, smooth_fields, smooth_Mpc
         Interpolation and smoothing of the fields, see :class:`CatalogSourceGenerator`.
     augmentors : list, optional
@@ -2111,9 +2156,9 @@ class CatalogSourceClusteredPoisson(CatalogSourceClustered):
     """Generate clustered source galaxies using Poisson sampling.
 
     In each shell and tomographic bin, the number of galaxies per pixel is drawn
-    as a Poisson random variable with mean proportional to
-    ``(1 + b * delta) * <nbar>``. The total number of galaxies therefore
-    fluctuates.
+    as a Poisson random variable with mean ``<nbar>`` times the relative density of
+    the bias model (``1 + b * delta`` by default, see :class:`CatalogSourceClustered`).
+    The total number of galaxies therefore fluctuates.
 
     Parameters
     ----------
@@ -2123,8 +2168,8 @@ class CatalogSourceClusteredPoisson(CatalogSourceClustered):
         Tag used to name the output directory ``catalogs_{tag}/``. Default is None.
     nbar_input : float, array-like, or None, optional
         Galaxy surface density in gal/arcmin^2. Default is None.
-    bias : float or array-like, optional
-        Linear galaxy bias per tomographic bin.
+    bias, bias_model : optional
+        Galaxy bias per tomographic bin, and bias model, see :class:`CatalogSourceClustered`.
     interp_fields, interp_method, smooth_fields, smooth_Mpc
         Interpolation and smoothing of the fields, see :class:`CatalogSourceGenerator`.
     augmentors : list, optional

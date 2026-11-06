@@ -117,13 +117,13 @@ class LensingBuilder(MapBuilder):
         super().__init__(
             nside=shell_builder.nside, dtype=dtype, save_dir=save_dir, base_fname=base_fname, nmaps=self.nkappas, sacc_type="galaxy_convergence_cl", **kwargs)
 
-    def _smooth_sigma(self, ikappa: int, smooth_Mpc: float) -> float:
-        """Return the angular width (radians) of a comoving smoothing scale at the source plane of a per-shell convergence map."""
+    def _smooth_distance(self, ikappa: int) -> float:
+        """Return the comoving distance of the source plane of a per-shell convergence map, converting smoothing scales to angles."""
         if self.nzs != 'zsnapshots':
             raise ValueError(
                 "smoothing in Mpc is only meaningful for snapshot lensing (nzs='zsnapshots'); "
                 "for n(z) bins there is no single comoving distance to convert Mpc to an angle.")
-        return smooth_Mpc / self.shell_builder.shell_edges_comoving_distance[ikappa + 1]
+        return self.shell_builder.shell_edges_comoving_distance[ikappa + 1]
 
     def compute_shear_maps(
             self,

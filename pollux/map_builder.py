@@ -19,7 +19,7 @@ import sacc
 from itertools import product
 from tqdm.auto import tqdm, trange
 
-from .cosmo import Theory
+from .cosmo import Theory, Tracer
 from .utils import make_mask_radec_cuts, make_nmtbin_logspaced
 
 logger = logging.getLogger(__name__)
@@ -1023,15 +1023,13 @@ class MapBuilder(ABC):
 
         return alms[imaps] if np.isscalar(imaps) else alms
 
-    def _smooth_sigma(self, imap: int, smooth_Mpc: float) -> float:
-        """Return the angular width (radians) of a comoving smoothing scale for one map.
+    def _smooth_distance(self, imap: int) -> float:
+        """Return the comoving distance (Mpc) converting a comoving smoothing scale to an angle for one map.
 
         Parameters
         ----------
         imap : int
             Map index.
-        smooth_Mpc : float
-            Comoving Gaussian smoothing scale in Mpc.
 
         Returns
         -------
@@ -1040,11 +1038,41 @@ class MapBuilder(ABC):
         """
         raise NotImplementedError(f"{type(self).__name__} maps have no distance to convert a smoothing scale in Mpc to an angle.")
 
+    def _smooth_sigma(self, imap: int, smooth_Mpc: float) -> float:
+        """Return the angular width (radians) of a comoving smoothing scale for one map, at least the pixel size.
+
+        The comoving scale is :meth:`pollux.cosmo.Tracer.effective_smooth_Mpc` at the
+        map's distance (:meth:`_smooth_distance`), with a warning when it is the pixel
+        size rather than ``smooth_Mpc``.
+
+        Parameters
+        ----------
+        imap : int
+            Map index.
+        smooth_Mpc : float
+            Requested comoving Gaussian smoothing scale in Mpc.
+
+        Returns
+        -------
+        float
+            Angular width of the Gaussian in radians.
+        """
+        chi = self._smooth_distance(imap)
+        smooth_eff = float(Tracer.effective_smooth_Mpc(smooth_Mpc, chi, self.nside))
+        if smooth_eff > smooth_Mpc:
+            warnings.warn(
+                f"Smoothing of {smooth_Mpc} Mpc is below the pixel size for map {imap} at nside {self.nside}: "
+                f"smoothing by the pixel size, {smooth_eff:.3g} Mpc, instead.")
+        return smooth_eff / chi
+
     def _smooth_alms(self, imap: int, alm: np.ndarray, smooth_Mpc: float, lmax: int) -> None:
         """Smooth the a_lm of one map in place, with a Gaussian of comoving scale ``smooth_Mpc``.
 
         The pixel window function is deconvolved, so that the Gaussian is the only
-        smoothing of maps made from the smoothed a_lm (:meth:`_alm2hspmap`).
+        smoothing of maps made from the smoothed a_lm (:meth:`_alm2hspmap`). The width
+        of the Gaussian is at least the pixel size (:meth:`_smooth_sigma`): below it, the
+        deconvolution amplifies multipoles up to ``lmax`` and the maps ring (e.g. density
+        contrasts below -1).
 
         Parameters
         ----------
@@ -1543,7 +1571,7 @@ class MapBuilder(ABC):
         return res
 
     def reference_scales(self, smooth_Mpc: float | None = None) -> dict[str, np.ndarray]:
-        """Return the angular scales of the simulation box, and of a smoothing, per map.
+        """Return the angular scales of the simulation box, of the map resolution, and of a smoothing, per map.
 
         Parameters
         ----------
@@ -1554,16 +1582,19 @@ class MapBuilder(ABC):
         -------
         dict
             ``theta_box`` (arcmin) and ``ell_box``, and ``theta_smooth``, ``ell_smooth``
-            with ``smooth_Mpc``, one value per map, at the redshift where its signal comes
-            from (:meth:`pollux.cosmo.Tracer.mean_z_kernel`, e.g. the lenses for lensing maps).
+            with ``smooth_Mpc`` (at least the pixel size, see
+            :meth:`pollux.cosmo.Tracer.effective_smooth_Mpc`), one value per map, at the redshift where its signal comes
+            from (:meth:`pollux.cosmo.Tracer.mean_z_kernel`, e.g. the lenses for lensing maps);
+            ``theta_res`` (arcmin) and ``ell_res``, the pixel size of ``nside``, the same for all maps.
         """
         z_kernel = np.array([t.mean_z_kernel(self.cosmo) for t in self.tracers])
         d_a = pyccl.comoving_angular_distance(self.cosmo, 1. / (1. + z_kernel))
         rad2arcmin = 180. * 60. / np.pi
         ell_box = 2. * np.pi / self.reader.boxsize * d_a
-        scales = dict(theta_box=rad2arcmin * np.pi / ell_box, ell_box=ell_box)
+        theta_res = np.full_like(d_a, hp.nside2resol(self.nside))
+        scales = dict(theta_box=rad2arcmin * np.pi / ell_box, ell_box=ell_box, theta_res=rad2arcmin * theta_res, ell_res=np.pi / theta_res)
         if smooth_Mpc is not None:
-            theta_smooth = smooth_Mpc / d_a
+            theta_smooth = Tracer.effective_smooth_Mpc(smooth_Mpc, d_a, self.nside) / d_a
             scales.update(theta_smooth=rad2arcmin * theta_smooth, ell_smooth=np.pi / theta_smooth)
         return scales
 
@@ -1620,8 +1651,9 @@ class MapBuilder(ABC):
                 scales=self.reference_scales(),
                 color_theory='orange',
                 logy=logy,
+                xlim=(self.b.get_ell_min(0), self.b.get_ell_max(self.b.get_n_bands() - 1)),
                 title=f'{self.base_fname} {{i}} {{j}}',
-                sharey=False if mode == 'values' else 'all',
+                sharey=False,
                 fname=os.path.join(plot_dir, f'{self.base_fname}_cls' + ('' if mode == 'values' else f'_{mode}') + '.png'))
 
     def compute_map_moments(self, theta_smooth: np.ndarray | Iterable[float], nside_small: int = 512, save: bool = True) -> tuple[np.ndarray, dict, dict, dict]:

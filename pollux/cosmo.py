@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Callable
 
+import healpy as hp
 import numpy as np
 import pyccl
 import sacc
@@ -71,8 +72,12 @@ class Tracer:
     smooth_Mpc : float or None, optional
         Comoving scale of a Gaussian smoothing of the field (e.g. galaxies placed
         from a smoothed density), for ``'density'``. Predictions multiply the matter
-        power spectrum by ``exp(-k**2 smooth_Mpc**2 / 2)`` per smoothed tracer, which
-        is exact in Limber for a transverse smoothing. Default is None.
+        power spectrum by ``exp(-k**2 s**2 / 2)`` per smoothed tracer, with ``s`` the
+        effective scale (:meth:`effective_smooth_Mpc`), which is exact in Limber for a
+        transverse smoothing. Default is None.
+    smooth_nside : int or None, optional
+        Nside of the smoothed maps, whose pixel size bounds the smoothing from below
+        (see :meth:`effective_smooth_Mpc`). Default is None (no bound).
     """
 
     KINDS = ('density', 'shear', 'convergence')
@@ -85,7 +90,8 @@ class Tracer:
             nz: np.ndarray | None = None,
             bias: float = 1.,
             z_source: float | None = None,
-            smooth_Mpc: float | None = None) -> None:
+            smooth_Mpc: float | None = None,
+            smooth_nside: int | None = None) -> None:
         if kind not in self.KINDS:
             raise ValueError(f"kind must be one of {self.KINDS}, got {kind!r}")
         if kind == 'convergence' and z_source is None:
@@ -101,7 +107,35 @@ class Tracer:
         self.bias = bias
         self.z_source = z_source
         self.smooth_Mpc = smooth_Mpc or None
+        self.smooth_nside = smooth_nside
         self._ccl = None
+
+    @staticmethod
+    def effective_smooth_Mpc(smooth_Mpc: float, chi: float | np.ndarray, nside: int | None) -> float | np.ndarray:
+        """Return the comoving smoothing scale actually applied at a distance: at least the pixel size.
+
+        Smoothing below the pixel size is not possible (the pixel window cannot be
+        deconvolved beyond it, and maps would ring), so maps at ``nside`` are smoothed
+        by the larger of ``smooth_Mpc`` and the pixel size ``hp.nside2resol(nside)``
+        at the comoving distance ``chi``. Used by the maps and their predictions.
+
+        Parameters
+        ----------
+        smooth_Mpc : float
+            Requested comoving Gaussian smoothing scale in Mpc.
+        chi : float or ndarray
+            Comoving distance in Mpc.
+        nside : int or None
+            Nside of the maps. If None, ``smooth_Mpc`` is returned.
+
+        Returns
+        -------
+        float or ndarray
+            Comoving smoothing scale in Mpc, the shape of ``chi``.
+        """
+        if nside is None:
+            return smooth_Mpc + 0. * np.asarray(chi)
+        return np.maximum(smooth_Mpc, hp.nside2resol(nside) * np.asarray(chi))
 
     @property
     def spin(self) -> int:
@@ -207,7 +241,7 @@ class Theory:
     def __init__(self, cosmo: pyccl.Cosmology, p_of_k_a: pyccl.Pk2D | None = None) -> None:
         self.cosmo = cosmo
         self.p_of_k_a = p_of_k_a
-        self._smoothed_pk = {}  # matter power spectra with a Gaussian smoothing, keyed by sigma**2
+        self._smoothed_pk = {}  # matter power spectra with a Gaussian smoothing, keyed by the tracers' smoothing
 
     def angular_cl(self, t1: Tracer, t2: Tracer, ell: np.ndarray) -> np.ndarray:
         """Return the angular power spectrum of two tracers.
@@ -223,18 +257,21 @@ class Theory:
         -------
         ndarray
             C_ell (E-mode for shear; no pixel window), with the Gaussian smoothing of the
-            tracers (see :class:`Tracer`).
+            tracers (see :class:`Tracer`), at their effective scale at each redshift.
         """
         ccl1, ccl2 = t1.ccl(self.cosmo), t2.ccl(self.cosmo)
         pk = self.p_of_k_a
-        sigma2 = (t1.smooth_Mpc or 0.)**2 + (t2.smooth_Mpc or 0.)**2
-        if sigma2 > 0.:
-            if sigma2 not in self._smoothed_pk:
-                # same grid as the unsmoothed power spectrum, Gaussian filter applied to log P (no underflow)
+        key = tuple(sorted((t.smooth_Mpc, t.smooth_nside or 0) for t in (t1, t2) if t.smooth_Mpc))
+        if key:
+            if key not in self._smoothed_pk:
+                # same grid as the unsmoothed power spectrum, Gaussian filter applied to log P (no underflow),
+                # with the smoothing of each tracer at the comoving distance of each scale factor
                 a_arr, lk_arr, pk_arr = (pk if pk is not None else self.cosmo.get_nonlin_power()).get_spline_arrays()
-                log_pk = np.log(pk_arr) - np.exp(2. * lk_arr)[None, :] * sigma2 / 2.
-                self._smoothed_pk[sigma2] = pyccl.Pk2D(a_arr=a_arr, lk_arr=lk_arr, pk_arr=log_pk, is_logp=True)
-            pk = self._smoothed_pk[sigma2]
+                chi = pyccl.comoving_radial_distance(self.cosmo, a_arr)
+                sigma2 = sum(Tracer.effective_smooth_Mpc(s, chi, nside or None)**2 for s, nside in key)
+                log_pk = np.log(pk_arr) - np.exp(2. * lk_arr)[None, :] * sigma2[:, None] / 2.
+                self._smoothed_pk[key] = pyccl.Pk2D(a_arr=a_arr, lk_arr=lk_arr, pk_arr=log_pk, is_logp=True)
+            pk = self._smoothed_pk[key]
         try:
             return pyccl.angular_cl(self.cosmo, ccl1, ccl2, ell, p_of_k_a=pk)
         except pyccl.CCLError:

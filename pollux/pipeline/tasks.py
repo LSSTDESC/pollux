@@ -184,29 +184,32 @@ def compute_smoothed_density_maps(ishell, reader_dict, shell_dict, smooth_Mpc, b
     _make_shell_builder(reader_dict, shell_dict, baryon_dict).compute_maps_from_alms(ishell, smooth_Mpc=smooth_Mpc)
 
 
-def smoothing_plan(catalog_dict):
-    """Return the smoothed maps needed by a catalog (see CatalogSourceGenerator smooth_fields/smooth_Mpc).
+def smoothing_plan(catalog_dict, nshells):
+    """Return, per shell, the smoothed maps needed by a catalog (see CatalogSourceGenerator smooth_fields/smooth_Mpc).
 
-    Returns a dict with the smoothing of the tidal and shear maps ('tidal', 'shear'), whether these
-    tasks also save the smoothed density/convergence ('density_with_tidal', 'kappa_with_shear'),
-    and the other smoothing scales of density/convergence maps, made by separate tasks
-    ('density_extra', 'kappa_extra').
+    Each is a dict with the smoothing of the tidal and shear maps ('tidal', 'shear', None if not smoothed),
+    whether these tasks also save the smoothed density/convergence ('density_with_tidal', 'kappa_with_shear'),
+    and the other smoothing scales of density/convergence maps, made by separate tasks ('density_extra', 'kappa_extra').
     """
     import inspect
     import pollux
     cls = pollux.catalog.CatalogSourceGenerator
     default_fields = inspect.signature(cls.__init__).parameters['smooth_fields'].default
-    scales = cls.smoothing_scales(catalog_dict.get('smooth_fields', default_fields), catalog_dict.get('smooth_Mpc'))
-    tidal, shear = scales['t11'], scales['gamma1']
-    density = {scales['positions'], scales['density']} - {None}
-    kappa = {scales['kappa']} - {None}
-    return dict(
-        tidal=tidal,
-        shear=shear,
-        density_with_tidal=tidal in density,
-        kappa_with_shear=shear in kappa,
-        density_extra=sorted(density - {tidal}),
-        kappa_extra=sorted(kappa - {shear}))
+    scales = cls.smoothing_scales(catalog_dict.get('smooth_fields', default_fields), catalog_dict.get('smooth_Mpc'), nshells)
+    plans = []
+    for ishell in range(nshells):
+        tidal, shear = scales['t11'][ishell], scales['gamma1'][ishell]
+        density = {scales['positions'][ishell], scales['density'][ishell]} - {None}
+        kappa = {scales['kappa'][ishell]} - {None}
+        plans.append(
+            dict(
+                tidal=tidal,
+                shear=shear,
+                density_with_tidal=tidal in density,
+                kappa_with_shear=shear in kappa,
+                density_extra=sorted(density - {tidal}),
+                kappa_extra=sorted(kappa - {shear})))
+    return plans
 
 
 def catalog_map_tasks(nshells, reader_dict, shell_dict, catalog_dict, kappa_alms, shell_inputs, baryon_dict=None):
@@ -215,9 +218,8 @@ def catalog_map_tasks(nshells, reader_dict, shell_dict, catalog_dict, kappa_alms
     kappa_alms are the per-shell (snapshot) convergence a_lm futures, and shell_inputs(ishell) the futures
     the shell maps depend on. Returns, per shell, the list of futures of its maps.
     """
-    plan = smoothing_plan(catalog_dict)
     per_shell = []
-    for ishell in range(nshells):
+    for ishell, plan in enumerate(smoothing_plan(catalog_dict, nshells)):
         futures = [
             compute_shear_maps(
                 ishell,

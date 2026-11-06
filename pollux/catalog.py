@@ -60,9 +60,10 @@ class CatalogSourceGenerator(ABC):
         by the builders (:meth:`~pollux.map_builder.MapBuilder.compute_maps_from_alms`,
         :meth:`~pollux.shells.ShellBuilder.compute_tidal_tensor_maps`,
         :meth:`~pollux.lensing.LensingBuilder.compute_shear_maps`).
-    smooth_Mpc : float or dict or None, optional
-        Comoving Gaussian smoothing scale in Mpc of ``smooth_fields``, or a dict of
-        scales per field (then ``smooth_fields`` is ignored, and fields not in the dict
+    smooth_Mpc : float, array-like, dict or None, optional
+        Comoving Gaussian smoothing scale in Mpc of ``smooth_fields``, or one scale per
+        shell (e.g. :meth:`~pollux.cosmo.Theory.lognormal_smoothing`), or a dict of
+        either per field (then ``smooth_fields`` is ignored, and fields not in the dict
         are not smoothed). None (default) means no smoothing. Fields made together
         (``t11``, ``t22``, ``t12``; ``gamma1``, ``gamma2``) must share their scale.
     augmentors : list, optional
@@ -113,7 +114,7 @@ class CatalogSourceGenerator(ABC):
         self.interp_method = interp_method
         self.smooth_fields = tuple(smooth_fields)
         self.smooth_Mpc = smooth_Mpc
-        self.smoothing = self.smoothing_scales(smooth_fields, smooth_Mpc)
+        self.smoothing = self.smoothing_scales(smooth_fields, smooth_Mpc, self.lensing.shell_builder.nshells)
 
         self.interp_fields = tuple(interp_fields)
         self.augmentors = augmentors if augmentors is not None else []
@@ -171,31 +172,42 @@ class CatalogSourceGenerator(ABC):
         logger.info("  - Catalogs saved to %s.", self._catalog_dir)
 
     @classmethod
-    def smoothing_scales(cls, smooth_fields: tuple[str, ...], smooth_Mpc: float | dict[str, float] | None) -> dict[str, float | None]:
-        """Return the smoothing scale of every field (see ``smooth_fields`` and ``smooth_Mpc``).
+    def smoothing_scales(cls, smooth_fields: tuple[str, ...], smooth_Mpc: float | np.ndarray | dict | None, nshells: int) -> dict[str, tuple]:
+        """Return the smoothing scale of every field and shell (see ``smooth_fields`` and ``smooth_Mpc``).
 
         Parameters
         ----------
         smooth_fields : tuple of str
-            Fields smoothed by a single scale ``smooth_Mpc``.
-        smooth_Mpc : float or dict or None
-            Smoothing scale, or scales per field.
+            Fields smoothed by ``smooth_Mpc``.
+        smooth_Mpc : float, array-like, dict or None
+            Smoothing scale, one scale per shell, or either per field.
+        nshells : int
+            Number of shells.
 
         Returns
         -------
         dict
-            Scale (Mpc) or None of each of ``FIELDS`` and ``'positions'``, e.g. to
-            schedule the smoothed maps needed by a catalog.
+            Tuple of the scales (Mpc, or None if not smoothed) of the shells, for each of
+            ``FIELDS`` and ``'positions'``, e.g. to schedule the smoothed maps needed by a catalog.
         """
+
+        def per_shell(scale):
+            # tuple of nshells floats, or of None
+            if scale is None or np.isscalar(scale):
+                return (float(scale) if scale else None,) * nshells
+            if len(scale) != nshells:
+                raise ValueError(f"{len(scale)} smoothing scales for {nshells} shells")
+            return tuple(float(s) for s in scale)
+
         names = cls.FIELDS + ('positions',)
         if isinstance(smooth_Mpc, dict):
             scales = dict(smooth_Mpc)
         else:
-            scales = {k: smooth_Mpc for k in smooth_fields} if smooth_Mpc else {}
+            scales = {k: smooth_Mpc for k in smooth_fields} if smooth_Mpc is not None else {}
         unknown = set(scales) - set(names)
         if unknown:
             raise ValueError(f"Unknown fields {sorted(unknown)} for smoothing, must be among {names}")
-        scales = {k: scales.get(k) or None for k in names}
+        scales = {k: per_shell(scales.get(k)) for k in names}
         for group in cls._SMOOTHED_TOGETHER:
             if len({scales[k] for k in group}) > 1:
                 raise ValueError(f"Fields {group} are made together and must share their smoothing scale")
@@ -380,7 +392,7 @@ class CatalogSourceGenerator(ABC):
         hsp.HealSparseMap
             Map of field ``k``, smoothed as given by ``smooth_fields`` and ``smooth_Mpc``.
         """
-        smooth_Mpc = self.smoothing[k]
+        smooth_Mpc = self.smoothing[k][ishell]
         # Fields that live in the shell builder (density/tidal), vs the snapshot lensing builder
         if k == 'density':
             hspmap = self._density_map(ishell, smooth_Mpc)
@@ -625,7 +637,9 @@ class CatalogSourceGenerator(ABC):
             the density used to place them (``'positions'`` smoothing, at least the pixel size).
         """
         bias = getattr(self, 'bias', np.ones(self.ncats))
-        smooth_Mpc = self.smoothing['positions']
+        # one scale per shell, between the shells' comoving distances
+        scales = self.smoothing['positions']
+        smooth_Mpc = None if scales[0] is None else (tuple(self.lensing.shell_builder.shell_edges_comoving_distance), scales)
         return [
             Tracer(f"density_{i}", 'density', z=t.z, nz=t.nz, bias=bias[i], smooth_Mpc=smooth_Mpc, smooth_nside=self.lensing.nside)
             for i, t in enumerate(self.lensing_tracers)
@@ -2129,7 +2143,7 @@ class CatalogSourceClusteredMultinomial(CatalogSourceClustered):
         """
         # density contrast used to place galaxies ('positions' smoothing)
         _, ipix_mask = self.snap_lensing.shell_builder.get_mask(return_ipix=True)
-        density_masked = self._density_map(ishell, self.smoothing['positions']).get_values_pix(ipix_mask)
+        density_masked = self._density_map(ishell, self.smoothing['positions'][ishell]).get_values_pix(ipix_mask)
 
         # Loop over tomographic bins
         for ikappa in self.lensing.tqdm(ikappas, leave=False):
@@ -2246,7 +2260,7 @@ class CatalogSourceClusteredPoisson(CatalogSourceClustered):
         """
         # density contrast used to place galaxies ('positions' smoothing)
         _, ipix_mask = self.snap_lensing.shell_builder.get_mask(return_ipix=True)
-        density_masked = self._density_map(ishell, self.smoothing['positions']).get_values_pix(ipix_mask)
+        density_masked = self._density_map(ishell, self.smoothing['positions'][ishell]).get_values_pix(ipix_mask)
 
         # Loop over tomographic bins
         for ikappa in self.lensing.tqdm(ikappas, leave=False):

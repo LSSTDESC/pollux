@@ -18,6 +18,8 @@ import healpy as hp
 import numpy as np
 import pyccl
 import sacc
+from scipy.special import ndtr
+import warnings
 
 if TYPE_CHECKING:
     import pymaster
@@ -69,9 +71,11 @@ class Tracer:
         Linear bias, constant in redshift, for ``'density'``. Default is 1.
     z_source : float or None, optional
         Source redshift, for ``'convergence'``.
-    smooth_Mpc : float or None, optional
+    smooth_Mpc : float, tuple or None, optional
         Comoving scale of a Gaussian smoothing of the field (e.g. galaxies placed
-        from a smoothed density), for ``'density'``. Predictions multiply the matter
+        from a smoothed density), for ``'density'``: a scale, or ``(chi_edges, scales)``,
+        one scale per shell of comoving distances ``chi_edges`` (Mpc, one more than
+        ``scales``). Predictions multiply the matter
         power spectrum by ``exp(-k**2 s**2 / 2)`` per smoothed tracer, with ``s`` the
         effective scale (:meth:`effective_smooth_Mpc`), which is exact in Limber for a
         transverse smoothing. Default is None.
@@ -106,12 +110,16 @@ class Tracer:
         self.nz = None if nz is None else np.asarray(nz)
         self.bias = bias
         self.z_source = z_source
+        if isinstance(smooth_Mpc, tuple):
+            smooth_Mpc = (tuple(map(float, smooth_Mpc[0])), tuple(map(float, smooth_Mpc[1])))
+            if len(smooth_Mpc[0]) != len(smooth_Mpc[1]) + 1:
+                raise ValueError("smooth_Mpc=(chi_edges, scales) needs one more edge than scales")
         self.smooth_Mpc = smooth_Mpc or None
         self.smooth_nside = smooth_nside
         self._ccl = None
 
     @staticmethod
-    def effective_smooth_Mpc(smooth_Mpc: float, chi: float | np.ndarray, nside: int | None) -> float | np.ndarray:
+    def effective_smooth_Mpc(smooth_Mpc: float | tuple, chi: float | np.ndarray, nside: int | None) -> float | np.ndarray:
         """Return the comoving smoothing scale actually applied at a distance: at least the pixel size.
 
         Smoothing below the pixel size is not possible (the pixel window cannot be
@@ -121,21 +129,27 @@ class Tracer:
 
         Parameters
         ----------
-        smooth_Mpc : float
-            Requested comoving Gaussian smoothing scale in Mpc.
+        smooth_Mpc : float or tuple
+            Requested comoving Gaussian smoothing scale in Mpc, or ``(chi_edges, scales)``,
+            one scale per shell of comoving distances ``chi_edges`` (the nearest shell
+            outside them).
         chi : float or ndarray
             Comoving distance in Mpc.
         nside : int or None
-            Nside of the maps. If None, ``smooth_Mpc`` is returned.
+            Nside of the maps. If None, the requested scale is returned.
 
         Returns
         -------
         float or ndarray
             Comoving smoothing scale in Mpc, the shape of ``chi``.
         """
+        chi = np.asarray(chi, dtype=float)
+        if isinstance(smooth_Mpc, tuple):
+            chi_edges, scales = np.asarray(smooth_Mpc[0]), np.asarray(smooth_Mpc[1])
+            smooth_Mpc = scales[np.clip(np.searchsorted(chi_edges, chi, side='right') - 1, 0, len(scales) - 1)]
         if nside is None:
-            return smooth_Mpc + 0. * np.asarray(chi)
-        return np.maximum(smooth_Mpc, hp.nside2resol(nside) * np.asarray(chi))
+            return smooth_Mpc + 0. * chi
+        return np.maximum(smooth_Mpc, hp.nside2resol(nside) * chi)
 
     @property
     def spin(self) -> int:
@@ -261,7 +275,7 @@ class Theory:
         """
         ccl1, ccl2 = t1.ccl(self.cosmo), t2.ccl(self.cosmo)
         pk = self.p_of_k_a
-        key = tuple(sorted((t.smooth_Mpc, t.smooth_nside or 0) for t in (t1, t2) if t.smooth_Mpc))
+        key = tuple(sorted(((t.smooth_Mpc, t.smooth_nside or 0) for t in (t1, t2) if t.smooth_Mpc), key=repr))
         if key:
             if key not in self._smoothed_pk:
                 # same grid as the unsmoothed power spectrum, Gaussian filter applied to log P (no underflow),
@@ -487,3 +501,144 @@ class Theory:
             res = [pyccl.correlation(self.cosmo, ell=ell, C_ell=cl, theta=theta_deg, type=c) for c in np.atleast_1d(corr)]
             xi[key] = tuple(res) if isinstance(corr, tuple) else res[0]
         return xi
+
+    # smoothing scales (Mpc) considered by lognormal_smoothing: round values, for file names
+    SMOOTHING_SCALES = (0.1, 0.12, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.8, 1., 1.2, 1.5, 2., 2.5, 3., 4., 5., 6., 8., 10., 12., 15., 20., 25., 30., 40., 50.)
+
+    def smoothed_variance(self, tracer: Tracer, chi: float, nside: int, smooth_Mpc: float | np.ndarray) -> float | np.ndarray:
+        """Return the variance of a map of a tracer, smoothed by a Gaussian at the effective scale.
+
+        As the maps of :meth:`pollux.map_builder.MapBuilder._smooth_alms`: Gaussian at
+        :meth:`Tracer.effective_smooth_Mpc` (at least the pixel size), band-limited at
+        ``3 nside - 1``.
+
+        Parameters
+        ----------
+        tracer : Tracer
+            Tracer of the map (e.g. the density of a shell).
+        chi : float
+            Comoving distance (Mpc) converting the smoothing scale to an angle.
+        nside : int
+            Nside of the map.
+        smooth_Mpc : float or ndarray
+            Comoving smoothing scales in Mpc.
+
+        Returns
+        -------
+        float or ndarray
+            Variance per smoothing scale.
+        """
+        lmax = 3 * nside - 1
+        ell = np.arange(2, lmax + 1)
+        ell_cl = np.unique(np.geomspace(2, lmax, 400).astype(int)).astype(float)
+        cl = np.interp(ell, ell_cl, self.angular_cl(tracer, tracer, ell_cl))
+        sigma = np.atleast_1d(Tracer.effective_smooth_Mpc(np.asarray(smooth_Mpc, dtype=float), chi, nside)) / chi
+        variance = np.sum((2 * ell + 1) / (4 * np.pi) * cl * np.exp(-np.outer(sigma**2, ell * (ell + 1))), axis=1)
+        return variance if np.ndim(smooth_Mpc) else variance[0]
+
+    @staticmethod
+    def lognormal_clipping(variance: float | np.ndarray, b: float) -> float | np.ndarray:
+        """Return the fraction of pixels with ``1 + b * delta < 0``, for a lognormal density contrast.
+
+        ``1 + delta = exp(G - s2 / 2)``, with ``G`` Gaussian of variance ``s2 = ln(1 + variance)``.
+        For the projected density of the simulation shells this overestimates the clipped
+        fraction (real voids are less empty), which makes it a conservative estimate.
+
+        Parameters
+        ----------
+        variance : float or ndarray
+            Variance of the density contrast.
+        b : float
+            Linear bias.
+
+        Returns
+        -------
+        float or ndarray
+        """
+        if b <= 1.:
+            return 0. * np.asarray(variance)
+        s2 = np.log1p(variance)
+        return ndtr((np.log(1. - 1. / b) + s2 / 2.) / np.sqrt(s2))
+
+    @staticmethod
+    def lognormal_bias_ratio(variance: float | np.ndarray, b: float) -> float | np.ndarray:
+        """Return the large-scale bias of ``max(0, 1 + b * delta)`` over ``b``, for a lognormal density contrast.
+
+        From Price's theorem, ``b_eff = <dw/dG> / <w>`` for ``w = max(0, 1 + b * delta)`` and
+        ``1 + delta = exp(G - s2 / 2)``. For the simulation shells this overestimates the
+        bias deficit from clipping, which makes it a conservative estimate.
+
+        Parameters
+        ----------
+        variance : float or ndarray
+            Variance of the density contrast.
+        b : float
+            Linear bias.
+
+        Returns
+        -------
+        float or ndarray
+            ``b_eff / b``, at most 1.
+        """
+        if b <= 1.:
+            return 1. + 0. * np.asarray(variance)
+        s2 = np.log1p(variance)
+        s = np.sqrt(s2)
+        c = np.log(1. - 1. / b) + s2 / 2.  # clipped where G < c
+        unclipped = ndtr((s2 - c) / s)  # <(1 + delta), unclipped pixels>
+        return unclipped / (b * unclipped + (1. - b) * ndtr(-c / s))
+
+    def lognormal_smoothing(
+            self,
+            tracers: list[Tracer],
+            chi: np.ndarray,
+            nside: int,
+            b: float,
+            max_clip: float | None = None,
+            max_bias_error: float | None = None) -> np.ndarray:
+        """Return a conservative smoothing scale per map, for galaxies placed with ``max(0, 1 + b * delta)``.
+
+        For each map (e.g. shell), the smallest of :attr:`SMOOTHING_SCALES` that is at least
+        the pixel size and keeps the clipped fraction below ``max_clip`` and the large-scale
+        bias deficit ``1 - b_eff / b`` below ``max_bias_error``, for a lognormal density
+        contrast of variance :meth:`smoothed_variance`. The lognormal overestimates both the
+        clipping and the bias deficit of the simulation shells, by factors of 1.3 to 5
+        (about 1.5 to 3 times the smoothing needed), so the scales are conservative.
+
+        Parameters
+        ----------
+        tracers : list of Tracer
+            Density tracer of each map, e.g. ``shell_builder.tracers``.
+        chi : array_like
+            Comoving distance (Mpc) of each map converting smoothing scales to angles, e.g.
+            the far edges of the shells, ``shell_builder.shell_edges_comoving_distance[1:]``.
+        nside : int
+            Nside of the maps.
+        b : float
+            Linear bias (the largest of the tomographic bins).
+        max_clip : float or None, optional
+            Largest fraction of clipped pixels.
+        max_bias_error : float or None, optional
+            Largest large-scale bias deficit ``1 - b_eff / b``.
+
+        Returns
+        -------
+        ndarray
+            Smoothing scale per map, in Mpc (the largest of :attr:`SMOOTHING_SCALES`,
+            with a warning, if none meets the criteria).
+        """
+        if max_clip is None and max_bias_error is None:
+            raise ValueError("Give max_clip, max_bias_error or both.")
+        scales = np.array(self.SMOOTHING_SCALES)
+        smooth = np.zeros(len(tracers))
+        for i, (tracer, d) in enumerate(zip(tracers, chi)):
+            variance = self.smoothed_variance(tracer, d, nside, scales)
+            ok = scales >= hp.nside2resol(nside) * d
+            if max_clip is not None:
+                ok &= self.lognormal_clipping(variance, b) <= max_clip
+            if max_bias_error is not None:
+                ok &= 1. - self.lognormal_bias_ratio(variance, b) <= max_bias_error
+            if not ok.any():
+                warnings.warn(f"No smoothing up to {scales[-1]} Mpc meets the criteria for map {i}: using {scales[-1]} Mpc.")
+            smooth[i] = scales[np.argmax(ok)] if ok.any() else scales[-1]
+        return smooth

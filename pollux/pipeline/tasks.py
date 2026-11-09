@@ -23,13 +23,19 @@ def _make_shell_builder(reader_dict, shell_dict, baryon_dict):
     return pollux.shells.SnapshotShellBuilder(reader, **shell_dict)
 
 
-def _close_figures():
-    # pyplot keeps figures alive until closed; in a long-lived worker, full-sky plots
-    # would otherwise keep their memory (~170 GB at nside 8192) for later tasks
+def _free_memory():
+    # at the end of memory-heavy tasks: pyplot keeps figures alive until closed, and freed memory
+    # is not always returned to the system, so in a long-lived worker a task's peak (and its plots)
+    # would otherwise stay for the next tasks
+    import ctypes
     import gc
     import matplotlib.pyplot as plt
     plt.close('all')
     gc.collect()
+    try:
+        ctypes.CDLL('libc.so.6').malloc_trim(0)
+    except OSError:
+        pass
 
 
 def _make_lensing(builder, lensing_dict):
@@ -70,6 +76,7 @@ def construct_orphans(ishell, reader_dict, shell_dict, inputs=[]):
 @python_app(executors=['heavy'])
 def compute_shells_alms(ishell, reader_dict, shell_dict, baryon_dict=None, inputs=[]):
     _make_shell_builder(reader_dict, shell_dict, baryon_dict).compute_alms(ishell)
+    _free_memory()
 
 
 @python_app(executors=['highmem'])
@@ -84,12 +91,15 @@ def compute_wsp(reader_dict, shell_dict, inputs=[]):
     reader = pollux.reader.HACCReader(**reader_dict)
     builder = pollux.shells.SnapshotShellBuilder(reader, **shell_dict)
     builder.wsp
+    _free_memory()
 
 
 @python_app(executors=['highmem'])
 def compute_shells_cls_sub(pair, reader_dict, shell_dict, baryon_dict=None, inputs=[]):
     # Cls of one (i, j) pair of shells
-    return _make_shell_builder(reader_dict, shell_dict, baryon_dict).compute_cls(pairs=[pair], save=False, use_precomputed_alms=True)
+    result = _make_shell_builder(reader_dict, shell_dict, baryon_dict).compute_cls(pairs=[pair], save=False, use_precomputed_alms=True)
+    _free_memory()
+    return result
 
 
 @python_app(executors=['highmem'])
@@ -102,7 +112,14 @@ def compute_shells_cls(reader_dict, shell_dict, baryon_dict=None, inputs=[]):
         cls_out[k] = cl[k]
     builder._save_cls(ell, cls_out)
     builder.plot_cls(auto_only=True, logy=True)
-    _close_figures()
+    _free_memory()
+
+
+@python_app(executors=['highmem'])
+def plot_shell_maps(reader_dict, shell_dict, baryon_dict=None, inputs=[]):
+    # all shell maps in one figure ({save_dir}/plots), on a log scale, drawn at a lower nside (plot_maps nside_plot)
+    _make_shell_builder(reader_dict, shell_dict, baryon_dict).plot_maps(log=True)
+    _free_memory()
 
 
 ##############################
@@ -115,11 +132,13 @@ def construct_halo_catalog(ishell, reader_dict, shell_dict, baryon_dict, inputs=
     reader = pollux.reader.HACCHaloReader(**reader_dict)
     builder = pollux.shells.SnapshotShellBuilder(reader, **shell_dict)
     builder.construct_catalogs(ishell, extra_columns=[baryon_dict['mass_name']])
+    _free_memory()
 
 
 @python_app(executors=['highmem'])
 def construct_maps(ishell, reader_dict, shell_dict, baryon_dict=None, inputs=[]):
     _make_shell_builder(reader_dict, shell_dict, baryon_dict).construct_maps(ishell)
+    _free_memory()
 
 
 ##############################
@@ -135,6 +154,7 @@ def construct_kappas(ikappa, reader_dict, shell_dict, lensing_dict, baryon_dict=
 @python_app(executors=['heavy'])
 def construct_kappas_alms(ikappa, reader_dict, shell_dict, lensing_dict, baryon_dict=None, inputs=[]):
     _make_lensing(_make_shell_builder(reader_dict, shell_dict, baryon_dict), lensing_dict).compute_alms(ikappa)
+    _free_memory()
 
 
 @python_app(executors=['heavy'])
@@ -142,19 +162,23 @@ def compute_shear_maps(ikappa, reader_dict, shell_dict, lensing_dict, smooth_Mpc
     # shear maps, smoothed with smooth_Mpc (then also the smoothed convergence map with save_field_map)
     _make_lensing(_make_shell_builder(reader_dict, shell_dict, baryon_dict), lensing_dict).compute_shear_maps(
         ikappa, smooth_Mpc=smooth_Mpc, save_field_map=save_field_map)
+    _free_memory()
 
 
 @python_app(executors=['heavy'])
 def compute_smoothed_kappa_maps(ikappa, reader_dict, shell_dict, lensing_dict, smooth_Mpc, baryon_dict=None, inputs=[]):
     # smoothed convergence map, when its smoothing differs from the shear's
     _make_lensing(_make_shell_builder(reader_dict, shell_dict, baryon_dict), lensing_dict).compute_maps_from_alms(ikappa, smooth_Mpc=smooth_Mpc)
+    _free_memory()
 
 
 @python_app(executors=['highmem'])
 def compute_kappas_cls_sub(pair, reader_dict, shell_dict, lensing_dict, baryon_dict=None, inputs=[]):
     # Cls of one (i, j) pair of convergence maps
-    return _make_lensing(_make_shell_builder(reader_dict, shell_dict, baryon_dict), lensing_dict).compute_cls(
+    result = _make_lensing(_make_shell_builder(reader_dict, shell_dict, baryon_dict), lensing_dict).compute_cls(
         pairs=[pair], save=False, use_precomputed_alms=True)
+    _free_memory()
+    return result
 
 
 @python_app(executors=['highmem'])
@@ -168,20 +192,28 @@ def compute_kappas_cls(reader_dict, shell_dict, lensing_dict, baryon_dict=None, 
     lensing._save_cls(ell, cls_out)
     # auto-spectra only for the per-shell snapshot maps (all pairs would be too many)
     lensing.plot_cls(auto_only=all(i == j for i, j in cls_out), logy=True)
-    lensing.plot_maps()
-    _close_figures()
+    _free_memory()
+
+
+@python_app(executors=['highmem'])
+def plot_kappa_maps(reader_dict, shell_dict, lensing_dict, baryon_dict=None, inputs=[]):
+    # all convergence maps in one figure ({save_dir}/plots), drawn at a lower nside (plot_maps nside_plot)
+    _make_lensing(_make_shell_builder(reader_dict, shell_dict, baryon_dict), lensing_dict).plot_maps()
+    _free_memory()
 
 
 @python_app(executors=['heavy'])
 def compute_tidal_maps(ishell, reader_dict, shell_dict, smooth_Mpc, save_field_map=True, baryon_dict=None, inputs=[]):
     # tidal field maps, smoothed with smooth_Mpc (then also the smoothed density map with save_field_map)
     _make_shell_builder(reader_dict, shell_dict, baryon_dict).compute_tidal_tensor_maps(ishell, smooth_Mpc=smooth_Mpc, save_field_map=save_field_map)
+    _free_memory()
 
 
 @python_app(executors=['heavy'])
 def compute_smoothed_density_maps(ishell, reader_dict, shell_dict, smooth_Mpc, baryon_dict=None, inputs=[]):
     # smoothed density map, when its smoothing differs from the tidal field's
     _make_shell_builder(reader_dict, shell_dict, baryon_dict).compute_maps_from_alms(ishell, smooth_Mpc=smooth_Mpc)
+    _free_memory()
 
 
 def smoothing_plan(catalog_dict, nshells):
@@ -270,18 +302,21 @@ def _make_source_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog
 @python_app(executors=['heavy'])
 def construct_source_catalog(ikappa, reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict=None, inputs=[]):
     _make_source_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict).generate(ikappa)
+    _free_memory()
 
 
 @python_app(executors=['highmem'])
 def construct_source_catalog_shell(ishell, reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict=None, inputs=[]):
     # galaxies of one shell, for all tomographic bins (partial catalogs)
     _make_source_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict).generate(ishell=ishell)
+    _free_memory()
 
 
 @python_app(executors=['highmem'])
 def merge_source_catalog(ikappa, reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict=None, inputs=[]):
     # inputs contains the construct_source_catalog_shell futures of all shells
     _make_source_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict).combine_shells(ikappa)
+    _free_memory()
 
 
 ##############################
@@ -295,13 +330,16 @@ def compute_catalog_cls_wsp(stat, reader_dict, shell_dict, lensing_dict, ia_dict
     catalog = _make_source_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict)
     if not os.path.exists(catalog._wsp_fname(stat)):
         catalog.get_wsp(stat)
+    _free_memory()
 
 
 @python_app(executors=['heavy'])
 def compute_catalog_cls_sub(stat, pair, reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, stats_dict, baryon_dict=None, inputs=[]):
     # Cls of one statistic ('clustering', 'shear' or 'shear_clustering') for one bin pair
     catalog = _make_source_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict)
-    return catalog.compute_cls(what=stat, pairs=[pair], save=False, **stats_dict['common'], **stats_dict['cls'])
+    result = catalog.compute_cls(what=stat, pairs=[pair], save=False, **stats_dict['common'], **stats_dict['cls'])
+    _free_memory()
+    return result
 
 
 @python_app(executors=['default'])
@@ -318,7 +356,9 @@ def compute_catalog_cls(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_
 def compute_catalog_2pt_sub(stat, pair, reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, stats_dict, baryon_dict=None, inputs=[]):
     # 2pt function of one statistic ('clustering', 'shear' or 'shear_clustering') for one bin pair
     catalog = _make_source_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict)
-    return catalog.compute_2pt(what=stat, pairs=[pair], save=False, error_bars=True, theta_per_pair=True, **stats_dict['common'], **stats_dict['2pt'])
+    result = catalog.compute_2pt(what=stat, pairs=[pair], save=False, error_bars=True, theta_per_pair=True, **stats_dict['common'], **stats_dict['2pt'])
+    _free_memory()
+    return result
 
 
 @python_app(executors=['default'])
@@ -333,28 +373,21 @@ def compute_catalog_2pt(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_
 
 
 @python_app(executors=['highmem'])
-def plot_catalog_stats(
-        kinds,
-        reader_dict,
-        shell_dict,
-        lensing_dict,
-        ia_dict,
-        catalog_dict,
-        baryon_dict=None,
-        with_dmo_reference=False,
-        cls_kwargs=None,
-        xlim_2pt=None,
-        inputs=[]):
-    # predictions and comparison plots ({catalog_dir}/plots) for kinds in ('2pt', 'cls'); predictions use the matter
-    # power spectrum of the catalog's shell builder (S19-corrected with baryon_dict), and with_dmo_reference adds the
-    # ratio to the dark-matter-only catalog's 2pt functions; cls_kwargs are the Cls options (shared_wsp, randoms),
-    # and xlim_2pt the x limits of the 2pt plots (the edges of the binning, theta_min and theta_max)
+def plot_catalog_2pt(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict=None, with_dmo_reference=False, xlim=None, inputs=[]):
+    # 2pt functions against their predictions ({catalog_dir}/plots), with the matter power spectrum of the catalog's shell
+    # builder (S19-corrected with baryon_dict); with_dmo_reference adds the ratio to the dark-matter-only catalog's 2pt
+    # functions, and xlim are the x limits (the edges of the binning, theta_min and theta_max)
     catalog = _make_source_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict)
     reference = None
     if baryon_dict is not None and with_dmo_reference:
         reference = _make_source_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, None)
-    if '2pt' in kinds:
-        catalog.plot_2pt(reference=reference, xlim=xlim_2pt)
-    if 'cls' in kinds:
-        catalog.plot_cls(**{k: v for k, v in (cls_kwargs or {}).items() if k in ('shared_wsp', 'randoms')})
-    _close_figures()
+    catalog.plot_2pt(reference=reference, xlim=xlim)
+    _free_memory()
+
+
+@python_app(executors=['highmem'])
+def plot_catalog_cls(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict=None, cls_kwargs=None, inputs=[]):
+    # Cls against their predictions ({catalog_dir}/plots); cls_kwargs are the Cls options (shared_wsp, randoms)
+    catalog = _make_source_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict)
+    catalog.plot_cls(**{k: v for k, v in (cls_kwargs or {}).items() if k in ('shared_wsp', 'randoms')})
+    _free_memory()

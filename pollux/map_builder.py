@@ -506,12 +506,14 @@ class MapBuilder(ABC):
     def plot_maps(
             self,
             maps_or_imaps: int | Iterable[int] | Iterable | None = None,
+            plot_dir: str | None = None,
             nx: int | None = None,
             log: bool = False,
             title_prefix: str | None = None,
             cbar: bool = True,
             save: bool = True,
             backend: str = 'skyproj',
+            nside_plot: int | None = 1024,
             **kwargs: Any) -> None:
         """Plot one or multiple maps.
 
@@ -522,6 +524,8 @@ class MapBuilder(ABC):
             - If int: loads and plots that map index.
             - If iterable of int: loads and plots those indices.
             - If iterable of maps: plots provided maps directly.
+        plot_dir : str or None, optional
+            Output directory, with ``save``. Default is ``{save_dir}/plots``.
         nx : int or None, optional
             Number of columns in the subplot grid. Default is a near-square grid.
         log : bool, optional
@@ -536,13 +540,18 @@ class MapBuilder(ABC):
         cbar : bool, optional
             If True, display a colorbar.
         save : bool, optional
-            If True, save the figure to ``get_fname(format='png')``.
+            If True, save the figure to ``{plot_dir}/{base_fname}_maps.png``.
         backend : {'skyproj', 'healpy'}, optional
             Plotting backend. With ``'skyproj'`` (default), uses
             :class:`skyproj.MollweideSkyproj` for full sky and octant
             footprints, and :class:`skyproj.McBrydeSkyproj` otherwise. With
             ``'healpy'``, uses :func:`healpy.orthview` (octant footprint) or
             :func:`healpy.mollview` (full sky or custom mask).
+        nside_plot : int or None, optional
+            Maps of higher nside are degraded to it before drawing (default 1024, finer
+            than the panels' resolution): the figure then only holds these copies, not
+            the full-resolution maps (about 3 GB each at nside 8192). None draws the
+            maps as they are.
         **kwargs
             Forwarded to :func:`healpy.orthview`/:func:`healpy.mollview` (for
             ``backend='healpy'``) or to
@@ -577,6 +586,14 @@ class MapBuilder(ABC):
         items = self.iter_maps(imaps, desc="[plot_maps]") if maps is None else ((imap, maps[imap]) for imap in self.tqdm(imaps))
         for imap, hp_map in items:
             title = title_prefix + f" {imap}" if title_prefix is not None else None
+
+            # degraded copy for drawing, so that the full-resolution map is released after this panel
+            if nside_plot is not None:
+                if isinstance(hp_map, hsp.HealSparseMap):
+                    if hp_map.nside_sparse > nside_plot:
+                        hp_map = hp_map.degrade(nside_plot)
+                elif hp.npix2nside(len(hp_map)) > nside_plot:
+                    hp_map = hp.ud_grade(hp_map, nside_plot, order_in='NEST', order_out='NEST')
 
             if backend == 'skyproj':
                 ax = next(axes)
@@ -632,7 +649,9 @@ class MapBuilder(ABC):
             hp.graticule()
 
         if save:
-            fname = self.get_fname(format='png')
+            plot_dir = plot_dir or os.path.join(self.save_dir, 'plots')
+            os.makedirs(plot_dir, exist_ok=True)
+            fname = os.path.join(plot_dir, f'{self.base_fname}_maps.png')
             # matplotlib cannot render images beyond 2**16 pixels per side: lower the resolution of large grids
             dpi = min(150., 2**15 / max(fig.get_size_inches()))
             plt.savefig(fname, bbox_inches='tight', dpi=dpi, transparent=False)

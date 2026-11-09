@@ -497,8 +497,16 @@ class Theory:
         for key, (t1, t2) in pairs.items():
             corr = self._CORRELATION_TYPES[t1.kind, t2.kind]
             cl = self.angular_cl(t1, t2, ell)
+            # a large smoothing (e.g. of nearby shells) makes the spectrum fall to 1e-300 or underflow at high ell,
+            # which breaks CCL's FFTLog: stop where it falls below 1e-30 of its maximum, negligible beyond
+            # (a spectrum zero everywhere, e.g. density behind the sources and shear, gives zero)
+            significant = np.flatnonzero(np.abs(cl) > 1e-30 * np.abs(cl).max())
             theta_deg = np.asarray(theta[key] if isinstance(theta, dict) else theta) / 60.
-            res = [pyccl.correlation(self.cosmo, ell=ell, C_ell=cl, theta=theta_deg, type=c) for c in np.atleast_1d(corr)]
+            if len(significant):
+                last = significant[-1] + 1
+                res = [pyccl.correlation(self.cosmo, ell=ell[:last], C_ell=cl[:last], theta=theta_deg, type=c) for c in np.atleast_1d(corr)]
+            else:
+                res = [np.zeros(len(theta_deg)) for c in np.atleast_1d(corr)]
             xi[key] = tuple(res) if isinstance(corr, tuple) else res[0]
         return xi
 

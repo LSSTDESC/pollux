@@ -85,6 +85,7 @@ def plot_pairs(
         auto_only: bool = False,
         ell_factor: int = 0,
         scales: dict | None = None,
+        color_scales: str = '0.2',
         color: str = 'dodgerblue',
         color_theory: str | None = None,
         logx: bool = True,
@@ -129,8 +130,11 @@ def plot_pairs(
     scales : dict or None, optional
         Reference scales (e.g. :meth:`pollux.map_builder.MapBuilder.reference_scales`),
         per bin: ``ell_smooth``/``ell_box``/``ell_res`` (or ``theta_smooth``/``theta_box``/``theta_res``
-        if ``xlabel`` does not contain ``ell``), marked at the geometric mean of the two bins
-        with dotted, dashed and dash-dotted lines, named in a legend below the figure when within the x range.
+        if ``xlabel`` does not contain ``ell``), marked at the geometric mean of the two bins (or per pair,
+        for a dict keyed by ``(i, j)``) with dotted, dashed and dash-dotted lines, named in a legend below
+        the figure when within the x range.
+    color_scales : str, optional
+        Color of the reference-scale lines (e.g. that of the data, when overplotting several sets).
     color, color_theory : str, optional
         Colors of the data and theory. ``color_theory`` defaults to ``color``.
     logx, logy : bool, optional
@@ -220,8 +224,8 @@ def plot_pairs(
             for key, (ls, _) in _SCALE_LINES.items():
                 values = scales.get(f'{prefix}_{key}')
                 if values is not None:
-                    scale = np.sqrt(values[i] * values[j])
-                    ax.axvline(scale, color='0.2', ls=ls, lw=1)
+                    scale = values[i, j] if isinstance(values, dict) else np.sqrt(values[i] * values[j])
+                    ax.axvline(scale, color=color_scales, ls=ls, lw=1)
                     drawn.setdefault(key, []).append(scale)
         if logx:
             ax.set_xscale('log')
@@ -238,7 +242,7 @@ def plot_pairs(
             ax.set_ylim(*ylim)
     # legend of the scale lines within the x range (replacing that of a previous call)
     handles = [
-        Line2D([], [], color='0.2', ls=_SCALE_LINES[key][0], lw=1, label=_SCALE_LINES[key][1]) for key, values in drawn.items() if any(
+        Line2D([], [], color=color_scales, ls=_SCALE_LINES[key][0], lw=1, label=_SCALE_LINES[key][1]) for key, values in drawn.items() if any(
             xrange[0] <= v <= xrange[1] for v in values)
     ]
     for legend in list(fig.legends):

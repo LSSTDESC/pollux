@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Iterable
 
 import numpy as np
 import healpy as hp
+import pyccl
 import pymaster as nmt
 import sacc
 import treecorr
@@ -20,7 +21,6 @@ from .utils import code_version, radec2thetaphi, quad, sample_pdf
 
 if TYPE_CHECKING:
     import healsparse as hsp
-    import pyccl
     from .lensing import LensingBuilder
 
 logger = logging.getLogger(__name__)
@@ -1383,7 +1383,6 @@ class CatalogSourceGenerator(ABC):
         dcl = dcl[0] if need_errors else {}
 
         # one figure per E-mode/density data type and mode
-        scales = self.lensing.reference_scales()
         st = sacc.standard_types
         for data_type, name, color in ((st.galaxy_shear_cl_ee, 'cl_shear_ee', 'orange'), (st.galaxy_shearDensity_cl_e, 'cl_shear_density', 'red'),
                                        (st.galaxy_density_cl, 'cl_density', 'green')):
@@ -1398,7 +1397,7 @@ class CatalogSourceGenerator(ABC):
                     mode=mode,
                     auto_only=all(i == j for i, j in cl_th[data_type]),
                     ell_factor=ell_factor,
-                    scales=scales,
+                    scales=self._reference_scales(self._SACC_TYPE_LEGS_CLS[data_type]),
                     color=color,
                     logy=logy,
                     xlim=(self.b.get_ell_min(0), self.b.get_ell_max(self.b.get_n_bands() - 1)),
@@ -1804,6 +1803,46 @@ class CatalogSourceGenerator(ABC):
             xi[data_type] = {ij: r if component is None else r[component] for ij, r in res.items()}
         return xi
 
+    def _reference_scales(self, roles: tuple[str, str]) -> dict:
+        """Return the reference scales of a statistic: of the lensing maps, and the smoothing of the galaxy positions.
+
+        Parameters
+        ----------
+        roles : tuple of str
+            Roles of the two legs (``'density'`` or ``'shear'``), as in ``_SACC_TYPE_LEGS_2PT``.
+
+        Returns
+        -------
+        dict
+            :meth:`~pollux.map_builder.MapBuilder.reference_scales` of the lensing builder, with,
+            for statistics of the galaxy density, ``theta_smooth`` (arcmin) and ``ell_smooth``
+            per bin pair: the smoothing of the density placing the galaxies of each density leg
+            (:meth:`~pollux.cosmo.Tracer.effective_smooth_Mpc`, at the mean redshift of its n(z)),
+            the geometric mean of the two legs for density-density.
+        """
+        scales = self.lensing.reference_scales()
+        tracers = self.density_tracers
+        if 'density' not in roles or tracers[0].smooth_Mpc is None:
+            return scales
+
+        # angle of the smoothing of each bin, at the mean redshift of its galaxies
+        theta = []
+        for t in tracers:
+            chi = pyccl.comoving_radial_distance(self.lensing.cosmo, 1. / (1. + t.mean_z_nz()))
+            theta.append(float(Tracer.effective_smooth_Mpc(t.smooth_Mpc, chi, t.smooth_nside)) / chi)
+        theta = np.array(theta)
+
+        nbins = len(tracers)
+        pairs = [(i, j) for i in range(nbins) for j in range(nbins)]
+        if roles == ('density', 'density'):
+            theta_pair = {(i, j): np.sqrt(theta[i] * theta[j]) for i, j in pairs}
+        else:
+            theta_pair = {(i, j): theta[i] if roles[0] == 'density' else theta[j] for i, j in pairs}
+        rad2arcmin = 180. * 60. / np.pi
+        scales['theta_smooth'] = {ij: rad2arcmin * t for ij, t in theta_pair.items()}
+        scales['ell_smooth'] = {ij: np.pi / t for ij, t in theta_pair.items()}
+        return scales
+
     def plot_2pt(
             self,
             plot_dir: str | None = None,
@@ -1848,7 +1887,6 @@ class CatalogSourceGenerator(ABC):
             modes = (*modes, 'ratio_to_reference')
 
         # one figure per group of data types and mode, the data types of a group overplotted
-        scales = self.lensing.reference_scales()
         st = sacc.standard_types
         for data_types, name, ylabel in (({st.galaxy_shear_xi_plus: 'dodgerblue', st.galaxy_shear_xi_minus: 'orange'}, 'xi_shear', r'$\theta \xi_\pm(\theta)$'),
                                          ({st.galaxy_shearDensity_xi_t: 'red'}, 'xi_shear_density',
@@ -1869,7 +1907,7 @@ class CatalogSourceGenerator(ABC):
                         mode=mode,
                         auto_only=all(i == j for i, j in xi[data_type]),
                         ell_factor=1,
-                        scales=scales,
+                        scales=self._reference_scales(self._SACC_TYPE_LEGS_2PT[data_type]),
                         color=color,
                         xlabel=r'$\theta$ (arcmin)',
                         ylabel=ylabel if mode == 'values' else None,

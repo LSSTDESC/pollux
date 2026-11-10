@@ -132,7 +132,8 @@ class Tracer:
         smooth_Mpc : float or tuple
             Requested comoving Gaussian smoothing scale in Mpc, or ``(chi_edges, scales)``,
             one scale per shell of comoving distances ``chi_edges`` (the nearest shell
-            outside them).
+            outside them). Shell maps are smoothed by one angle, that of the scale at
+            their far edge, so within a shell the comoving scale is ``scale * chi / chi_far``.
         chi : float or ndarray
             Comoving distance in Mpc.
         nside : int or None
@@ -145,8 +146,10 @@ class Tracer:
         """
         chi = np.asarray(chi, dtype=float)
         if isinstance(smooth_Mpc, tuple):
+            # angle of each shell's scale at its far edge, as the maps (MapBuilder._smooth_sigma), at the distance chi
             chi_edges, scales = np.asarray(smooth_Mpc[0]), np.asarray(smooth_Mpc[1])
-            smooth_Mpc = scales[np.clip(np.searchsorted(chi_edges, chi, side='right') - 1, 0, len(scales) - 1)]
+            ishell = np.clip(np.searchsorted(chi_edges, chi, side='right') - 1, 0, len(scales) - 1)
+            smooth_Mpc = scales[ishell] * chi / chi_edges[ishell + 1]
         if nside is None:
             return smooth_Mpc + 0. * chi
         return np.maximum(smooth_Mpc, hp.nside2resol(nside) * chi)

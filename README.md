@@ -1,5 +1,11 @@
 # pollux
 
+[![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD_3--Clause-blue.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
+[![GitHub issues](https://img.shields.io/github/issues/LSSTDESC/pollux)](https://github.com/LSSTDESC/pollux/issues)
+[![arXiv:2605.00821](https://img.shields.io/badge/arXiv-2605.00821-b31b1b.svg)](https://arxiv.org/abs/2605.00821)
+[![arXiv:2605.00818](https://img.shields.io/badge/arXiv-2605.00818-b31b1b.svg)](https://arxiv.org/abs/2605.00818)
+
 DESC package to create weak lensing and large-scale structure simulations from N-body simulations for the Higher-Order Statistics Topical Team.
 
 ## Features

@@ -118,42 +118,6 @@ class Tracer:
         self.smooth_nside = smooth_nside
         self._ccl = None
 
-    @staticmethod
-    def effective_smooth_Mpc(smooth_Mpc: float | tuple, chi: float | np.ndarray, nside: int | None) -> float | np.ndarray:
-        """Return the comoving smoothing scale actually applied at a distance: at least the pixel size.
-
-        Smoothing below the pixel size is not possible (the pixel window cannot be
-        deconvolved beyond it, and maps would ring), so maps at ``nside`` are smoothed
-        by the larger of ``smooth_Mpc`` and the pixel size ``hp.nside2resol(nside)``
-        at the comoving distance ``chi``. Used by the maps and their predictions.
-
-        Parameters
-        ----------
-        smooth_Mpc : float or tuple
-            Requested comoving Gaussian smoothing scale in Mpc, or ``(chi_edges, scales)``,
-            one scale per shell of comoving distances ``chi_edges`` (the nearest shell
-            outside them). Shell maps are smoothed by one angle, that of the scale at
-            their far edge, so within a shell the comoving scale is ``scale * chi / chi_far``.
-        chi : float or ndarray
-            Comoving distance in Mpc.
-        nside : int or None
-            Nside of the maps. If None, the requested scale is returned.
-
-        Returns
-        -------
-        float or ndarray
-            Comoving smoothing scale in Mpc, the shape of ``chi``.
-        """
-        chi = np.asarray(chi, dtype=float)
-        if isinstance(smooth_Mpc, tuple):
-            # angle of each shell's scale at its far edge, as the maps (MapBuilder._smooth_sigma), at the distance chi
-            chi_edges, scales = np.asarray(smooth_Mpc[0]), np.asarray(smooth_Mpc[1])
-            ishell = np.clip(np.searchsorted(chi_edges, chi, side='right') - 1, 0, len(scales) - 1)
-            smooth_Mpc = scales[ishell] * chi / chi_edges[ishell + 1]
-        if nside is None:
-            return smooth_Mpc + 0. * chi
-        return np.maximum(smooth_Mpc, hp.nside2resol(nside) * chi)
-
     @property
     def spin(self) -> int:
         """Spin of the field (2 for shear, 0 otherwise)."""
@@ -228,6 +192,42 @@ class Tracer:
         kernel = np.sum(self.ccl(cosmo).get_kernel(chi), axis=0)
         z = 1. / pyccl.scale_factor_of_chi(cosmo, chi) - 1.
         return np.trapz(z * kernel, chi) / np.trapz(kernel, chi)
+
+    @staticmethod
+    def effective_smooth_Mpc(smooth_Mpc: float | tuple, chi: float | np.ndarray, nside: int | None) -> float | np.ndarray:
+        """Return the comoving smoothing scale actually applied at a distance: at least the pixel size.
+
+        Smoothing below the pixel size is not possible (the pixel window cannot be
+        deconvolved beyond it, and maps would ring), so maps at ``nside`` are smoothed
+        by the larger of ``smooth_Mpc`` and the pixel size ``hp.nside2resol(nside)``
+        at the comoving distance ``chi``. Used by the maps and their predictions.
+
+        Parameters
+        ----------
+        smooth_Mpc : float or tuple
+            Requested comoving Gaussian smoothing scale in Mpc, or ``(chi_edges, scales)``,
+            one scale per shell of comoving distances ``chi_edges`` (the nearest shell
+            outside them). Shell maps are smoothed by one angle, that of the scale at
+            their far edge, so within a shell the comoving scale is ``scale * chi / chi_far``.
+        chi : float or ndarray
+            Comoving distance in Mpc.
+        nside : int or None
+            Nside of the maps. If None, the requested scale is returned.
+
+        Returns
+        -------
+        float or ndarray
+            Comoving smoothing scale in Mpc, the shape of ``chi``.
+        """
+        chi = np.asarray(chi, dtype=float)
+        if isinstance(smooth_Mpc, tuple):
+            # angle of each shell's scale at its far edge, as the maps (MapBuilder._smooth_sigma), at the distance chi
+            chi_edges, scales = np.asarray(smooth_Mpc[0]), np.asarray(smooth_Mpc[1])
+            ishell = np.clip(np.searchsorted(chi_edges, chi, side='right') - 1, 0, len(scales) - 1)
+            smooth_Mpc = scales[ishell] * chi / chi_edges[ishell + 1]
+        if nside is None:
+            return smooth_Mpc + 0. * chi
+        return np.maximum(smooth_Mpc, hp.nside2resol(nside) * chi)
 
     def __getstate__(self) -> dict:
         """Return the state for pickling, without the cached CCL tracer (rebuilt on demand)."""
@@ -500,9 +500,7 @@ class Theory:
         for key, (t1, t2) in pairs.items():
             corr = self._CORRELATION_TYPES[t1.kind, t2.kind]
             cl = self.angular_cl(t1, t2, ell)
-            # a large smoothing (e.g. of nearby shells) makes the spectrum fall to 1e-300 or underflow at high ell,
-            # which breaks CCL's FFTLog: stop where it falls below 1e-30 of its maximum, negligible beyond
-            # (a spectrum zero everywhere, e.g. density behind the sources and shear, gives zero)
+            # CCL's FFTLog fails on spectra smoothed to vanishing values at high ell, or zero everywhere
             significant = np.flatnonzero(np.abs(cl) > 1e-30 * np.abs(cl).max())
             theta_deg = np.asarray(theta[key] if isinstance(theta, dict) else theta) / 60.
             if len(significant):

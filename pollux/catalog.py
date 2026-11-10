@@ -645,6 +645,46 @@ class CatalogSourceGenerator(ABC):
             for i, t in enumerate(self.lensing_tracers)
         ]
 
+    def _reference_scales(self, roles: tuple[str, str]) -> dict:
+        """Return the reference scales of a statistic: of the lensing maps, and the smoothing of the galaxy positions.
+
+        Parameters
+        ----------
+        roles : tuple of str
+            Roles of the two legs (``'density'`` or ``'shear'``), as in ``_SACC_TYPE_LEGS_2PT``.
+
+        Returns
+        -------
+        dict
+            :meth:`~pollux.map_builder.MapBuilder.reference_scales` of the lensing builder, with,
+            for statistics of the galaxy density, ``theta_smooth`` (arcmin) and ``ell_smooth``
+            per bin pair: the smoothing of the density placing the galaxies of each density leg
+            (:meth:`~pollux.cosmo.Tracer.effective_smooth_Mpc`, at the mean redshift of its n(z)),
+            the geometric mean of the two legs for density-density.
+        """
+        scales = self.lensing.reference_scales()
+        tracers = self.density_tracers
+        if 'density' not in roles or tracers[0].smooth_Mpc is None:
+            return scales
+
+        # angle of the smoothing of each bin, at the mean redshift of its galaxies
+        theta = []
+        for t in tracers:
+            chi = pyccl.comoving_radial_distance(self.lensing.cosmo, 1. / (1. + t.mean_z_nz()))
+            theta.append(float(Tracer.effective_smooth_Mpc(t.smooth_Mpc, chi, t.smooth_nside)) / chi)
+        theta = np.array(theta)
+
+        nbins = len(tracers)
+        pairs = [(i, j) for i in range(nbins) for j in range(nbins)]
+        if roles == ('density', 'density'):
+            theta_pair = {(i, j): np.sqrt(theta[i] * theta[j]) for i, j in pairs}
+        else:
+            theta_pair = {(i, j): theta[i] if roles[0] == 'density' else theta[j] for i, j in pairs}
+        rad2arcmin = 180. * 60. / np.pi
+        scales['theta_smooth'] = {ij: rad2arcmin * t for ij, t in theta_pair.items()}
+        scales['ell_smooth'] = {ij: np.pi / t for ij, t in theta_pair.items()}
+        return scales
+
     def _noise_cls(self, tracer: Tracer, shear_cols: tuple[str, str] = ('gamma1', 'gamma2'), subsample: float | None = None) -> float:
         """Return the white noise level of one catalog tracer.
 
@@ -1802,46 +1842,6 @@ class CatalogSourceGenerator(ABC):
             res = self.lensing.theory.predict_2pt({(i, j): (tracers[role_i][i], tracers[role_j][j]) for i, j in type_pairs}, type_pairs, self.b.lmax, nell=nell)
             xi[data_type] = {ij: r if component is None else r[component] for ij, r in res.items()}
         return xi
-
-    def _reference_scales(self, roles: tuple[str, str]) -> dict:
-        """Return the reference scales of a statistic: of the lensing maps, and the smoothing of the galaxy positions.
-
-        Parameters
-        ----------
-        roles : tuple of str
-            Roles of the two legs (``'density'`` or ``'shear'``), as in ``_SACC_TYPE_LEGS_2PT``.
-
-        Returns
-        -------
-        dict
-            :meth:`~pollux.map_builder.MapBuilder.reference_scales` of the lensing builder, with,
-            for statistics of the galaxy density, ``theta_smooth`` (arcmin) and ``ell_smooth``
-            per bin pair: the smoothing of the density placing the galaxies of each density leg
-            (:meth:`~pollux.cosmo.Tracer.effective_smooth_Mpc`, at the mean redshift of its n(z)),
-            the geometric mean of the two legs for density-density.
-        """
-        scales = self.lensing.reference_scales()
-        tracers = self.density_tracers
-        if 'density' not in roles or tracers[0].smooth_Mpc is None:
-            return scales
-
-        # angle of the smoothing of each bin, at the mean redshift of its galaxies
-        theta = []
-        for t in tracers:
-            chi = pyccl.comoving_radial_distance(self.lensing.cosmo, 1. / (1. + t.mean_z_nz()))
-            theta.append(float(Tracer.effective_smooth_Mpc(t.smooth_Mpc, chi, t.smooth_nside)) / chi)
-        theta = np.array(theta)
-
-        nbins = len(tracers)
-        pairs = [(i, j) for i in range(nbins) for j in range(nbins)]
-        if roles == ('density', 'density'):
-            theta_pair = {(i, j): np.sqrt(theta[i] * theta[j]) for i, j in pairs}
-        else:
-            theta_pair = {(i, j): theta[i] if roles[0] == 'density' else theta[j] for i, j in pairs}
-        rad2arcmin = 180. * 60. / np.pi
-        scales['theta_smooth'] = {ij: rad2arcmin * t for ij, t in theta_pair.items()}
-        scales['ell_smooth'] = {ij: np.pi / t for ij, t in theta_pair.items()}
-        return scales
 
     def plot_2pt(
             self,

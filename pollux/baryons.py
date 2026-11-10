@@ -131,6 +131,7 @@ class BaryonifiedShellBuilder(ShellBuilder):
             bfg.ConvolvedProfile(dmo, pix), bfg.ConvolvedProfile(dmb, pix), self.cosmo_linear, mass_def=pyccl.halos.massdef.MassDef(*mass_def))
 
         self._interpolator_ishell = None  # shell index currently tabulated in self.model
+        self._pk2d = None  # matter power spectrum with baryons, cached by matter_power_spectrum
 
     def _config(self) -> tuple[str, dict, list[str]]:
         """Return the kind, parameters and inputs of the baryonified shells, for their ``config.yaml``.
@@ -154,7 +155,6 @@ class BaryonifiedShellBuilder(ShellBuilder):
             mass_unit=self.mass_unit,
             M_min=self.M_min)
         return 'shells', parameters, [self.shell_builder_ref.save_dir, self.halo_builder.save_dir]
-        self._pk2d = None
 
     def construct_maps(
         self,

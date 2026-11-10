@@ -16,8 +16,8 @@ from . import layout
 logger = logging.getLogger(__name__)
 
 
-class PolluxIO:
-    """Loader of the products of one realization, from their files only (see :mod:`pollux.layout`).
+class PolluxLoader:
+    """Loader of the products of one realization, from their files only (see :mod:`pollux.io.layout`).
 
     No ``pollux`` builder is created, so the products can be read with the I/O dependencies only.
 
@@ -43,7 +43,7 @@ class PolluxIO:
         self.matter_dir = layout.matter_dir(realization_dir, baryon_tag)
         self.shells_dir = os.path.join(self.matter_dir, 'shells')
 
-        logger.info("*** PolluxIO ***")
+        logger.info("*** PolluxLoader ***")
         logger.info("  - Path = %s.", self.matter_dir)
 
         # simulation and shell information

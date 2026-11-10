@@ -27,7 +27,7 @@ from typing import Any
 import numpy as np
 import yaml
 
-from .utils import code_version
+from .code_version import code_version
 
 INTERMEDIATE = 'intermediate'
 

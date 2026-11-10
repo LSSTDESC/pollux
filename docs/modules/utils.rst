@@ -1,9 +1,19 @@
 Utils
 =====
 
-Helper functions for map operations, binning, sampling and files, and the record of the code version of a run.
+Helper functions, by theme.
 
-.. automodule:: pollux.utils
+.. automodule:: pollux.utils.numerics
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. automodule:: pollux.utils.sky
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. automodule:: pollux.utils.binning
    :members:
    :undoc-members:
    :show-inheritance:

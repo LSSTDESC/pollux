@@ -21,10 +21,10 @@ from tqdm.auto import tqdm, trange
 from parallel_sort import argsort as pargsort
 from collections.abc import Iterable
 
-from . import layout
+from .io import layout
 from .cosmo import Tracer
 from .map_builder import MapBuilder, MapSum
-from .utils import quad, split_bins, arange_endpoint
+from .utils.numerics import arange_endpoint, quad, split_bins
 from .reader import DummyReader, Reader
 from .lensing import SnapshotBornLensingBuilder
 
@@ -58,7 +58,7 @@ class ShellBuilder(MapBuilder):
         Output directory where maps and metadata are written. Mutually
         exclusive with ``root_dir``.
     root_dir : str or None, optional
-        Root directory of the products of the simulation (see :mod:`pollux.layout`): the shells
+        Root directory of the products of the simulation (see :mod:`pollux.io.layout`): the shells
         go to ``{realization}/dmo/shells`` (``{realization}/halos`` for a halo reader), with
         ``{realization} = {root_dir}/nside{nside}/seed{seed}[/pad{padding_deg}]``. Mutually
         exclusive with ``save_dir``.
@@ -148,7 +148,7 @@ class ShellBuilder(MapBuilder):
         self.apply_grid_isometry = apply_grid_isometry
         self.apply_replicate_rotflip = apply_replicate_rotflip
 
-        # directories of the products (see pollux.layout): halo catalogs apart, shared by all baryon models
+        # directories of the products (see pollux.io.layout): halo catalogs apart, shared by all baryon models
         halos = reader.kind.endswith('halo')
         if root_dir is not None:
             if save_dir is not None:
@@ -253,7 +253,7 @@ class ShellBuilder(MapBuilder):
         layout.write_config(self.save_dir, *self._config(), realization=self.realization_dir)
 
     def _config(self) -> tuple[str, dict, list[str]]:
-        """Return the kind, parameters and inputs of the products, for their ``config.yaml`` (:func:`pollux.layout.write_config`).
+        """Return the kind, parameters and inputs of the products, for their ``config.yaml`` (:func:`pollux.io.layout.write_config`).
 
         Returns
         -------

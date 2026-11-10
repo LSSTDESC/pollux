@@ -12,7 +12,7 @@ from numpy.typing import NDArray
 import pyccl
 from pynverse import inversefunc
 
-from .utils import read_params, subsample_ppf, trim, trunc_norm
+from .utils.numerics import subsample_ppf, trim, trunc_norm
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +21,42 @@ try:
     import pygio
 except Exception:
     warnings.warn("Unable to import pygio.")
+
+
+def read_params(fname: str) -> dict[str, str]:
+    """Read a HACC-style parameter file into a dict.
+
+    The expected format is one entry per line::
+
+        KEY value...
+
+    Comment lines starting with ``#`` and blank lines are ignored.
+
+    Parameters
+    ----------
+    fname : str
+        File path to the parameter file.
+
+    Returns
+    -------
+    dict
+        Mapping from parameter names to raw string values.
+
+    Notes
+    -----
+    Values are not parsed to numeric types here; callers are expected to cast
+    them to float/int as needed.
+    """
+    with open(fname, 'r') as f:
+        params = {}
+        for x in f:
+            if not (x.startswith('#') or x.startswith('\n')):
+                try:
+                    k, v = x.rstrip().split(' ', 1)
+                    params[k] = v
+                except ValueError:
+                    pass
+    return params
 
 
 class Reader(ABC):

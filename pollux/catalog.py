@@ -16,9 +16,11 @@ import treecorr
 import fitsio
 from astropy.io import fits
 
-from . import layout
+from .io import layout
+from .io.code_version import code_version
 from .cosmo import Tracer
-from .utils import code_version, radec2thetaphi, quad, sample_pdf
+from .utils.numerics import quad, sample_pdf
+from .utils.sky import radec2thetaphi
 
 if TYPE_CHECKING:
     import healsparse as hsp
@@ -40,7 +42,7 @@ class CatalogSourceGenerator(ABC):
         Lensing map builder used to define tomographic bins and provide maps to
         interpolate.
     tag : str or None, optional
-        Tag of the catalogs: they go to ``catalogs/{nz}/{tag}/`` next to the maps (see :mod:`pollux.layout`), ``default`` if None.
+        Tag of the catalogs: they go to ``catalogs/{nz}/{tag}/`` next to the maps (see :mod:`pollux.io.layout`), ``default`` if None.
     nbar_input : float, array-like, or None, optional
         Galaxy surface density in gal/arcmin^2. If a float, the same surface
         density is used for all tomographic bins; if an array-like, it must
@@ -120,7 +122,7 @@ class CatalogSourceGenerator(ABC):
         self.interp_fields = tuple(interp_fields)
         self.augmentors = augmentors if augmentors is not None else []
 
-        # catalogs by n(z) and tag, next to the maps they come from (see pollux.layout)
+        # catalogs by n(z) and tag, next to the maps they come from (see pollux.io.layout)
         shell_builder = self.lensing.shell_builder
         self._catalog_dir = os.path.join(shell_builder.matter_dir, 'catalogs', os.path.basename(lensing.save_dir), tag or 'default')
         self._intermediate_dir = layout.intermediate_dir(self._catalog_dir, shell_builder.realization_dir)
@@ -493,7 +495,7 @@ class CatalogSourceGenerator(ABC):
         -------
         str
             ``{catalog_dir}/cat_bin{ikappa}.{format}``, with ``catalog_dir`` the
-            ``catalogs/{nz}/{tag}`` directory of the maps' products (see :mod:`pollux.layout`), or
+            ``catalogs/{nz}/{tag}`` directory of the maps' products (see :mod:`pollux.io.layout`), or
             ``{intermediate}/parts/cat_bin{ikappa}_{ishell:03d}.{format}`` for a partial catalog.
         """
         if ishell is None:
@@ -501,7 +503,7 @@ class CatalogSourceGenerator(ABC):
         return os.path.join(self._intermediate_dir, 'parts', f'cat_bin{ikappa}_{ishell:03d}.{format}')
 
     def _write_config(self) -> None:
-        """Write the ``config.yaml`` of the catalogs, or check it against the existing one (:func:`pollux.layout.write_config`)."""
+        """Write the ``config.yaml`` of the catalogs, or check it against the existing one (:func:`pollux.io.layout.write_config`)."""
         shell_builder = self.lensing.shell_builder
         augmentors = [dict(type=type(a).__name__, **{k: getattr(a, k) for k in ('model', 'model_params') if hasattr(a, k)}) for a in self.augmentors]
         parameters = dict(
@@ -1952,7 +1954,7 @@ class CatalogSourceUniform(CatalogSourceGenerator):
     lensing : LensingBuilder
         Lensing map builder.
     tag : str or None, optional
-        Tag of the catalogs: they go to ``catalogs/{nz}/{tag}/`` next to the maps (see :mod:`pollux.layout`), ``default`` if None.
+        Tag of the catalogs: they go to ``catalogs/{nz}/{tag}/`` next to the maps (see :mod:`pollux.io.layout`), ``default`` if None.
     nbar_input : float, array-like, or None, optional
         Galaxy surface density. Default is None.
     interp_fields, interp_method, smooth_fields, smooth_Mpc
@@ -2020,7 +2022,7 @@ class CatalogSourceClustered(CatalogSourceGenerator):
     lensing : LensingBuilder
         Lensing map builder.
     tag : str or None, optional
-        Tag of the catalogs: they go to ``catalogs/{nz}/{tag}/`` next to the maps (see :mod:`pollux.layout`), ``default`` if None.
+        Tag of the catalogs: they go to ``catalogs/{nz}/{tag}/`` next to the maps (see :mod:`pollux.io.layout`), ``default`` if None.
     nbar_input : float, array-like, or None, optional
         Galaxy surface density in gal/arcmin^2. Default is None.
     bias : float or array-like, optional
@@ -2152,7 +2154,7 @@ class CatalogSourceClusteredMultinomial(CatalogSourceClustered):
     lensing : LensingBuilder
         Lensing map builder.
     tag : str or None, optional
-        Tag of the catalogs: they go to ``catalogs/{nz}/{tag}/`` next to the maps (see :mod:`pollux.layout`), ``default`` if None.
+        Tag of the catalogs: they go to ``catalogs/{nz}/{tag}/`` next to the maps (see :mod:`pollux.io.layout`), ``default`` if None.
     nbar_input : float, array-like, or None, optional
         Galaxy surface density in gal/arcmin^2. Default is None.
     bias, bias_model : optional
@@ -2240,7 +2242,7 @@ class CatalogSourceClusteredPoisson(CatalogSourceClustered):
     lensing : LensingBuilder
         Lensing map builder.
     tag : str or None, optional
-        Tag of the catalogs: they go to ``catalogs/{nz}/{tag}/`` next to the maps (see :mod:`pollux.layout`), ``default`` if None.
+        Tag of the catalogs: they go to ``catalogs/{nz}/{tag}/`` next to the maps (see :mod:`pollux.io.layout`), ``default`` if None.
     nbar_input : float, array-like, or None, optional
         Galaxy surface density in gal/arcmin^2. Default is None.
     bias, bias_model : optional

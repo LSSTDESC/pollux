@@ -10,10 +10,10 @@ import healsparse as hsp
 import numpy as np
 import pyccl
 
-from . import layout
+from .io import layout
 from .cosmo import Tracer
 from .map_builder import MapBuilder, MapSum
-from .utils import quad
+from .utils.numerics import quad
 
 if TYPE_CHECKING:
     from .shells import ShellBuilder
@@ -34,7 +34,7 @@ class LensingBuilder(MapBuilder):
         can be a callable ``nz(z)`` or a tuple ``(z, n(z))``.
     tag : str or None, optional
         Name of the n(z): maps go to ``{shell_builder.matter_dir}/kappa/{tag}/`` (see
-        :mod:`pollux.layout`), ``kappa/default/`` when None. Mutually exclusive with ``save_dir``.
+        :mod:`pollux.io.layout`), ``kappa/default/`` when None. Mutually exclusive with ``save_dir``.
     save_dir : str or None, optional
         Explicit output directory.
     dtype : data-type, optional

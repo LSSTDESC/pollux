@@ -11,7 +11,7 @@ import healpy as hp
 import healsparse as hsp
 import BaryonForge as bfg
 from tqdm.auto import trange
-from . import layout
+from .io import layout
 from .shells import ShellBuilder, SnapshotShellBuilder
 
 logger = logging.getLogger(__name__)
@@ -51,7 +51,7 @@ class BaryonifiedShellBuilder(ShellBuilder):
         :meth:`matter_power_spectrum`. Default is ``10 * reader.mass_particles``.
     tag : str or None, optional
         Tag of the baryon model: the shells go to ``{realization}/dmb/{tag}/shells`` (see
-        :mod:`pollux.layout`), ``dmb/default`` if None.
+        :mod:`pollux.io.layout`), ``dmb/default`` if None.
     **interpolator_kwargs
         Forwarded to ``model.setup_interpolator`` for every shell. ``z_min``,
         ``z_max`` and ``N_samples_z`` are computed per shell (see
@@ -84,7 +84,7 @@ class BaryonifiedShellBuilder(ShellBuilder):
         self.tag = tag
         self._interpolator_kwargs = {**interpolator_kwargs, 'M_min': self.M_min}
 
-        # products of the baryon model (see pollux.layout), next to the dark-matter-only ones
+        # products of the baryon model (see pollux.io.layout), next to the dark-matter-only ones
         realization = shell_builder.realization_dir or os.path.dirname(shell_builder.matter_dir)
         matter = layout.matter_dir(realization, tag or 'default')
 

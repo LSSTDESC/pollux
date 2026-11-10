@@ -58,7 +58,7 @@ Two environment variables set the use of the NERSC allocation:
 Code version
 ------------
 
-:func:`pollux.utils.save_code_version` records each run in a new folder ``code_version/{date}`` of its output directory: git commit and state of pollux, date, host and command, lists of installed Python and conda packages, and copies of the run script and configuration.
+:func:`pollux.io.code_version.save_code_version` records each run in a new folder ``code_version/{date}`` of its output directory: git commit and state of pollux, date, host and command, lists of installed Python and conda packages, and copies of the run script and configuration.
 Run scripts refuse to start if pollux has uncommitted changes, unless the configuration sets ``allow_uncommitted: true``.
 
 Catalogs also store the commit in their FITS headers: ``POLLUXV`` (first 12 characters) and ``DIRTY`` (uncommitted changes).
@@ -66,7 +66,7 @@ Catalogs also store the commit in their FITS headers: ``POLLUXV`` (first 12 char
 Output structure
 ----------------
 
-Products are organised by realization and matter model (:mod:`pollux.layout`). Under
+Products are organised by realization and matter model (:mod:`pollux.io.layout`). Under
 ``{save_dir_root}/{simulation}/nside{nside}/seed{seed}/`` (with ``pad{padding}/`` for masked footprints with padding):
 
 - ``dmo/``: the dark-matter-only products:
@@ -88,4 +88,4 @@ and its plots in ``plots/``. Products are resumed in place, and a directory made
 raises an error instead of being mixed. NaMaster workspaces and padded masks, which depend only on the
 footprint, are in ``{save_dir_root}/{simulation}/nside{nside}/``.
 
-:class:`pollux.io.PolluxIO` loads these products, and ``python -m pollux.index {save_dir_root}`` lists them.
+:class:`pollux.io.PolluxLoader` loads these products, and ``python -m pollux.io.index {save_dir_root}`` lists them.

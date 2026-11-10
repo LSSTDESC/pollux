@@ -1,8 +1,8 @@
 import warnings
 
-from .io import PolluxIO
+from .io import PolluxLoader
 
-__all__ = ['PolluxIO']
+__all__ = ['PolluxLoader']
 
 try:
     from .lensing import BornLensingBuilder, SnapshotBornLensingBuilder
@@ -18,4 +18,4 @@ try:
     ]
 except ImportError as e:
     # e.g. on a machine with only the I/O dependencies, to read products
-    warnings.warn(f"Could not import the full pollux package ({e}): only pollux.io is available.")
+    warnings.warn(f"Could not import the full pollux package ({e}): only pollux.io (PolluxLoader) is available.")

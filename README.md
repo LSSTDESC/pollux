@@ -23,10 +23,8 @@ DESC package to create weak lensing and large-scale structure simulations from N
 - `ia.py` implements catalog augmentors for intrinsic alignments and observed shapes.
 - `cosmo.py` contains fixed cosmologies, and the `Tracer` and `Theory` objects for predictions.
 - `plotting.py` plots two-point statistics against theory.
-- `layout.py` defines the organisation of the output products (directories, file names, intermediate files and the `config.yaml` of each product).
-- `index.py` lists the products under a directory from their configurations (`python -m pollux.index ROOT`).
-- `io.py` implements `PolluxIO` to load products.
-- `utils.py` contains a number of helper functions for maps, binning and sampling, and records the code version of runs.
+- `io/` handles the products on disk, with light dependencies only: their organisation (`layout.py`: directories, file names, intermediate files and the `config.yaml` of each product), the code version of runs (`code_version.py`), their index (`index.py`, `python -m pollux.io.index ROOT`) and `PolluxLoader` to read them (`loader.py`).
+- `utils/` contains helper functions by theme: numerics, sky (coordinates, maps of points, masks) and NaMaster binnings.
 - `pipeline/` contains the Parsl tasks and execution configuration, see the documentation.
 
 ## Installation

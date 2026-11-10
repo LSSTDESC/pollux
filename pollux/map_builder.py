@@ -19,9 +19,10 @@ import sacc
 from itertools import product
 from tqdm.auto import tqdm, trange
 
-from . import layout
+from .io import layout
 from .cosmo import Theory, Tracer
-from .utils import make_mask_radec_cuts, make_nmtbin_logspaced
+from .utils.binning import make_nmtbin_logspaced
+from .utils.sky import make_mask_radec_cuts
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +49,7 @@ class MapBuilder(ABC):
         Data type used to store map values (dtype for arrays written to
         HealSparse/Healpix maps and intermediate map buffers).
     save_dir : str
-        Directory where outputs are written (see :mod:`pollux.layout`).
+        Directory where outputs are written (see :mod:`pollux.io.layout`).
     base_fname : str
         Name of the maps in file names (:meth:`get_fname`, e.g. ``'shell'``, ``'kappa'``).
     nmaps : int
@@ -105,7 +106,7 @@ class MapBuilder(ABC):
         full sky (by reflections, see :meth:`_octant_to_fullsky_ipix`) instead of
         the masked octant. Requires the octant footprint without padding. Default is False.
     realization_dir : str or None, optional
-        Directory of the realization (:func:`pollux.layout.realization_dir`), under which the
+        Directory of the realization (:func:`pollux.io.layout.realization_dir`), under which the
         intermediate files mirror the products. If None, they go to ``{save_dir}/intermediate``.
     smoothed_dir : str or None, optional
         Directory of the smoothed maps, by scale. Default is ``{save_dir}/smoothed``.
@@ -119,7 +120,7 @@ class MapBuilder(ABC):
     # ``what`` of the smoothed field maps (e.g. 'density' for shells; None for convergence maps)
     smoothed_field_what: str | None = None
 
-    # map indices in file names, and the files needed only to make the products (see :mod:`pollux.layout`)
+    # map indices in file names, and the files needed only to make the products (see :mod:`pollux.io.layout`)
     _index_format = '{:03d}'
     _INTERMEDIATE = ('alms', 'alms_octrep', 'catalog_props')
 

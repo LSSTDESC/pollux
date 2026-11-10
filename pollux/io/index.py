@@ -1,8 +1,8 @@
-"""Index of the products under a root directory, from their ``config.yaml`` (see :mod:`pollux.layout`).
+"""Index of the products under a root directory, from their ``config.yaml`` (see :mod:`pollux.io.layout`).
 
 Usage::
 
-    python -m pollux.index ROOT [--output products.yaml]
+    python -m pollux.io.index ROOT [--output products.yaml]
 
 lists every product (shells, halos, convergence maps, catalogs) under ``ROOT``, with its kind,
 parameters, inputs and code version, skipping intermediate files. The index is the starting

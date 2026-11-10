@@ -16,8 +16,6 @@ The Pollux package is organized into the following core modules:
    modules/cosmo
    modules/plotting
    modules/utils
-   modules/layout
-   modules/index_products
    modules/io
    modules/pipeline
 
@@ -46,7 +44,7 @@ Module Descriptions
    Catalog augmentors adding intrinsic alignments, reduced shear, magnification and observed ellipticities.
 
 **Utils** (:mod:`pollux.utils`)
-   Helper functions for map operations, binning, sampling and files, and the record of the code version of a run.
+   Helper functions, by theme: numerics (integration, grids, sampling), sky (coordinates, maps of points, masks) and NaMaster binnings.
 
 **Cosmology** (:mod:`pollux.cosmo`)
    Fixed cosmologies, tracers of observable fields and their theory predictions.
@@ -54,14 +52,10 @@ Module Descriptions
 **Plotting** (:mod:`pollux.plotting`)
    Plots of two-point statistics of bin pairs against theory.
 
-**Layout** (:mod:`pollux.layout`)
-   Directories and file names of the output products, the intermediate files apart, and the ``config.yaml`` of each product.
-
-**Index** (:mod:`pollux.index`)
-   Lists the products under a root directory from their ``config.yaml`` (``python -m pollux.index ROOT``).
-
 **I/O** (:mod:`pollux.io`)
-   Loads and manages Pollux simulation data.
+   Products on disk, with light dependencies only: their layout and ``config.yaml`` (:mod:`pollux.io.layout`), the code
+   version of runs (:mod:`pollux.io.code_version`), their index (``python -m pollux.io.index ROOT``) and loader
+   (:class:`pollux.io.PolluxLoader`).
 
 **Pipeline** (:mod:`pollux.pipeline`)
    Parsl tasks and execution configuration, see :doc:`pipeline`.

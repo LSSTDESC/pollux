@@ -7,7 +7,7 @@ import sys
 sys.path.insert(0, os.path.abspath('..'))
 
 project = 'Pollux'
-copyright = '2026, LSST DESC'
+copyright = '2022-2026, LSST Dark Energy Science Collaboration (DESC)'
 author = 'Cyrille Doux'
 release = '0.1'
 
@@ -23,7 +23,7 @@ templates_path = ['_templates']
 exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store']
 
 html_theme = 'sphinx_rtd_theme'
-html_static_path = ['_static']
+
 
 # Napoleon settings for Google-style docstrings
 napoleon_google_docstring = False

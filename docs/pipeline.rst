@@ -66,12 +66,26 @@ Catalogs also store the commit in their FITS headers: ``POLLUXV`` (first 12 char
 Output structure
 ----------------
 
-Under ``{save_dir_root}/{simulation}/nside{nside}/seed{seed}/``:
+Products are organised by realization and matter model (:mod:`pollux.layout`). Under
+``{save_dir_root}/{simulation}/nside{nside}/seed{seed}/`` (with ``pad{padding}/`` for masked footprints with padding):
 
-- ``shells/`` (``shells_pad{padding}/`` with padding): shell maps, density and tidal maps, and their spherical harmonics and Cls, with sub-volume maps in ``subs/``;
-- ``shells/kappa_{tag}/``: convergence and shear maps, for the tomographic bins and for the snapshots (``kappa_zsnapshots``);
-- ``shells/kappa_{tag}/catalogs_{tag}/``: source catalogs, their statistics (``cat_2pt.fits``, ``cat_cls.fits``) and ``plots/``;
-- ``shells/baryons_{tag}/``: the same products from baryonified shells;
+- ``dmo/``: the dark-matter-only products:
+
+  - ``shells/``: shell maps (``shell_{iii}.fits``), their Cls and information;
+  - ``smoothed/{s}Mpc/``: smoothed density and tidal maps (``density_{iii}``, ``t11_{iii}``, ...);
+  - ``kappa/{nz}/``: convergence and shear maps of the tomographic bins (``kappa_bin{b}``, ``gamma1_bin{b}``, ...);
+  - ``kappa/snapshots/``: convergence and shear maps with one source plane per shell (``kappa_{iii}``, ...);
+  - ``catalogs/{nz}/{tag}/``: source catalogs (``cat_bin{b}.fits``) and their statistics (``cat_2pt.fits``, ``cat_cls.fits``);
+
+- ``dmb/{tag}/``: the same products for the baryon model ``tag``;
+- ``halos/``: halo catalogs, shared by all baryon models;
+- ``intermediate/``: files needed only to make or resume the products (sub-volume maps, spherical harmonics,
+  partial catalogs, workspaces), at the same relative paths;
 - ``code_version/``: the records of the runs.
 
-:class:`pollux.io.PolluxIO` loads these products.
+Each product directory has a ``config.yaml`` with its parameters, inputs and the code version that made it,
+and its plots in ``plots/``. Products are resumed in place, and a directory made with other parameters
+raises an error instead of being mixed. NaMaster workspaces and padded masks, which depend only on the
+footprint, are in ``{save_dir_root}/{simulation}/nside{nside}/``.
+
+:class:`pollux.io.PolluxIO` loads these products, and ``python -m pollux.index {save_dir_root}`` lists them.

@@ -19,6 +19,7 @@ import sacc
 from itertools import product
 from tqdm.auto import tqdm, trange
 
+from . import layout
 from .cosmo import Theory, Tracer
 from .utils import make_mask_radec_cuts, make_nmtbin_logspaced
 
@@ -47,9 +48,9 @@ class MapBuilder(ABC):
         Data type used to store map values (dtype for arrays written to
         HealSparse/Healpix maps and intermediate map buffers).
     save_dir : str
-        Directory where outputs are written.
+        Directory where outputs are written (see :mod:`pollux.layout`).
     base_fname : str
-        Base filename prefix used by :meth:`get_fname`.
+        Name of the maps in file names (:meth:`get_fname`, e.g. ``'shell'``, ``'kappa'``).
     nmaps : int
         Number of maps handled/produced by this builder.
     nside_c : int, optional
@@ -103,6 +104,11 @@ class MapBuilder(ABC):
         If True, harmonic transforms use the octant footprint replicated to the
         full sky (by reflections, see :meth:`_octant_to_fullsky_ipix`) instead of
         the masked octant. Requires the octant footprint without padding. Default is False.
+    realization_dir : str or None, optional
+        Directory of the realization (:func:`pollux.layout.realization_dir`), under which the
+        intermediate files mirror the products. If None, they go to ``{save_dir}/intermediate``.
+    smoothed_dir : str or None, optional
+        Directory of the smoothed maps, by scale. Default is ``{save_dir}/smoothed``.
 
     Notes
     -----
@@ -112,6 +118,10 @@ class MapBuilder(ABC):
 
     # ``what`` of the smoothed field maps (e.g. 'density' for shells; None for convergence maps)
     smoothed_field_what: str | None = None
+
+    # map indices in file names, and the files needed only to make the products (see :mod:`pollux.layout`)
+    _index_format = '{:03d}'
+    _INTERMEDIATE = ('alms', 'alms_octrep', 'catalog_props')
 
     def __init__(
         self,
@@ -134,6 +144,8 @@ class MapBuilder(ABC):
         apotype: str | None = 'C1',
         padding_nside: int = 512,
         replicate_octant: bool = False,
+        realization_dir: str | None = None,
+        smoothed_dir: str | None = None,
     ) -> None:
         if isinstance(mask, np.ndarray) and len(mask) != hp.nside2npix(nside):
             raise ValueError(f"mask has {len(mask)} pixels but nside={nside} requires {hp.nside2npix(nside)}.")
@@ -142,6 +154,9 @@ class MapBuilder(ABC):
         self.nside = nside
         self.dtype = dtype
         self.save_dir = save_dir
+        self.realization_dir = realization_dir
+        self.intermediate_dir = layout.intermediate_dir(save_dir, realization_dir)
+        self.smoothed_dir = smoothed_dir if smoothed_dir is not None else os.path.join(save_dir, 'smoothed')
         self.base_fname = base_fname
         self.nmaps = nmaps
         self.nside_c = nside_c
@@ -240,61 +255,55 @@ class MapBuilder(ABC):
         extra: str | None = None,
         format: str | None = None,
     ) -> str:
-        """Build an output filename for a given data product.
+        """Return the path of a file of the products (or of their intermediate files).
 
         Parameters
         ----------
         imap : int or None, optional
-            Map index to include in the filename.
-        sub : int or None, optional
-            Sub-volume identifier. If provided, the file is placed under
-            ``{save_dir}/subs/``.
+            Map index (e.g. shell, or tomographic bin).
+        sub : int or str or None, optional
+            Sub-volume of the map (intermediate file).
         what : str or None, optional
-            Field/product tag (e.g. ``'alms'``, ``'cls'``, ``'gamma1'``,
-            ``'density'``).  Do *not* embed the smoothing scale here — pass it
-            via ``smooth_Mpc`` instead so the convention is consistent.
+            Field or product (e.g. ``'gamma1'``, ``'density'``, ``'cls'``, ``'alms'``), replacing
+            ``base_fname`` in the name. The smoothing scale goes in ``smooth_Mpc``.
         smooth_Mpc : float or None, optional
-            Physical Gaussian smoothing scale in Mpc.  When provided,
-            ``_{smooth_Mpc}Mpc`` is appended after ``what`` in the filename.
+            Comoving Gaussian smoothing scale in Mpc of the map.
         extra : str or None, optional
-            Additional string appended at the end of the stem.
+            Additional string at the end of the name.
         format : str or None, optional
-            File extension (without leading dot). Defaults to
-            ``self.save_format``.
+            File extension (without leading dot). Default is ``save_format``.
 
         Returns
         -------
         str
-            Full path to the requested product file.
+            ``{dir}/{what or base_fname}[_{index}][_sub{sub}][_{extra}].{format}``, with the index
+            formatted as ``_index_format`` (e.g. ``012`` or ``bin3``) and the directory:
 
-        Notes
-        -----
-        The filename stem is built as::
-
-            {base_fname}[_{what}][_{smooth_Mpc}Mpc][_imap{imap}][_sub{sub}][_{extra}]
-
-        The folder encodes all context that varies (nside, seed, builder type,
-        smoothing hierarchy); filenames are kept as short as possible.
+            - ``{smoothed_dir}/{smooth_Mpc}Mpc`` for smoothed maps;
+            - ``{intermediate_dir}/subs`` for sub-volumes, ``intermediate_dir`` for a_lm and
+              other intermediate files;
+            - ``save_dir`` otherwise.
         """
-        parts = [self.base_fname]
-        if what is not None:
-            parts.append(what)
-        if smooth_Mpc is not None:
-            parts.append(f'{smooth_Mpc}Mpc')
+        parts = [what or self.base_fname]
         if imap is not None:
-            parts.append(f'imap{imap}')
+            parts.append(self._index_format.format(imap))
         if sub is not None:
             parts.append(f'sub{sub}')
         if extra is not None:
             parts.append(extra)
         fname = '_'.join(parts) + f'.{format or self.save_format}'
 
-        if sub is None:
-            return os.path.join(self.save_dir, fname)
+        # smoothed maps by scale, intermediate files apart from the products
+        if smooth_Mpc is not None:
+            folder = os.path.join(self.smoothed_dir, f'{smooth_Mpc:g}Mpc')
+        elif sub is not None:
+            folder = os.path.join(self.intermediate_dir, 'subs')
+        elif what in self._INTERMEDIATE:
+            folder = self.intermediate_dir
         else:
-            subs_dir = os.path.join(self.save_dir, 'subs')
-            os.makedirs(subs_dir, exist_ok=True)
-            return os.path.join(subs_dir, fname)
+            folder = self.save_dir
+        os.makedirs(folder, exist_ok=True)
+        return os.path.join(folder, fname)
 
     @abstractmethod
     def construct_maps(self, imaps: int | Iterable[int] | None = None, **kwargs: Any) -> hsp.HealSparseMap | dict[int, hsp.HealSparseMap]:

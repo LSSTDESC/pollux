@@ -16,6 +16,8 @@ The Pollux package is organized into the following core modules:
    modules/cosmo
    modules/plotting
    modules/utils
+   modules/layout
+   modules/index_products
    modules/io
    modules/pipeline
 
@@ -51,6 +53,12 @@ Module Descriptions
 
 **Plotting** (:mod:`pollux.plotting`)
    Plots of two-point statistics of bin pairs against theory.
+
+**Layout** (:mod:`pollux.layout`)
+   Directories and file names of the output products, the intermediate files apart, and the ``config.yaml`` of each product.
+
+**Index** (:mod:`pollux.index`)
+   Lists the products under a root directory from their ``config.yaml`` (``python -m pollux.index ROOT``).
 
 **I/O** (:mod:`pollux.io`)
    Loads and manages Pollux simulation data.

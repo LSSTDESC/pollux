@@ -11,6 +11,7 @@ import healpy as hp
 import healsparse as hsp
 import BaryonForge as bfg
 from tqdm.auto import trange
+from . import layout
 from .shells import ShellBuilder, SnapshotShellBuilder
 
 logger = logging.getLogger(__name__)
@@ -49,7 +50,8 @@ class BaryonifiedShellBuilder(ShellBuilder):
         Minimum halo mass (Msun) of the baryonified halos, in the shells and in
         :meth:`matter_power_spectrum`. Default is ``10 * reader.mass_particles``.
     tag : str or None, optional
-        Tag of the output subdirectory ``baryons_{tag}/`` (``baryons/`` if None).
+        Tag of the baryon model: the shells go to ``{realization}/dmb/{tag}/shells`` (see
+        :mod:`pollux.layout`), ``dmb/default`` if None.
     **interpolator_kwargs
         Forwarded to ``model.setup_interpolator`` for every shell. ``z_min``,
         ``z_max`` and ``N_samples_z`` are computed per shell (see
@@ -82,7 +84,9 @@ class BaryonifiedShellBuilder(ShellBuilder):
         self.tag = tag
         self._interpolator_kwargs = {**interpolator_kwargs, 'M_min': self.M_min}
 
-        baryon_dir = f'baryons_{tag}' if tag is not None else 'baryons'
+        # products of the baryon model (see pollux.layout), next to the dark-matter-only ones
+        realization = shell_builder.realization_dir or os.path.dirname(shell_builder.matter_dir)
+        matter = layout.matter_dir(realization, tag or 'default')
 
         # Initialize parent ShellBuilder with the same configuration
         if self.shell_builder_ref.kind == 'snapshot':
@@ -91,7 +95,9 @@ class BaryonifiedShellBuilder(ShellBuilder):
             reader=shell_builder.reader,
             nshells=shell_builder.nshells,
             nside=shell_builder.nside,
-            save_dir=os.path.join(shell_builder.save_dir, baryon_dir),
+            save_dir=os.path.join(matter, 'shells'),
+            realization_dir=shell_builder.realization_dir,
+            smoothed_dir=os.path.join(matter, 'smoothed'),
             seed=shell_builder.seed,
             dtype=shell_builder.dtype,
             apply_grid_isometry=(shell_builder.Abs if shell_builder.apply_grid_isometry else False),
@@ -123,6 +129,29 @@ class BaryonifiedShellBuilder(ShellBuilder):
             bfg.ConvolvedProfile(dmo, pix), bfg.ConvolvedProfile(dmb, pix), self.cosmo_linear, mass_def=pyccl.halos.massdef.MassDef(*mass_def))
 
         self._interpolator_ishell = None  # shell index currently tabulated in self.model
+
+    def _config(self) -> tuple[str, dict, list[str]]:
+        """Return the kind, parameters and inputs of the baryonified shells, for their ``config.yaml``.
+
+        Returns
+        -------
+        product : str
+            ``'shells'``.
+        parameters : dict
+            Parameters of the shells (:meth:`pollux.shells.ShellBuilder._config`), and of the baryon model.
+        inputs : list of str
+            The dark-matter-only shells and the halo catalogs.
+        """
+        _, parameters, _ = super()._config()
+        parameters.update(
+            baryon_tag=self.tag,
+            dmo_profiles=type(self.dmo).__name__,
+            dmb_profiles=type(self.dmb).__name__,
+            mass_def=self.mass_def,
+            mass_name=self.mass_name,
+            mass_unit=self.mass_unit,
+            M_min=self.M_min)
+        return 'shells', parameters, [self.shell_builder_ref.save_dir, self.halo_builder.save_dir]
         self._pk2d = None
 
     def construct_maps(

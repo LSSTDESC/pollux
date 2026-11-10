@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 from typing import TYPE_CHECKING, Any, Iterable
@@ -9,6 +10,7 @@ import healsparse as hsp
 import numpy as np
 import pyccl
 
+from . import layout
 from .cosmo import Tracer
 from .map_builder import MapBuilder, MapSum
 from .utils import quad
@@ -31,11 +33,10 @@ class LensingBuilder(MapBuilder):
         Otherwise, a list describing source n(z) per tomographic bin. Each entry
         can be a callable ``nz(z)`` or a tuple ``(z, n(z))``.
     tag : str or None, optional
-        Tag used to name the output subdirectory: maps go to
-        ``{shell_builder.save_dir}/kappa_{tag}/``.  When *None*, outputs share
-        the shell builder's directory.  Mutually exclusive with ``save_dir``.
+        Name of the n(z): maps go to ``{shell_builder.matter_dir}/kappa/{tag}/`` (see
+        :mod:`pollux.layout`), ``kappa/default/`` when None. Mutually exclusive with ``save_dir``.
     save_dir : str or None, optional
-        Explicit output directory.  Takes precedence over ``tag`` when provided.
+        Explicit output directory.
     dtype : data-type, optional
         Output dtype for kappa and shear maps.
     sigma_e : float, optional
@@ -65,13 +66,9 @@ class LensingBuilder(MapBuilder):
         self.shell_builder = shell_builder
         self.tag = tag
         if save_dir is None:
-            if tag is None:
-                save_dir = shell_builder.save_dir
-            else:
-                save_dir = os.path.join(shell_builder.save_dir, f'kappa_{tag}')
-        else:
-            if tag is not None:
-                raise ValueError('Provide either tag or save_dir, not both.')
+            save_dir = os.path.join(shell_builder.matter_dir, 'kappa', tag or 'default')
+        elif tag is not None:
+            raise ValueError('Provide either tag or save_dir, not both.')
         self.reader = shell_builder.reader
         self.cosmo = shell_builder.cosmo
         self.nshells = shell_builder.nshells
@@ -111,11 +108,25 @@ class LensingBuilder(MapBuilder):
         base_fname = 'kappa'
 
         kwargs.setdefault('wsp_dir', shell_builder.wsp_dir)
+        kwargs.setdefault('realization_dir', shell_builder.realization_dir)
         kwargs.setdefault('mask', shell_builder.footprint)
         for k in ('padding_deg', 'apotype', 'padding_nside', 'replicate_octant', 'remove_monopole'):
             kwargs.setdefault(k, getattr(shell_builder, k))
         super().__init__(
             nside=shell_builder.nside, dtype=dtype, save_dir=save_dir, base_fname=base_fname, nmaps=self.nkappas, sacc_type="galaxy_convergence_cl", **kwargs)
+
+        # tomographic bins in file names (kappa_bin{b}), shells for snapshot lensing (kappa_{iii})
+        if nzs != 'zsnapshots':
+            self._index_format = 'bin{}'
+
+        # configuration of the products: the n(z), and the shells they come from
+        if nzs == 'zsnapshots':
+            nz_parameters = 'zsnapshots'
+        else:
+            nz_values = [getattr(nz, '__name__', repr(nz)) if callable(nz) else [np.asarray(a, dtype=float).tolist() for a in nz] for nz in nzs]
+            nz_parameters = dict(nbins=self.nkappas, sha1=hashlib.sha1(repr(nz_values).encode()).hexdigest())
+        layout.write_config(
+            self.save_dir, 'kappa', dict(builder=type(self).__name__, nzs=nz_parameters), inputs=[shell_builder.save_dir], realization=self.realization_dir)
 
     def _smooth_distance(self, ikappa: int) -> float:
         """Return the comoving distance of the source plane of a per-shell convergence map, converting smoothing scales to angles."""
@@ -406,13 +417,12 @@ class SnapshotBornLensingBuilder(BornLensingBuilder):
     shell_builder : pollux.shells.ShellBuilder
         Shell builder providing matter shells and geometry.
     tag : str or None, optional
-        Tag used to name the output subdirectory: ``kappa_{tag}``.  Defaults to
-        ``'zsnapshots'`` giving ``kappa_zsnapshots/``.
+        Name of the output subdirectory, ``kappa/{tag}`` (default ``kappa/snapshots``).
     **kwargs
         Forwarded to :class:`BornLensingBuilder` (e.g. ``multiple_planes``).
     """
 
-    def __init__(self, shell_builder: ShellBuilder, tag: str | None = 'zsnapshots', **kwargs: Any) -> None:
+    def __init__(self, shell_builder: ShellBuilder, tag: str | None = 'snapshots', **kwargs: Any) -> None:
         super().__init__(shell_builder, nzs='zsnapshots', tag=tag, **kwargs)
 
     def _create_tracers(self) -> list[Tracer]:

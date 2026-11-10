@@ -21,6 +21,7 @@ from tqdm.auto import tqdm, trange
 from parallel_sort import argsort as pargsort
 from collections.abc import Iterable
 
+from . import layout
 from .cosmo import Tracer
 from .map_builder import MapBuilder, MapSum
 from .utils import quad, split_bins, arange_endpoint
@@ -57,11 +58,12 @@ class ShellBuilder(MapBuilder):
         Output directory where maps and metadata are written. Mutually
         exclusive with ``root_dir``.
     root_dir : str or None, optional
-        Root directory from which ``save_dir`` is derived as
-        ``{root_dir}/nside{nside}/seed{seed}/shells``. Mutually exclusive
-        with ``save_dir``.
+        Root directory of the products of the simulation (see :mod:`pollux.layout`): the shells
+        go to ``{realization}/dmo/shells`` (``{realization}/halos`` for a halo reader), with
+        ``{realization} = {root_dir}/nside{nside}/seed{seed}[/pad{padding_deg}]``. Mutually
+        exclusive with ``save_dir``.
     base_fname : str or None, optional
-        Prefix of the output file names. Default is ``shell_{reader.kind}``.
+        Name of the maps in file names. Default is ``'halo'`` for a halo reader, ``'shell'`` otherwise.
     seed : int, optional
         Random seed used to draw isometries/rotflips and for subsampling.
     dtype : data-type, optional
@@ -146,17 +148,21 @@ class ShellBuilder(MapBuilder):
         self.apply_grid_isometry = apply_grid_isometry
         self.apply_replicate_rotflip = apply_replicate_rotflip
 
+        # directories of the products (see pollux.layout): halo catalogs apart, shared by all baryon models
+        halos = reader.kind.endswith('halo')
         if root_dir is not None:
             if save_dir is not None:
                 raise ValueError('Provide either root_dir or save_dir, not both.')
-            # maps built on a padded footprint are kept apart from unpadded ones
-            padding = kwargs.get('padding_deg') if mask is not None else None
-            shells_dir = f'shells_pad{padding:g}' if padding else 'shells'
-            save_dir = os.path.join(root_dir, f'nside{nside}', f'seed{seed}', shells_dir)
+            realization = layout.realization_dir(root_dir, nside, seed, kwargs.get('padding_deg') if mask is not None else None)
+            save_dir = os.path.join(realization, 'halos') if halos else os.path.join(layout.matter_dir(realization), 'shells')
+            kwargs.setdefault('realization_dir', realization)
+            kwargs.setdefault('smoothed_dir', os.path.join(os.path.dirname(save_dir), 'smoothed'))
             kwargs.setdefault('wsp_dir', os.path.join(root_dir, f'nside{nside}'))
+        self.matter_dir = os.path.dirname(save_dir)  # parent of the products made from these shells (kappa, catalogs)
+        self.group_isometries = group_isometries
 
         if base_fname is None:
-            base_fname = f'shell_{reader.kind}'
+            base_fname = 'halo' if halos else 'shell'
 
         if dtype == np.int32:
             warnings.warn(f"The max value for {dtype} might not be enough : {np.iinfo(dtype)}")
@@ -244,6 +250,38 @@ class ShellBuilder(MapBuilder):
             self.save_info()
         except Exception:
             warnings.warn("Could not save the metadata info.")
+        layout.write_config(self.save_dir, *self._config(), realization=self.realization_dir)
+
+    def _config(self) -> tuple[str, dict, list[str]]:
+        """Return the kind, parameters and inputs of the products, for their ``config.yaml`` (:func:`pollux.layout.write_config`).
+
+        Returns
+        -------
+        product : str
+            ``'halos'`` or ``'shells'``.
+        parameters : dict
+            Simulation, resolution, footprint and isometries of the shells.
+        inputs : list of str
+            Input product directories (none).
+        """
+        parameters = dict(
+            builder=type(self).__name__,
+            reader=type(self.reader).__name__,
+            simulation=getattr(self.reader, 'path', None),
+            snapshots=getattr(self.reader, 'snapshots', None),
+            nside=self.nside,
+            nshells=self.nshells,
+            seed=self.seed,
+            mask=self.footprint if isinstance(self.footprint, str) or self.footprint is None else 'array',
+            padding_deg=self.padding_deg,
+            apotype=self.apotype if self.padding_deg is not None else None,
+            apply_grid_isometry=self.apply_grid_isometry,
+            group_isometries=self.group_isometries,
+            apply_replicate_rotflip=self.apply_replicate_rotflip,
+            subsample_box=self.subsample_box,
+            dtype=self.dtype,
+        )
+        return ('halos' if self.reader.kind.endswith('halo') else 'shells'), parameters, []
 
     @cached_property
     def shell_edges_comoving_distance(self) -> np.ndarray:
@@ -351,7 +389,7 @@ class ShellBuilder(MapBuilder):
         """Write shell metadata, cosmology, and simulation info to disk.
 
         This method writes:
-        - ``{base_fname}_info.{ext}`` : shell edge and density summaries
+        - ``info.{ext}`` : shell edge and density summaries
         - ``cosmo_ccl.yaml`` : CCL cosmology (when serializable)
         - ``sim_info.yaml`` : key simulation and map parameters
 
@@ -363,7 +401,7 @@ class ShellBuilder(MapBuilder):
         # Shell info for later reference and compare to existing as a safe check
         if ext not in ['npy', 'txt']:
             raise ValueError(f"ext must be 'npy' or 'txt', not {ext!r}")
-        fname = os.path.join(self.save_dir, self.base_fname + '_info.' + ext)
+        fname = os.path.join(self.save_dir, 'info.' + ext)
 
         # table of the shells: redshift and distance edges, densities
         z_edges = self.shell_edges_redshift
@@ -1050,14 +1088,13 @@ class ShellBuilder(MapBuilder):
         """
         return 1. / self.sky_density(ishell)
 
-    def snapshot_lensing_builder(self, tag: str | None = 'zsnapshots') -> SnapshotBornLensingBuilder:
+    def snapshot_lensing_builder(self, tag: str | None = 'snapshots') -> SnapshotBornLensingBuilder:
         """Return a lensing builder with one convergence map per shell snapshot.
 
         Parameters
         ----------
         tag : str or None, optional
-            Tag used to name the output subdirectory: ``kappa_{tag}``.
-            Default is ``'zsnapshots'`` gives ``kappa_zsnapshots/``.
+            Name of the output subdirectory, ``kappa/{tag}`` (default ``kappa/snapshots``).
 
         Returns
         -------

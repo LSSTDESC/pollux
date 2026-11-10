@@ -6,7 +6,7 @@ def _make_baryon_builder(reader_dict, shell_dict, baryon_dict):
     reader = pollux.reader.HACCReader(**reader_dict)
     builder = pollux.shells.SnapshotShellBuilder(reader, **shell_dict)
     reader_halo = pollux.reader.HACCHaloReader(**reader_dict)
-    builder_halo = pollux.shells.SnapshotShellBuilder(reader_halo, **shell_dict)
+    builder_halo = pollux.shells.SnapshotShellBuilder(reader_halo, **{**shell_dict, 'subsample_box': None})  # as the halo catalogs
     builder_params = dict(baryon_dict)
     tag = builder_params.pop('tag', None)
     bfg_params = builder_params.pop('bfg_params')

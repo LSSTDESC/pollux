@@ -16,6 +16,7 @@ import treecorr
 import fitsio
 from astropy.io import fits
 
+from . import layout
 from .cosmo import Tracer
 from .utils import code_version, radec2thetaphi, quad, sample_pdf
 
@@ -39,7 +40,7 @@ class CatalogSourceGenerator(ABC):
         Lensing map builder used to define tomographic bins and provide maps to
         interpolate.
     tag : str or None, optional
-        Tag used to name the output directory ``catalogs_{tag}/``. Default is None.
+        Tag of the catalogs: they go to ``catalogs/{nz}/{tag}/`` next to the maps (see :mod:`pollux.layout`), ``default`` if None.
     nbar_input : float, array-like, or None, optional
         Galaxy surface density in gal/arcmin^2. If a float, the same surface
         density is used for all tomographic bins; if an array-like, it must
@@ -119,9 +120,10 @@ class CatalogSourceGenerator(ABC):
         self.interp_fields = tuple(interp_fields)
         self.augmentors = augmentors if augmentors is not None else []
 
-        # Catalogs live alongside the lensing maps; tag distinguishes parallel runs
-        cat_dir = f'catalogs_{tag}' if tag is not None else 'catalogs'
-        self._catalog_dir = os.path.join(lensing.save_dir, cat_dir)
+        # catalogs by n(z) and tag, next to the maps they come from (see pollux.layout)
+        shell_builder = self.lensing.shell_builder
+        self._catalog_dir = os.path.join(shell_builder.matter_dir, 'catalogs', os.path.basename(lensing.save_dir), tag or 'default')
+        self._intermediate_dir = layout.intermediate_dir(self._catalog_dir, shell_builder.realization_dir)
         os.makedirs(self._catalog_dir, exist_ok=True)
 
         # Compute derived attributes
@@ -265,6 +267,7 @@ class CatalogSourceGenerator(ABC):
         concatenated in shell order, which gives the same catalog as generating
         all shells at once.
         """
+        self._write_config()
         for ikappa in self.lensing.tqdm(ikappas, desc="[combine_shells]", leave=False):
             parts = [fits.getdata(self.get_fname(ikappa, ishell=ishell), 1) for ishell in range(self.nshells)]
             header = fits.Header()
@@ -489,13 +492,30 @@ class CatalogSourceGenerator(ABC):
         Returns
         -------
         str
-            ``{lensing.save_dir}/catalogs_{tag}/cat_imap{ikappa}.{format}``
-            (or ``catalogs/`` when tag is None), or
-            ``.../shells/cat_imap{ikappa}_shell{ishell}.{format}`` for a partial catalog.
+            ``{catalog_dir}/cat_bin{ikappa}.{format}``, with ``catalog_dir`` the
+            ``catalogs/{nz}/{tag}`` directory of the maps' products (see :mod:`pollux.layout`), or
+            ``{intermediate}/parts/cat_bin{ikappa}_{ishell:03d}.{format}`` for a partial catalog.
         """
         if ishell is None:
-            return os.path.join(self._catalog_dir, f'cat_imap{ikappa}.{format}')
-        return os.path.join(self._catalog_dir, 'shells', f'cat_imap{ikappa}_shell{ishell}.{format}')
+            return os.path.join(self._catalog_dir, f'cat_bin{ikappa}.{format}')
+        return os.path.join(self._intermediate_dir, 'parts', f'cat_bin{ikappa}_{ishell:03d}.{format}')
+
+    def _write_config(self) -> None:
+        """Write the ``config.yaml`` of the catalogs, or check it against the existing one (:func:`pollux.layout.write_config`)."""
+        shell_builder = self.lensing.shell_builder
+        augmentors = [dict(type=type(a).__name__, **{k: getattr(a, k) for k in ('model', 'model_params') if hasattr(a, k)}) for a in self.augmentors]
+        parameters = dict(
+            generator=type(self).__name__,
+            nbar_input=self.nbar_input,
+            bias=getattr(self, 'bias', None),
+            bias_model=getattr(self, 'bias_model', None),
+            interp_fields=self.interp_fields,
+            interp_method=self.interp_method,
+            smoothing=self.smoothing,
+            augmentors=augmentors,
+        )
+        inputs = [self.lensing.save_dir, self.snap_lensing.save_dir, shell_builder.save_dir, shell_builder.smoothed_dir]
+        layout.write_config(self._catalog_dir, 'catalogs', parameters, inputs=inputs, realization=shell_builder.realization_dir)
 
     def _save_catalogs(self, catalog: dict[int, dict[str, np.ndarray]], ikappas: int | Iterable[int] | None = None, ishell: int | None = None) -> None:
         """Write per-bin catalogs to FITS files.
@@ -510,6 +530,7 @@ class CatalogSourceGenerator(ABC):
         ishell : int or None, optional
             If given, save as the partial catalogs of shell ``ishell``.
         """
+        self._write_config()
         columns = list(self.interp_fields)
         for augmentor in self.augmentors:
             columns += augmentor.new_columns
@@ -856,7 +877,7 @@ class CatalogSourceGenerator(ABC):
             if stat != 'shear_clustering':
                 i, j = max(i, j), min(i, j)
             name = f'{stat}_{i}_{j}' + ('_randoms' if randoms and stat != 'shear' else '')
-        return os.path.join(self._catalog_dir, f'wsp_{name}_lmax{self.b.lmax}.wsp')
+        return os.path.join(self._intermediate_dir, f'wsp_{name}_lmax{self.b.lmax}.wsp')
 
     def get_wsp(
             self,
@@ -1175,6 +1196,7 @@ class CatalogSourceGenerator(ABC):
         str
             Path to the saved SACC FITS file.
         """
+        self._write_config()
         s = sacc.Sacc()
         shear_tracers = self.lensing.tracers_sacc
         density_tracers = [t.sacc() for t in self.density_tracers]
@@ -1737,6 +1759,7 @@ class CatalogSourceGenerator(ABC):
         str
             Path to the saved SACC FITS file.
         """
+        self._write_config()
         s = sacc.Sacc()
         shear_tracers = self.lensing.tracers_sacc
         density_tracers = [t.sacc() for t in self.density_tracers]
@@ -1929,7 +1952,7 @@ class CatalogSourceUniform(CatalogSourceGenerator):
     lensing : LensingBuilder
         Lensing map builder.
     tag : str or None, optional
-        Tag used to name the output directory ``catalogs_{tag}/``. Default is None.
+        Tag of the catalogs: they go to ``catalogs/{nz}/{tag}/`` next to the maps (see :mod:`pollux.layout`), ``default`` if None.
     nbar_input : float, array-like, or None, optional
         Galaxy surface density. Default is None.
     interp_fields, interp_method, smooth_fields, smooth_Mpc
@@ -1997,7 +2020,7 @@ class CatalogSourceClustered(CatalogSourceGenerator):
     lensing : LensingBuilder
         Lensing map builder.
     tag : str or None, optional
-        Tag used to name the output directory ``catalogs_{tag}/``. Default is None.
+        Tag of the catalogs: they go to ``catalogs/{nz}/{tag}/`` next to the maps (see :mod:`pollux.layout`), ``default`` if None.
     nbar_input : float, array-like, or None, optional
         Galaxy surface density in gal/arcmin^2. Default is None.
     bias : float or array-like, optional
@@ -2129,7 +2152,7 @@ class CatalogSourceClusteredMultinomial(CatalogSourceClustered):
     lensing : LensingBuilder
         Lensing map builder.
     tag : str or None, optional
-        Tag used to name the output directory ``catalogs_{tag}/``. Default is None.
+        Tag of the catalogs: they go to ``catalogs/{nz}/{tag}/`` next to the maps (see :mod:`pollux.layout`), ``default`` if None.
     nbar_input : float, array-like, or None, optional
         Galaxy surface density in gal/arcmin^2. Default is None.
     bias, bias_model : optional
@@ -2217,7 +2240,7 @@ class CatalogSourceClusteredPoisson(CatalogSourceClustered):
     lensing : LensingBuilder
         Lensing map builder.
     tag : str or None, optional
-        Tag used to name the output directory ``catalogs_{tag}/``. Default is None.
+        Tag of the catalogs: they go to ``catalogs/{nz}/{tag}/`` next to the maps (see :mod:`pollux.layout`), ``default`` if None.
     nbar_input : float, array-like, or None, optional
         Galaxy surface density in gal/arcmin^2. Default is None.
     bias, bias_model : optional

@@ -43,6 +43,9 @@ Each run records its code and environment in `code_version/` in its output direc
 ## Contributing
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the conventions of the code (formatting, docstrings, naming, organisation, plots and pipeline tasks), and [ROADMAP.md](ROADMAP.md) for planned developments.
 
+## License
+pollux is distributed under the BSD 3-Clause License, see [LICENSE](LICENSE).
+
 ## Papers
 - [Mena-Fernández et al. (2026)](https://arxiv.org/abs/2605.00821): optimization of weak lensing lightcone simulations for higher-order statistics in LSST, using lightcones created from HACC simulations with pollux.
 - [Bera et al. (2026)](https://arxiv.org/abs/2605.00818): impact of baryonic feedback on two- and three-point correlation functions of galaxies and shear, from these same lightcones baryonified.

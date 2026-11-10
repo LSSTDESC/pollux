@@ -8,6 +8,7 @@ Conventions for the code of pollux: formatting, documentation, naming, organisat
 - Python 3.10 or later, with `from __future__ import annotations` and type hints on public functions and methods.
 
 ## Docstrings
+- Every module (and package `__init__`) starts with a docstring: a one-line summary of what it provides, followed if useful by a short paragraph naming its main classes or functions, or its command line.
 - [NumPy style](https://numpydoc.readthedocs.io/en/latest/format.html), complete and kept up to date: `Parameters`, `Returns` (or `Yields`), and `Notes` where needed (e.g. file names or layouts).
 - A one-line summary first, in the imperative for functions ("Return ...", "Compute ...").
 - Constructor parameters go in the class docstring, not in `__init__`.

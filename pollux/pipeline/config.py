@@ -1,3 +1,5 @@
+"""Parsl configuration of the pipeline: executors by memory and CPU use on Slurm at NERSC, and the YAML configurations of runs."""
+
 import os
 import time
 from functools import partial

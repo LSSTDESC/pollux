@@ -1,3 +1,5 @@
+"""Parsl tasks of the pipeline, one product per task, chained by run scripts (see the pipeline documentation)."""
+
 from parsl import python_app
 
 

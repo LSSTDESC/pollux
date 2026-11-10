@@ -1,3 +1,9 @@
+"""Base class of the map builders (:class:`MapBuilder`).
+
+Handles file names and I/O of HealSparse maps, footprints and padding, spherical harmonic transforms and
+smoothing, power spectra with their predictions, and plots.
+"""
+
 from __future__ import annotations
 
 import logging

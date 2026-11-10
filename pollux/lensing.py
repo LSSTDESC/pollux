@@ -1,3 +1,9 @@
+"""Convergence and shear maps from the shells, in the Born approximation.
+
+For tomographic redshift distributions (:class:`BornLensingBuilder`), or one source plane per shell
+(:class:`SnapshotBornLensingBuilder`).
+"""
+
 from __future__ import annotations
 
 import hashlib

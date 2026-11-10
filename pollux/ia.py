@@ -1,3 +1,5 @@
+"""Catalog augmentors: intrinsic alignments (:class:`IACalculator`), and reduced shear and observed shapes (:class:`CatalogAugmentorShear`)."""
+
 from __future__ import annotations
 
 from typing import Any

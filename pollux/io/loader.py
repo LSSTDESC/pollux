@@ -1,3 +1,5 @@
+"""Loader of the products of one realization, from their files only (:class:`PolluxLoader`)."""
+
 from __future__ import annotations
 
 import logging

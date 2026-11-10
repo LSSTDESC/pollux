@@ -1,3 +1,10 @@
+"""pollux: weak lensing and large-scale structure simulations from N-body simulations.
+
+The main classes are available from the package: readers, shell, lensing and baryonified builders, catalog
+generators and augmentors, and :class:`~pollux.io.PolluxLoader` to read products, which only needs the I/O
+dependencies (:mod:`pollux.io`).
+"""
+
 import warnings
 
 from .io import PolluxLoader

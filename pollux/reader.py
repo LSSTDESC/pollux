@@ -1,3 +1,5 @@
+"""Readers of N-body simulations (HACC, SLICS, ...): particles and halos of the snapshots or lightcones, cosmology and shell geometry."""
+
 from __future__ import annotations
 
 import itertools

@@ -1,3 +1,8 @@
+"""Tomographic source catalogs from the shells and lensing maps, by uniform or clustered sampling of the galaxies.
+
+Also measures their two-point statistics (Cls with NaMaster, two-point functions with TreeCorr) and predicts them.
+"""
+
 from __future__ import annotations
 
 import logging

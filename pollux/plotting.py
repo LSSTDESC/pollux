@@ -1,3 +1,5 @@
+"""Plots of two-point statistics of bin pairs against their predictions (:func:`plot_pairs`)."""
+
 from __future__ import annotations
 
 import logging

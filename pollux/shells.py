@@ -1,3 +1,9 @@
+"""Lightcone shells from N-body particles or halos (:class:`ShellBuilder` and subclasses).
+
+Replicates and transforms the simulation boxes (random isometries), counts the particles in pixels, and computes
+tidal fields.
+"""
+
 from __future__ import annotations
 
 import itertools

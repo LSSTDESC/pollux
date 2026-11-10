@@ -1,3 +1,5 @@
+"""Baryonification of the shells with BaryonForge (:class:`BaryonifiedShellBuilder`), with the matching correction of the matter power spectrum."""
+
 from __future__ import annotations
 
 import copy

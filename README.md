@@ -1,5 +1,6 @@
 # pollux
 
+[![Documentation](https://readthedocs.org/projects/lsstdesc-pollux/badge/?version=latest)](https://lsstdesc-pollux.readthedocs.io/en/latest/)
 [![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD_3--Clause-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 [![GitHub issues](https://img.shields.io/github/issues/LSSTDESC/pollux)](https://github.com/LSSTDESC/pollux/issues)
@@ -42,7 +43,7 @@ pip install -e .
 ```
 
 ## Running the pipeline
-A run is a Python script chaining the Parsl tasks of `pollux.pipeline.tasks` with a YAML configuration, on Slurm jobs set by `pollux.pipeline.config`. See the [pipeline documentation](docs/pipeline.rst) for the steps, the options and the structure of the outputs.
+A run is a Python script chaining the Parsl tasks of `pollux.pipeline.tasks` with a YAML configuration, on Slurm jobs set by `pollux.pipeline.config`. See the [documentation](https://lsstdesc-pollux.readthedocs.io/) and its [pipeline page](docs/pipeline.rst) for the steps, the options and the structure of the outputs.
 
 Each run records its code and environment in `code_version/` in its output directory, and catalogs store the git commit in their FITS headers.
 

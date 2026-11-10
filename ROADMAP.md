@@ -21,5 +21,8 @@ Planned developments of pollux, with their GitHub issue when there is one. Remov
   - Understand the deficit of a few percent in the galaxy clustering of tomographic bins 2–4 at large scales, which does not come from clipping.
 - Performance
   - Move what can be to GPUs (spherical harmonic transforms, painting particles on maps, baryonification, catalog sampling).
+- Tests
+  - Unit tests (pytest) on small synthetic inputs (`DummyReader`, low nside), and tests on the simulations run at NERSC only.
+  - Continuous integration with GitHub Actions: unit tests and a strict build of the documentation on each pull request.
 - Data products
   - Register the products in the [DESC data registry](https://github.com/LSSTDESC/dataregistry): a script registering each product directory, with its `config.yaml` (parameters and inputs) and the code version of its run. The products are made in scratch and copied to the registry once validated ([#12](https://github.com/LSSTDESC/pollux/issues/12)).

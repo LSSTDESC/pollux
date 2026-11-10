@@ -5,10 +5,10 @@ All products of one realization (simulation, nside, seed and footprint padding) 
 
     halos/                          halo catalogs, shared by all baryon models
     dmo/                            dark-matter-only products
-        shells/                     shell_{iii}.fits, cls.fits, info.npy
+        shells/                     shell_{iii}.fits, cls.fits, shells.fits (table of the shells)
         smoothed/{s}Mpc/            density_{iii}, t11_{iii}, t22_{iii}, t12_{iii}
         kappa/snapshots/            kappa_{iii}, gamma1_{iii}, gamma2_{iii} (one source plane per shell)
-        kappa/{nz}/                 kappa_bin{b}, gamma1_bin{b}, gamma2_bin{b}, nzs.npy
+        kappa/{nz}/                 kappa_bin{b}, gamma1_bin{b}, gamma2_bin{b}, nzs.txt
         catalogs/{nz}/{tag}/        cat_bin{b}.fits, cat_2pt.fits, cat_cls.fits
     dmb/{tag}/                      baryonified products, with the same subtree as dmo/
     intermediate/                   files needed only to make or resume the products (sub-volume maps,

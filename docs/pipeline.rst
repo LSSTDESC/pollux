@@ -71,9 +71,9 @@ Products are organised by realization and matter model (:mod:`pollux.io.layout`)
 
 - ``dmo/``: the dark-matter-only products:
 
-  - ``shells/``: shell maps (``shell_{iii}.fits``), their Cls and information;
+  - ``shells/``: shell maps (``shell_{iii}.fits``), their Cls (``cls.fits``) and the table of the shells (``shells.fits``: redshift and distance edges, mean densities);
   - ``smoothed/{s}Mpc/``: smoothed density and tidal maps (``density_{iii}``, ``t11_{iii}``, ...);
-  - ``kappa/{nz}/``: convergence and shear maps of the tomographic bins (``kappa_bin{b}``, ``gamma1_bin{b}``, ...);
+  - ``kappa/{nz}/``: convergence and shear maps of the tomographic bins (``kappa_bin{b}``, ``gamma1_bin{b}``, ...), and their redshift distributions (``nzs.txt``);
   - ``kappa/snapshots/``: convergence and shear maps with one source plane per shell (``kappa_{iii}``, ...);
   - ``catalogs/{nz}/{tag}/``: source catalogs (``cat_bin{b}.fits``) and their statistics (``cat_2pt.fits``, ``cat_cls.fits``);
 
@@ -83,7 +83,7 @@ Products are organised by realization and matter model (:mod:`pollux.io.layout`)
   partial catalogs, workspaces), at the same relative paths;
 - ``code_version/``: the records of the runs.
 
-Each product directory has a ``config.yaml`` with its parameters, inputs and the code version that made it,
+Each product directory has a ``config.yaml`` with its parameters (for shells and halos, also the simulation and its cosmology), inputs and the code version that made it,
 and its plots in ``plots/``. Products are resumed in place, and a directory made with other parameters
 raises an error instead of being mixed. NaMaster workspaces and padded masks, which depend only on the
 footprint, are in ``{save_dir_root}/{simulation}/nside{nside}/``.

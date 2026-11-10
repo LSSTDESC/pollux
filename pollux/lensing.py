@@ -83,16 +83,6 @@ class LensingBuilder(MapBuilder):
         self.nzs = nzs
         self.nkappas = self.shell_builder.nshells if nzs == 'zsnapshots' else len(nzs)
 
-        # save n(z) info (skipped for snapshot mode — no n(z) to record)
-        if nzs != 'zsnapshots':
-            fname = os.path.join(save_dir, 'nzs.npy')
-            os.makedirs(save_dir, exist_ok=True)
-            if not os.path.exists(fname):
-                np.save(fname, nzs)
-                logger.debug("Saved to file %s.", fname)
-            else:
-                logger.debug("Found existing n(z) file at %s, skipping.", fname)
-
         # normalize sigma_e: accept scalar or per-bin array
         sigma_arr = np.atleast_1d(sigma_e).astype(float)
         if sigma_arr.size == 1:
@@ -133,6 +123,25 @@ class LensingBuilder(MapBuilder):
             nz_parameters = dict(nbins=self.nkappas, sha1=hashlib.sha1(repr(nz_values).encode()).hexdigest())
         layout.write_config(
             self.save_dir, 'kappa', dict(builder=type(self).__name__, nzs=nz_parameters), inputs=[shell_builder.save_dir], realization=self.realization_dir)
+        if nzs != 'zsnapshots':
+            self._save_nzs()
+
+    def _save_nzs(self) -> None:
+        """Save the redshift distributions, unless saved already.
+
+        Distributions tabulated on a common redshift grid are saved as text (``nzs.txt``: columns z, then
+        one per bin, as the usual n(z) files), others as ``nzs.npy``.
+        """
+        tables = [nz for nz in self.nzs if not callable(nz)]
+        common = len(tables) == len(self.nzs) and all(np.array_equal(np.asarray(nz[0]), np.asarray(tables[0][0])) for nz in tables)
+        fname = os.path.join(self.save_dir, 'nzs.txt' if common else 'nzs.npy')
+        if os.path.exists(fname):
+            return
+        if common:
+            np.savetxt(fname, np.column_stack([tables[0][0]] + [nz[1] for nz in tables]), header='z ' + ' '.join(f'nz_{i}' for i in range(len(tables))))
+        else:
+            np.save(fname, np.array(self.nzs, dtype=object), allow_pickle=True)
+        logger.debug("Saved to file %s.", fname)
 
     def _smooth_distance(self, ikappa: int) -> float:
         """Return the comoving distance of the source plane of a per-shell convergence map, converting smoothing scales to angles."""

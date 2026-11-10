@@ -6,6 +6,7 @@ tidal fields.
 
 from __future__ import annotations
 
+import io
 import itertools
 import logging
 import numbers
@@ -251,12 +252,11 @@ class ShellBuilder(MapBuilder):
             warnings.warn("Reader does not implement `shell_edges_redshift` or `shell_edges_comoving_distance` or `boxsize.")
             assert isinstance(reader, DummyReader)
 
-        # Dump useful metadata
-        try:
-            self.save_info()
-        except Exception:
-            warnings.warn("Could not save the metadata info.")
+        # configuration of the products (checked against an existing one), then the table of the shells
+        # (a DummyReader has no shell edges)
         layout.write_config(self.save_dir, *self._config(), realization=self.realization_dir)
+        if not isinstance(reader, DummyReader):
+            self.save_info()
 
     def _config(self) -> tuple[str, dict, list[str]]:
         """Return the kind, parameters and inputs of the products, for their ``config.yaml`` (:func:`pollux.io.layout.write_config`).
@@ -266,15 +266,32 @@ class ShellBuilder(MapBuilder):
         product : str
             ``'halos'`` or ``'shells'``.
         parameters : dict
-            Simulation, resolution, footprint and isometries of the shells.
+            Simulation (path, kind, box, particles, snapshots), cosmology (CCL parameters), resolution,
+            footprint and isometries of the shells.
         inputs : list of str
             Input product directories (none).
         """
+        reader = self.reader
+        simulation = dict(
+            path=getattr(reader, 'path', None),
+            kind=reader.kind,
+            boxsize=getattr(reader, 'boxsize', None),
+            nparticles=getattr(reader, 'nparticles', None),
+            mass_particles=getattr(reader, 'mass_particles', None),
+            snapshots=getattr(reader, 'snapshots', None),
+            zsnapshots=getattr(reader, 'zsnapshots', None),
+        )
+        try:
+            stream = io.StringIO()
+            reader.cosmo.write_yaml(stream)
+            cosmology = yaml.safe_load(stream.getvalue())
+        except (AttributeError, ValueError):
+            cosmology = None  # no cosmology, or not serializable (e.g. a tabulated P(k))
         parameters = dict(
             builder=type(self).__name__,
-            reader=type(self.reader).__name__,
-            simulation=getattr(self.reader, 'path', None),
-            snapshots=getattr(self.reader, 'snapshots', None),
+            reader=type(reader).__name__,
+            simulation=simulation,
+            cosmology=cosmology,
             nside=self.nside,
             nshells=self.nshells,
             seed=self.seed,
@@ -357,136 +374,48 @@ class ShellBuilder(MapBuilder):
 
         return quad(lambda z: z * dVdz(z), zmin, zmax) / quad(dVdz, zmin, zmax)
 
-    def shell_info(self, fname: str | None = None) -> np.ndarray:
-        """Compute and optionally save a structured summary of shell metadata.
-
-        Parameters
-        ----------
-        fname : str or None, optional
-            If provided, write the table to this filename. If it contains
-            ``'.txt'``, the output is plain text via :func:`numpy.savetxt`,
-            otherwise it is saved as ``.npy`` via :func:`numpy.save`.
+    def info_table(self) -> np.ndarray:
+        """Return the table of the shells.
 
         Returns
         -------
         ndarray
-            Structured numpy array with fields including shell index, edge
-            redshifts, comoving distances, and snapshot identifiers.
+            Structured array, one row per shell: ``ishell``, redshift and comoving distance (Mpc) edges
+            (``zmin``, ``zmax``, ``chimin``, ``chimax``), and for snapshot shells the snapshot (``zsnapshot``,
+            ``chisnapshot``, ``snapshot_id``), then the mean number of particles per pixel (``pixel_density``)
+            and per steradian (``sky_density``), which turn counts into density contrasts.
         """
         z_edges = self.shell_edges_redshift
-        names = ['ishell', 'zsnapshot', 'zmin', 'zmax', 'chisnapshot', 'chimin', 'chimax', 'snapshot_id']
-        dtypes = ['int', 'float', 'float', 'float', 'float', 'float', 'float', 'int']
-        out = np.array(
-            list(
-                zip(
-                    np.arange(self.nshells), self.reader.zsnapshots, z_edges[:-1], z_edges[1:],
-                    self.cosmo.comoving_radial_distance(1 / (1 + self.reader.zsnapshots)), self.cosmo.comoving_radial_distance(1 / (1 + z_edges[:-1])),
-                    self.cosmo.comoving_radial_distance(1 / (1 + z_edges[1:])), self.reader.snapshots)),
-            dtype=list(zip(names, dtypes)))
-        if fname is not None:
-            if '.txt' in fname:
-                np.savetxt(fname, out, header=' '.join(names), fmt='%8i %16.8f %16.8f %16.8f %16.8f %16.8f %16.8f %8i')
-            else:
-                np.save(fname, out)
-            logger.debug("Saved to file %s.", fname)
-        return out
-
-    def save_info(self, ext: str = 'npy') -> None:
-        """Write shell metadata, cosmology, and simulation info to disk.
-
-        This method writes:
-        - ``info.{ext}`` : shell edge and density summaries
-        - ``cosmo_ccl.yaml`` : CCL cosmology (when serializable)
-        - ``sim_info.yaml`` : key simulation and map parameters
-
-        Parameters
-        ----------
-        ext : {'npy', 'txt'}, optional
-            Output format for shell summary.
-        """
-        # Shell info for later reference and compare to existing as a safe check
-        if ext not in ['npy', 'txt']:
-            raise ValueError(f"ext must be 'npy' or 'txt', not {ext!r}")
-        fname = os.path.join(self.save_dir, 'info.' + ext)
-
-        # table of the shells: redshift and distance edges, densities
-        z_edges = self.shell_edges_redshift
-        pixel_density = [self.pixel_density(ishell) for ishell in range(self.nshells)]
-        sky_density = [self.sky_density(ishell) for ishell in range(self.nshells)]
+        chi = lambda z: self.cosmo.comoving_radial_distance(1. / (1. + np.asarray(z)))
+        columns = dict(ishell=np.arange(self.nshells))
         if self.kind == 'snapshot':
-            names = ['ishell', 'zsnapshot', 'zmin', 'zmax', 'chisnapshot', 'chimin', 'chimax', 'snapshot_id', 'pixel_density', 'sky_density']
-            dtypes = ['int', 'float', 'float', 'float', 'float', 'float', 'float', 'int', 'float', 'float']
-            shell_info = np.array(
-                list(
-                    zip(
-                        np.arange(self.nshells), self.reader.zsnapshots, z_edges[:-1], z_edges[1:],
-                        self.cosmo.comoving_radial_distance(1 / (1 + self.reader.zsnapshots)), self.cosmo.comoving_radial_distance(1 / (1 + z_edges[:-1])),
-                        self.cosmo.comoving_radial_distance(1 / (1 + z_edges[1:])), self.reader.snapshots, pixel_density, sky_density)),
-                dtype=list(zip(names, dtypes)))
-            fmt = '%8i %16.8f %16.8f %16.8f %16.8f %16.8f %16.8f %8i %16.8f %16.8f'
-        elif self.kind == 'lightcone':
-            names = ['ishell', 'zmin', 'zmax', 'pixel_density', 'sky_density']
-            dtypes = ['int', 'float', 'float', 'float', 'float']
-            shell_info = np.array(list(zip(np.arange(self.nshells), z_edges[:-1], z_edges[1:], pixel_density, sky_density)), dtype=list(zip(names, dtypes)))
-            fmt = '%8i %16.8f %16.8f %16.8f %16.8f'
-        else:
-            raise ValueError
+            columns.update(zsnapshot=self.reader.zsnapshots, chisnapshot=chi(self.reader.zsnapshots), snapshot_id=self.reader.snapshots)
+        elif self.kind != 'lightcone':
+            raise ValueError(f"Unknown kind of shells {self.kind!r}.")
+        columns.update(
+            zmin=z_edges[:-1],
+            zmax=z_edges[1:],
+            chimin=chi(z_edges[:-1]),
+            chimax=chi(z_edges[1:]),
+            pixel_density=[self.pixel_density(ishell) for ishell in range(self.nshells)],
+            sky_density=[self.sky_density(ishell) for ishell in range(self.nshells)])
+        return np.rec.fromarrays([np.asarray(v) for v in columns.values()], names=list(columns))
 
-        # compare with an existing table (the configuration must not have changed), or save it
-        if ext == 'npy':
-            if os.path.exists(fname):
-                shell_info_existing = np.load(fname)
-                logger.debug("Found and loaded existing shell info at %s.", fname)
-                try:
-                    for name, dtype in zip(names, dtypes):
-                        if dtype == 'int':
-                            np.testing.assert_array_equal(
-                                shell_info[name], shell_info_existing[name], err_msg=f"Shell info {name} does not match existing file {fname}.")
-                        elif dtype == 'float':
-                            np.testing.assert_allclose(
-                                shell_info[name], shell_info_existing[name], rtol=1e-5, err_msg=f"Shell info {name} does not match existing file {fname}.")
-                except (TypeError, AssertionError) as e:
-                    warnings.warn(f'Shell info file exists but does not match current config: {e}.')
-            else:
-                np.save(fname, shell_info)
-                logger.debug("Saved to file %s.", fname)
-        else:
-            np.savetxt(fname, shell_info, header=' '.join(names), fmt=fmt)
-            logger.debug("Saved to file %s.", fname)
+    def save_info(self) -> None:
+        """Save the table of the shells (:meth:`info_table`) to ``shells.fits``, unless it exists.
 
-        # Save cosmology
-        fname = os.path.join(self.save_dir, "cosmo_ccl.yaml")
-        if not os.path.exists(fname):
-            try:
-                self.reader.cosmo.write_yaml(os.path.join(self.save_dir, "cosmo_ccl.yaml"))
-                logger.debug("Saved to file %s.", fname)
-            except ValueError:
-                warnings.warn("Cannot write cosmo yaml file, likely due to using non-serializable options (eg P(k)).")
-        else:
-            logger.debug("Found existing cosmology file at %s, skipping.", fname)
+        The table follows from the configuration of the products, which :func:`pollux.io.layout.write_config`
+        checks against the existing one.
+        """
+        fname = os.path.join(self.save_dir, 'shells.fits')
+        if os.path.exists(fname):
+            return
 
-        # Save simulation and maps info
-        data = {
-            "nparticles": self.reader.nparticles,
-            "boxsize": self.reader.boxsize,
-            "mass_particles": self.reader.mass_particles,
-            "box_comoving_density": self.reader.box_comoving_density,
-            "kind": self.reader.kind,
-            "snapshots": self.reader.snapshots.tolist(),
-            "nsnapshots": self.reader.nsnapshots,
-            "zsnapshots": self.reader.zsnapshots.tolist(),
-            "nshells": self.nshells,
-            "nside": self.nside,
-            "nside_c": self.nside_c,
-            "npix": self.npix,
-        }
-        fname = os.path.join(self.save_dir, 'sim_info.yaml')
-        if not os.path.exists(fname):
-            with open(fname, "w") as f:
-                yaml.dump(data, f)
-            logger.debug("Saved to file %s.", fname)
-        else:
-            logger.debug("Found existing simulation info file at %s, skipping.", fname)
+        # written atomically (several workers may create it at once)
+        tmp = f'{fname}.{os.getpid()}'
+        fits.BinTableHDU(self.info_table(), name='SHELLS').writeto(tmp, overwrite=True)
+        os.replace(tmp, fname)
+        logger.debug("Saved to file %s.", fname)
 
     def random_isometries(self, group_isometries: bool | float | None = None, get_shell_identifier: bool = False) -> list:
         """Generate random affine isometries for shells.

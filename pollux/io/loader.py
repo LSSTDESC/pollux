@@ -35,6 +35,19 @@ class PolluxLoader:
         ``catalogs/{nz}``), ``'snapshots'`` for one source plane per shell. Default is ``'SRDv1_nz'``.
     catalog_tag : str or None, optional
         Tag of the catalogs (``catalogs/{nz}/{catalog_tag}``). Default is None (``default``).
+
+    Attributes
+    ----------
+    simulation : dict
+        Simulation of the shells (path, kind, box size, particles, snapshots), from their ``config.yaml``.
+    cosmo : pyccl.Cosmology
+        Cosmology of the simulation.
+    nside, nshells : int
+        Resolution and number of the shells.
+    shell_info : FITS_rec
+        Table of the shells (``shells.fits``, see :meth:`pollux.shells.ShellBuilder.info_table`).
+    nzs : list of (ndarray, ndarray)
+        Redshift distributions, unless ``nz`` is None or ``'snapshots'``.
     """
 
     def __init__(self, realization_dir: str, baryon_tag: str | None = None, nz: str | None = 'SRDv1_nz', catalog_tag: str | None = None) -> None:
@@ -48,19 +61,25 @@ class PolluxLoader:
         logger.info("*** PolluxLoader ***")
         logger.info("  - Path = %s.", self.matter_dir)
 
-        # simulation and shell information
-        with open(os.path.join(self.shells_dir, 'sim_info.yaml')) as f:
-            info = yaml.unsafe_load(f)
-        for k, v in info.items():
-            setattr(self, k, v)
-            logger.info("  - %s = %s.", k, v)
-        self.shell_info = np.load(os.path.join(self.shells_dir, 'info.npy'))
-
-        # cosmology and redshift distributions
-        self.cosmo = pyccl.Cosmology.read_yaml(os.path.join(self.shells_dir, 'cosmo_ccl.yaml'))
+        # simulation, cosmology and table of the shells (config.yaml and shells.fits of the shells)
+        with open(os.path.join(self.shells_dir, 'config.yaml')) as f:
+            parameters = yaml.safe_load(f)['parameters']
+        self.simulation = parameters['simulation']
+        self.nside = parameters['nside']
+        self.nshells = parameters['nshells']
+        self.cosmo = pyccl.Cosmology(**parameters['cosmology'])
+        self.shell_info = fits.getdata(os.path.join(self.shells_dir, 'shells.fits'))
+        logger.info("  - Simulation = %s, nside = %d, %d shells.", self.simulation['path'], self.nside, self.nshells)
         logger.info("  - Cosmology = %s.", self.cosmo)
+
+        # redshift distributions: list of (z, n(z)) per bin
         if nz not in (None, 'snapshots'):
-            self.nzs = np.load(os.path.join(self._kappa_dir(), 'nzs.npy'))
+            fname = os.path.join(self._kappa_dir(), 'nzs.txt')
+            if os.path.exists(fname):
+                table = np.loadtxt(fname)
+                self.nzs = [(table[:, 0], table[:, i]) for i in range(1, table.shape[1])]
+            else:
+                self.nzs = list(np.load(os.path.join(self._kappa_dir(), 'nzs.npy'), allow_pickle=True))
 
     def _kappa_dir(self) -> str:
         """Return the directory of the convergence and shear maps of the n(z)."""

@@ -292,14 +292,20 @@ class PolluxLoader:
         """
         return fits.open(os.path.join(self.catalog_dir(), f'cat_bin{ibin}.fits'))
 
-    def load_catalog_2pt(self) -> sacc.Sacc:
+    def load_catalog_2pt(self, shapes: str = 'shear') -> sacc.Sacc:
         """Load the measured two-point functions of the catalogs.
+
+        Parameters
+        ----------
+        shapes : {'shear', 'ia', 'observed'}, optional
+            Shapes of the shear legs: lensing shear (``cat_2pt.fits``), intrinsic alignments
+            (``cat_2pt_ia.fits``) or their sum (``cat_2pt_observed.fits``).
 
         Returns
         -------
         sacc.Sacc
         """
-        return sacc.Sacc.load_fits(os.path.join(self.catalog_dir(), 'cat_2pt.fits'))
+        return sacc.Sacc.load_fits(os.path.join(self.catalog_dir(), 'cat_2pt.fits' if shapes == 'shear' else f'cat_2pt_{shapes}.fits'))
 
     def load_catalog_cls(self) -> sacc.Sacc:
         """Load the measured angular power spectra of the catalogs.

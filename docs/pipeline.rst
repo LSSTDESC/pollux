@@ -75,7 +75,7 @@ Products are organised by realization and matter model (:mod:`pollux.io.layout`)
   - ``smoothed/{s}Mpc/``: smoothed density and tidal maps (``density_{iii}``, ``t11_{iii}``, ...);
   - ``kappa/{nz}/``: convergence and shear maps of the tomographic bins (``kappa_bin{b}``, ``gamma1_bin{b}``, ...), and their redshift distributions (``nzs.txt``);
   - ``kappa/snapshots/``: convergence and shear maps with one source plane per shell (``kappa_{iii}``, ...);
-  - ``catalogs/{nz}/{tag}/``: source catalogs (``cat_bin{b}.fits``) and their statistics (``cat_2pt.fits``, ``cat_cls.fits``);
+  - ``catalogs/{nz}/{tag}/``: source catalogs (``cat_bin{b}.fits``) and their statistics (``cat_2pt.fits``, ``cat_cls.fits``, and ``cat_2pt_ia.fits``, ``cat_2pt_observed.fits`` with the shapes ``'ia'`` and ``'observed'``);
 
 - ``dmb/{tag}/``: the same products for the baryon model ``tag``;
 - ``halos/``: halo catalogs, shared by all baryon models;

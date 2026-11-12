@@ -357,35 +357,39 @@ def compute_catalog_cls(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_
 
 
 @python_app(executors=['heavy'])
-def compute_catalog_2pt_sub(stat, pair, reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, stats_dict, baryon_dict=None, inputs=[]):
-    # 2pt function of one statistic ('clustering', 'shear' or 'shear_clustering') for one bin pair
+def compute_catalog_2pt_sub(stat, pair, reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, stats_dict, baryon_dict=None, shapes='shear', inputs=[]):
+    # 2pt function of one statistic ('clustering', 'shear' or 'shear_clustering') for one bin pair, with the
+    # shapes of the shear legs ('shear', 'ia' or 'observed', see CatalogSourceGenerator.compute_2pt)
     catalog = _make_source_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict)
-    result = catalog.compute_2pt(what=stat, pairs=[pair], save=False, error_bars=True, theta_per_pair=True, **stats_dict['common'], **stats_dict['2pt'])
+    result = catalog.compute_2pt(
+        what=stat, pairs=[pair], shapes=shapes, save=False, error_bars=True, theta_per_pair=True, **stats_dict['common'], **stats_dict['2pt'])
     _free_memory()
     return result
 
 
 @python_app(executors=['default'])
-def compute_catalog_2pt(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict=None, inputs=[]):
-    # inputs contains (theta, xi, dxi) results from compute_catalog_2pt_sub
+def compute_catalog_2pt(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict=None, shapes='shear', inputs=[]):
+    # inputs contains (theta, xi, dxi) results from compute_catalog_2pt_sub, saved to the file of the shapes
     theta_out, xi_out, dxi_out = {}, {}, {}
     for theta, xi, dxi in inputs:
         for out, res in ((theta_out, theta), (xi_out, xi), (dxi_out, dxi)):
             for data_type, pairs in res.items():
                 out.setdefault(data_type, {}).update(pairs)
-    _make_source_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict)._save_2pt(theta_out, xi_out, dxi=dxi_out)
+    _make_source_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict)._save_2pt(theta_out, xi_out, dxi=dxi_out, shapes=shapes)
 
 
 @python_app(executors=['highmem'])
-def plot_catalog_2pt(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict=None, with_dmo_reference=False, xlim=None, inputs=[]):
+def plot_catalog_2pt(
+        reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict=None, with_dmo_reference=False, xlim=None, shapes='shear', inputs=[]):
     # 2pt functions against their predictions ({catalog_dir}/plots), with the matter power spectrum of the catalog's shell
     # builder (S19-corrected with baryon_dict); with_dmo_reference adds the ratio to the dark-matter-only catalog's 2pt
-    # functions, and xlim are the x limits (the edges of the binning, theta_min and theta_max)
+    # functions, xlim are the x limits (the edges of the binning, theta_min and theta_max), and shapes those of the
+    # shear legs (with 'ia', also GI, once the 'shear' and 'observed' ones are measured)
     catalog = _make_source_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict)
     reference = None
     if baryon_dict is not None and with_dmo_reference:
         reference = _make_source_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, None)
-    catalog.plot_2pt(reference=reference, xlim=xlim)
+    catalog.plot_2pt(reference=reference, xlim=xlim, shapes=shapes)
     _free_memory()
 
 

@@ -140,8 +140,8 @@ class Tracer:
         return 2 if self.kind in ('shear', 'ia') else 0
 
     @property
-    def _is_tatt(self) -> bool:
-        """Whether the intrinsic alignments have terms beyond NLA (``a2`` or ``a1delta``)."""
+    def _needs_pt(self) -> bool:
+        """Whether the predictions of the intrinsic alignments need perturbation theory: terms beyond NLA (``a2`` or ``a1delta``)."""
         return self.kind == 'ia' and any(self.ia.get(k) for k in ('a2', 'a1delta'))
 
     def ccl(self, cosmo: pyccl.Cosmology) -> pyccl.Tracer:
@@ -171,8 +171,10 @@ class Tracer:
             self._ccl = (cosmo, tracer)
         return self._ccl[1]
 
-    def _ccl_unit_ia(self, cosmo: pyccl.Cosmology) -> pyccl.Tracer:
-        """Return the CCL tracer of the intrinsic alignments with a unit amplitude, for power spectra of perturbation theory.
+    def _ccl_pt_kernel(self, cosmo: pyccl.Cosmology) -> pyccl.Tracer:
+        """Return the CCL tracer of the radial kernel of the intrinsic alignments (n(z), unit amplitude), for spectra of perturbation theory.
+
+        The amplitudes are in the power spectra of perturbation theory (:meth:`_pt_tracer`), not in the kernel.
 
         Parameters
         ----------
@@ -186,8 +188,8 @@ class Tracer:
         """
         return pyccl.WeakLensingTracer(cosmo, dndz=(self.z, self.nz), has_shear=False, ia_bias=(self.z, np.ones_like(self.z)), use_A_ia=False)
 
-    def _pt_ia(self, cosmo: pyccl.Cosmology, nla_only: bool = False) -> pyccl.nl_pt.PTIntrinsicAlignmentTracer:
-        """Return the perturbation-theory tracer of the intrinsic alignments, with the coefficients of :attr:`ia`.
+    def _pt_tracer(self, cosmo: pyccl.Cosmology, nla_only: bool = False) -> pyccl.nl_pt.PTIntrinsicAlignmentTracer:
+        """Return the perturbation-theory tracer of the intrinsic alignments, with the coefficients ``c1``, ``c2``, ``cdelta`` of :attr:`ia`.
 
         Parameters
         ----------
@@ -324,7 +326,7 @@ class Theory:
         self.p_of_k_a = p_of_k_a
         self._smoothed_pk = {}  # power spectra with a Gaussian smoothing, keyed by the spectrum and the tracers' smoothing
         self._pt_calculator = None
-        self._pt_pk = {}  # beyond-NLA terms of the intrinsic alignments, keyed by the tracers' amplitudes
+        self._pt_correction_pk = {}  # corrections of perturbation theory to NLA, keyed by the tracers' amplitudes
 
     def angular_cl(self, t1: Tracer, t2: Tracer, ell: np.ndarray) -> np.ndarray:
         """Return the angular power spectrum of two tracers.
@@ -346,19 +348,19 @@ class Theory:
         -----
         Intrinsic alignments (``'ia'`` tracers) follow the NLA model with the matter power
         spectrum of the predictions; for TATT amplitudes (``a2`` or ``a1delta``), the terms
-        beyond NLA of CCL's perturbation theory are added (:meth:`_ia_beyond_nla`, with the
+        beyond NLA of CCL's perturbation theory are added (:meth:`_pk_pt_correction`, with the
         same smoothing). The density weighting of the tidal torquing term is not modelled.
         """
         key = tuple(sorted(((t.smooth_Mpc, t.smooth_nside or 0) for t in (t1, t2) if t.smooth_Mpc), key=repr))
-        cl = self._limber(t1.ccl(self.cosmo), t2.ccl(self.cosmo), ell, self._smoothed(self.p_of_k_a, key))
+        cl = self._limber(t1.ccl(self.cosmo), t2.ccl(self.cosmo), ell, self._apply_smoothing(self.p_of_k_a, key))
 
         # intrinsic alignments beyond NLA, with the IA leg first
         if t1.kind != 'ia' and t2.kind == 'ia':
             t1, t2 = t2, t1
-        if t1.kind == 'ia' and (t1._is_tatt or t2._is_tatt) and t2.kind != 'convergence':
-            pk = self._ia_beyond_nla(t1, t2, key)
-            ccl2 = t2._ccl_unit_ia(self.cosmo) if t2.kind == 'ia' else t2.ccl(self.cosmo)
-            cl = cl + self._limber(t1._ccl_unit_ia(self.cosmo), ccl2, ell, pk)
+        if t1.kind == 'ia' and (t1._needs_pt or t2._needs_pt) and t2.kind != 'convergence':
+            pk = self._pk_pt_correction(t1, t2, key)
+            ccl2 = t2._ccl_pt_kernel(self.cosmo) if t2.kind == 'ia' else t2.ccl(self.cosmo)
+            cl = cl + self._limber(t1._ccl_pt_kernel(self.cosmo), ccl2, ell, pk)
         return cl
 
     def _limber(self, ccl1: pyccl.Tracer, ccl2: pyccl.Tracer, ell: np.ndarray, pk: pyccl.Pk2D | None) -> np.ndarray:
@@ -368,7 +370,7 @@ class Theory:
         except pyccl.CCLError:
             return pyccl.angular_cl(self.cosmo, ccl1, ccl2, ell, p_of_k_a=pk, limber_integration_method='spline')
 
-    def _smoothed(self, pk: pyccl.Pk2D | None, key: tuple, name: str = 'matter') -> pyccl.Pk2D | None:
+    def _apply_smoothing(self, pk: pyccl.Pk2D | None, key: tuple, name: str = 'matter') -> pyccl.Pk2D | None:
         """Return a power spectrum multiplied by the Gaussian smoothing of the tracers ``key`` (cached by ``name``).
 
         Same grid as ``pk`` (CCL's nonlinear matter power spectrum if None), with the smoothing of
@@ -389,29 +391,29 @@ class Theory:
             self._smoothed_pk[name, key] = smoothed
         return self._smoothed_pk[name, key]
 
-    def _ia_beyond_nla(self, t1: Tracer, t2: Tracer, smooth_key: tuple) -> pyccl.Pk2D:
-        """Return the power spectrum of the terms of TATT beyond NLA, between intrinsic alignments and IA or matter.
+    def _pk_pt_correction(self, t1: Tracer, t2: Tracer, smooth_key: tuple) -> pyccl.Pk2D:
+        """Return the correction of perturbation theory to the NLA power spectrum, between intrinsic alignments and IA or matter.
 
         The difference between the TATT and NLA spectra of CCL's perturbation theory
         (:class:`pyccl.nl_pt.EulerianPTCalculator`, FAST-PT): the NLA term itself is computed
         with the matter power spectrum of the predictions (nonlinear, possibly with baryons).
         ``t2`` is an ``'ia'`` tracer, or another tracer for the matter (its bias is in its CCL kernel).
-        The spectrum is smoothed as the tracers (``smooth_key``, see :meth:`_smoothed`).
+        The spectrum is smoothed as the tracers (``smooth_key``, see :meth:`_apply_smoothing`).
         """
         if self._pt_calculator is None:
             self._pt_calculator = pyccl.nl_pt.EulerianPTCalculator(with_IA=True, with_NC=False, with_matter_1loop=False, cosmo=self.cosmo)
         ias = tuple(tuple(sorted(t.ia.items())) if t.kind == 'ia' else None for t in (t1, t2))
         key = (ias, tuple(float(np.max(t.z)) if t.kind == 'ia' else None for t in (t1, t2)))
-        if key not in self._pt_pk:
+        if key not in self._pt_correction_pk:
             # second leg: intrinsic alignments, or the matter
             if t2.kind == 'ia':
-                full2, nla2 = t2._pt_ia(self.cosmo), t2._pt_ia(self.cosmo, nla_only=True)
+                full2, nla2 = t2._pt_tracer(self.cosmo), t2._pt_tracer(self.cosmo, nla_only=True)
             else:
                 full2 = nla2 = pyccl.nl_pt.PTMatterTracer()
-            full = self._pt_calculator.get_biased_pk2d(t1._pt_ia(self.cosmo), tracer2=full2)
-            nla = self._pt_calculator.get_biased_pk2d(t1._pt_ia(self.cosmo, nla_only=True), tracer2=nla2)
-            self._pt_pk[key] = full - nla
-        return self._smoothed(self._pt_pk[key], smooth_key, name=('ia', key))
+            full = self._pt_calculator.get_biased_pk2d(t1._pt_tracer(self.cosmo), tracer2=full2)
+            nla = self._pt_calculator.get_biased_pk2d(t1._pt_tracer(self.cosmo, nla_only=True), tracer2=nla2)
+            self._pt_correction_pk[key] = full - nla
+        return self._apply_smoothing(self._pt_correction_pk[key], smooth_key, name=('ia', key))
 
     def binned_cl(self, t1: Tracer, t2: Tracer, b: pymaster.NmtBin, bpws: np.ndarray | None = None, f_ell: np.ndarray | None = None) -> np.ndarray:
         """Return the angular power spectrum of two tracers, binned into bandpowers.

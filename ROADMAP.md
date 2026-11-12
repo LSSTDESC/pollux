@@ -20,6 +20,7 @@ Planned developments of pollux, with their GitHub issue when there is one. Remov
   - Theory covariances from [CosmoCov](https://github.com/CosmoLike/CosmoCov) or [TJPCov](https://github.com/LSSTDESC/TJPCov) ([#16](https://github.com/LSSTDESC/pollux/issues/16)).
   - Understand the deficit of a few percent in the galaxy clustering of tomographic bins 2–4 at large scales, which does not come from clipping.
 - Performance
+  - Column-oriented catalog format (Parquet or HDF5), so that reading a few columns or a subsample does not read whole FITS rows.
   - Move what can be to GPUs (spherical harmonic transforms, painting particles on maps, baryonification, catalog sampling).
 - Tests
   - Unit tests (pytest) on small synthetic inputs (`DummyReader`, low nside), and tests on the simulations run at NERSC only.

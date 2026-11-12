@@ -22,6 +22,8 @@ inputs and code version, so that it can be shared (e.g. registered) on its own. 
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
 import numpy as np
@@ -92,6 +94,34 @@ def intermediate_dir(product_dir: str, realization: str | None) -> str:
     return os.path.join(realization, INTERMEDIATE, os.path.relpath(product_dir, realization))
 
 
+@contextmanager
+def atomic_write(fname: str) -> Iterator[str]:
+    """Yield a temporary path to write ``fname`` to, renamed to ``fname`` once written.
+
+    Readers (and resumed runs, which skip existing files) never see a partial file, and
+    several workers may write the same file at once. The temporary file keeps the extension
+    of ``fname`` (for writers that use it) and is removed if the writing fails.
+
+    Parameters
+    ----------
+    fname : str
+        Path of the file.
+
+    Yields
+    ------
+    str
+        Temporary path, in the same directory.
+    """
+    root, ext = os.path.splitext(fname)
+    tmp = f'{root}.{os.getpid()}.tmp{ext}'
+    try:
+        yield tmp
+        os.replace(tmp, fname)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
 def _plain(value: Any) -> Any:
     # parameters as plain YAML types (numpy scalars and arrays, tuples, dtypes)
     if isinstance(value, dict):
@@ -146,7 +176,5 @@ def write_config(product_dir: str, product: str, parameters: dict, inputs: list[
     config['inputs'] = [os.path.relpath(p, realization) if realization else p for p in (inputs or [])]
     config['code_version'] = dict(code_version())
     os.makedirs(product_dir, exist_ok=True)
-    tmp = f'{fname}.{os.getpid()}'
-    with open(tmp, 'w') as f:
+    with atomic_write(fname) as tmp, open(tmp, 'w') as f:
         yaml.safe_dump(config, f, sort_keys=False)
-    os.replace(tmp, fname)

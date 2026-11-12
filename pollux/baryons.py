@@ -51,6 +51,9 @@ class BaryonifiedShellBuilder(ShellBuilder):
     M_min : float or None, optional
         Minimum halo mass (Msun) of the baryonified halos, in the shells and in
         :meth:`matter_power_spectrum`. Default is ``10 * reader.mass_particles``.
+    profile_parameters : dict or None, optional
+        Parameters of the profiles (e.g. the ``bfg_params`` of :func:`s19_profiles`), recorded in
+        the ``config.yaml`` of the shells, so that shells of other parameters are not mixed with them.
     tag : str or None, optional
         Tag of the baryon model: the shells go to ``{realization}/dmb/{tag}/shells`` (see
         :mod:`pollux.io.layout`), ``dmb/default`` if None.
@@ -70,6 +73,7 @@ class BaryonifiedShellBuilder(ShellBuilder):
         mass_name: str,
         mass_unit: str,
         M_min: float | None = None,
+        profile_parameters: dict | None = None,
         tag: str | None = None,
         **interpolator_kwargs: Any,
     ) -> None:
@@ -78,6 +82,7 @@ class BaryonifiedShellBuilder(ShellBuilder):
         self.shell_builder_ref = shell_builder
         self.halo_builder = halo_builder
         self.dmo = dmo  # unconvolved, also used for the matter power spectrum prediction
+        self.profile_parameters = profile_parameters
         self.dmb = dmb
         self.mass_def = mass_def
         self.mass_name = mass_name
@@ -154,6 +159,8 @@ class BaryonifiedShellBuilder(ShellBuilder):
             mass_name=self.mass_name,
             mass_unit=self.mass_unit,
             M_min=self.M_min)
+        if self.profile_parameters is not None:
+            parameters['profile_parameters'] = self.profile_parameters
         return 'shells', parameters, [self.shell_builder_ref.save_dir, self.halo_builder.save_dir]
 
     def construct_maps(

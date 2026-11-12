@@ -24,6 +24,7 @@ from astropy.io import fits
 from .io import layout
 from .io.code_version import code_version
 from .cosmo import Tracer
+from .utils.binning import binning_id
 from .utils.numerics import quad, sample_pdf
 from .utils.sky import radec2thetaphi
 
@@ -86,7 +87,7 @@ class CatalogSourceGenerator(ABC):
     Attributes
     ----------
     Ngal : ndarray of int
-        Number of galaxies drawn per tomographic bin.
+        Number of galaxies drawn per tomographic bin over the footprint (``nbar`` times its area).
     nbar_per_pix : ndarray
         Mean expected counts per pixel per tomographic bin.
     header_dict : dict
@@ -153,7 +154,6 @@ class CatalogSourceGenerator(ABC):
         self.augmentor_kwargs = {ikappa: {'ikappa': ikappa, 'realization_seed': self.lensing.shell_builder.seed} for ikappa in self.lensing.iter()}
         self.cls_b = cls_b
         self.cls_lmax_mask = cls_lmax_mask
-        self.predicted_cls = None
         self._wsp = {}
 
         # Handle nbar
@@ -167,9 +167,8 @@ class CatalogSourceGenerator(ABC):
                 raise ValueError(f"nbar must be a scalar or array of length {self.lensing.nmaps}, got {nbar_arr.size}")
         self.nbar = nbar_arr
 
-        # Compute galaxy counts and areas
-        area_std = np.pi / 2. if self.lensing.octant_only else 4. * np.pi
-        area_arcmin = area_std * (180. * 60 / np.pi)**2
+        # galaxy counts over the footprint, and per pixel
+        area_arcmin = 4. * np.pi * self.lensing.fsky * (180. * 60 / np.pi)**2
         self.Ngal = (self.nbar * area_arcmin).astype(int)
         self.area_pix = hp.nside2pixarea(self.nside, degrees=False) * (180. * 60. / np.pi)**2
         self.nbar_per_pix = self.nbar * self.area_pix
@@ -286,7 +285,8 @@ class CatalogSourceGenerator(ABC):
                 header[k] = v
             hdul = [fits.PrimaryHDU(), fits.BinTableHDU(data=np.concatenate(parts), header=header)]
             fname = self.get_fname(ikappa)
-            fits.HDUList(hdul).writeto(fname, overwrite=True)
+            with layout.atomic_write(fname) as tmp:
+                fits.HDUList(hdul).writeto(tmp, overwrite=True)
             logger.debug("Saved to file %s.", fname)
 
     @abstractmethod
@@ -523,7 +523,7 @@ class CatalogSourceGenerator(ABC):
     def _write_config(self) -> None:
         """Write the ``config.yaml`` of the catalogs, or check it against the existing one (:func:`pollux.io.layout.write_config`)."""
         shell_builder = self.lensing.shell_builder
-        augmentors = [dict(type=type(a).__name__, **{k: getattr(a, k) for k in ('model', 'model_params') if hasattr(a, k)}) for a in self.augmentors]
+        augmentors = [a.config() for a in self.augmentors]
         parameters = dict(
             generator=type(self).__name__,
             nbar_input=self.nbar_input,
@@ -573,7 +573,8 @@ class CatalogSourceGenerator(ABC):
             hdul = [fits.PrimaryHDU(), fits.BinTableHDU.from_columns([ra, dec, z, chi] + interp_colums, header)]
 
             fname = self.get_fname(ikappa, format='fits', ishell=ishell)
-            fits.HDUList(hdul).writeto(fname, overwrite=True)
+            with layout.atomic_write(fname) as tmp:
+                fits.HDUList(hdul).writeto(tmp, overwrite=True)
             logger.debug("Saved to file %s.", fname)
 
     def load_catalogs(
@@ -786,8 +787,8 @@ class CatalogSourceGenerator(ABC):
         -------
         pymaster.NmtBin
             ``cls_b``, or else the shell builder's binning (:attr:`MapBuilder.b`)
-            without its pixel-window deconvolution, since catalog fields are sampled
-            at exact positions.
+            without its pixel-window deconvolution: the pixel window is in the predictions
+            instead (see :meth:`predict_cls`).
         """
         if self.cls_b is not None:
             return self.cls_b
@@ -909,9 +910,10 @@ class CatalogSourceGenerator(ABC):
         Returns
         -------
         str
-            ``{catalog_dir}/wsp_{stat}_lmax{lmax}.wsp``, or
-            ``{catalog_dir}/wsp_{stat}_{i}_{j}[_randoms]_lmax{lmax}.wsp`` (with ``i >= j`` for
-            the symmetric clustering and shear statistics). Bandpower windows are saved
+            ``{catalog_dir}/wsp_{stat}_lmax{lmax}_b{id}.wsp``, or
+            ``{catalog_dir}/wsp_{stat}_{i}_{j}[_randoms]_lmax{lmax}_b{id}.wsp`` (with ``i >= j`` for
+            the symmetric clustering and shear statistics), with ``id`` the identifier of the
+            binning and of ``cls_lmax_mask`` (:func:`pollux.utils.binning_id`). Bandpower windows are saved
             next to it, with suffix ``_bpws.npy`` (see :meth:`get_bpws`).
         """
         if pair is None:
@@ -921,7 +923,8 @@ class CatalogSourceGenerator(ABC):
             if stat != 'shear_clustering':
                 i, j = max(i, j), min(i, j)
             name = f'{stat}_{i}_{j}' + ('_randoms' if randoms and stat != 'shear' else '')
-        return os.path.join(self._intermediate_dir, f'wsp_{name}_lmax{self.b.lmax}.wsp')
+        # binning of the bandpowers and of the masks
+        return os.path.join(self._intermediate_dir, f'wsp_{name}_lmax{self.b.lmax}_b{binning_id(self.b, extra=(self.lmax_mask,))}.wsp')
 
     def get_wsp(
             self,
@@ -988,8 +991,10 @@ class CatalogSourceGenerator(ABC):
                 f1, f2 = {'clustering': (f_dens, f_dens), 'shear': (f_shear, f_shear), 'shear_clustering': (f_dens, f_shear)}[stat]
                 fields = (f1[i], f2[j])
             wsp.compute_coupling_matrix(*fields, self.b)
-            wsp.write_to(fname)
-            np.save(fname.replace('.wsp', '_bpws.npy'), wsp.get_bandpower_windows())
+            with layout.atomic_write(fname) as tmp:
+                wsp.write_to(tmp)
+            with layout.atomic_write(fname.replace('.wsp', '_bpws.npy')) as tmp:
+                np.save(tmp, wsp.get_bandpower_windows())
             logger.info("Computed and saved workspace to file %s.", fname)
             read_unbinned_MCM = True
 
@@ -1030,7 +1035,8 @@ class CatalogSourceGenerator(ABC):
         if pair is not None and not os.path.exists(fname):
             raise FileNotFoundError(f"No workspace at {fname}, compute it with compute_cls or get_wsp.")
         bpws = self.get_wsp(stat, pair, randoms=randoms).get_bandpower_windows()
-        np.save(fname_bpws, bpws)
+        with layout.atomic_write(fname_bpws) as tmp:
+            np.save(tmp, bpws)
         return bpws
 
     # tracer roles (density or shear) of the (i, j) legs of each harmonic-space SACC data type
@@ -1256,7 +1262,8 @@ class CatalogSourceGenerator(ABC):
                 for _ell, _cl_ell in zip(ell, _cl, strict=True):
                     s.add_data_point(data_type, [tracers_i[i].name, tracers_j[j].name], _cl_ell, ell=_ell)
         fname = os.path.join(self._catalog_dir, 'cat_cls.fits')
-        s.save_fits(fname, overwrite=True)
+        with layout.atomic_write(fname) as tmp:
+            s.save_fits(tmp, overwrite=True)
         logger.debug("Saved to file %s.", fname)
         return fname
 
@@ -1314,9 +1321,9 @@ class CatalogSourceGenerator(ABC):
             shear_cols: tuple[str, str] = ('gamma1', 'gamma2'),
             subsample: float | None = None,
             error_bars: bool = False,
-            keep_cls: bool = False,
             stacked: bool = False,
-            ell: np.ndarray | None = None) -> tuple:
+            ell: np.ndarray | None = None,
+            pixel_window: bool = True) -> tuple:
         """Predict the catalog angular power spectra.
 
         Predictions use the lensing builder's :attr:`~pollux.map_builder.MapBuilder.theory`,
@@ -1351,14 +1358,16 @@ class CatalogSourceGenerator(ABC):
             If True, also return Gaussian error bars (E-mode and density spectra),
             with ``C_ell + N_ell`` for auto-spectra (:meth:`_noise_cls`) and the
             lensing builder's sky fraction.
-        keep_cls : bool, optional
-            If True, cache the results on ``self.predicted_cls``.
         stacked : bool, optional
             If True, also return the E-mode and density spectra of all statistics
             stacked into one vector (in the order of ``what``, then of the pairs), and
             with ``error_bars`` their joint covariance.
         ell : ndarray or None, optional
             Multipoles for ``binning='unbinned'``. Default is the effective bandpower multipoles.
+        pixel_window : bool, optional
+            If True (default), multiply the spectra by the pixel window of the maps (one per
+            field): galaxies are placed in the pixels of the density maps, and the fields are
+            interpolated from pixelized maps.
 
         Returns
         -------
@@ -1376,9 +1385,6 @@ class CatalogSourceGenerator(ABC):
         Wraps :meth:`pollux.cosmo.Theory.predict_cls` (one call for all statistics,
         so that the covariance includes cross-statistic blocks).
         """
-        # cached prediction (see keep_cls)
-        if self.predicted_cls is not None:
-            return self.predicted_cls
         if isinstance(what, str):
             what = list(self._STAT_TYPES_CLS) if what == 'all' else [what]
         # tracers of the legs of each statistic
@@ -1415,6 +1421,7 @@ class CatalogSourceGenerator(ABC):
             ell=ell,
             binning=binning,
             bpws=bpws,
+            f_ell=hp.pixwin(self.lensing.nside, lmax=self.b.lmax) if pixel_window else None,
             noise=noise,
             error_bars=error_bars,
             stacked=stacked,
@@ -1437,10 +1444,7 @@ class CatalogSourceGenerator(ABC):
                 dcl.setdefault(self._STAT_TYPES_CLS[stat][0], {})[i, j] = d
             out.append(dcl)
         out += list(res[2 + error_bars:])
-        out = tuple(out)
-        if keep_cls:
-            self.predicted_cls = out
-        return out
+        return tuple(out)
 
     def plot_cls(
             self,
@@ -1824,7 +1828,8 @@ class CatalogSourceGenerator(ABC):
             var = np.concatenate([dxi[data_type][ij]**2 for data_type, pairs in xi.items() for ij in pairs])
             s.add_covariance(np.diag(var))
         fname = os.path.join(self._catalog_dir, 'cat_2pt.fits')
-        s.save_fits(fname, overwrite=True)
+        with layout.atomic_write(fname) as tmp:
+            s.save_fits(tmp, overwrite=True)
         logger.debug("Saved to file %s.", fname)
         return fname
 
@@ -2009,8 +2014,7 @@ class CatalogSourceUniform(CatalogSourceGenerator):
     """Generate source galaxies uniformly over the footprint.
 
     Redshifts are drawn from the tomographic tracer distributions. Angular
-    positions are drawn uniformly over the observed sky region (octant or full
-    sky depending on ``lensing.octant_only``).
+    positions are drawn uniformly over the footprint of the maps.
 
     Parameters
     ----------
@@ -2062,14 +2066,9 @@ class CatalogSourceUniform(CatalogSourceGenerator):
         """
         rng = self._rng(self._STREAM_POS, ikappa)
 
-        # Generate random positions with a uniform distribution over the footprint
-        if self.lensing.octant_only:
-            ra = rng.uniform(0., 90., self.Ngal[ikappa])
-            dec = np.rad2deg(np.arcsin(rng.uniform(0., 1., self.Ngal[ikappa])))
-        else:
-            ra = rng.uniform(0., 360., self.Ngal[ikappa])
-            dec = np.rad2deg(np.arcsin(rng.uniform(-1., 1., self.Ngal[ikappa])))
-
+        # uniform over the footprint: equal-area pixels drawn at random, then a position within each
+        _, ipix = self.lensing.shell_builder.get_mask(return_ipix=True)
+        ra, dec = generate_radec_in_pix(self.nside, rng.choice(ipix, size=self.Ngal[ikappa]), rng)
         catalog[ikappa]['ra'] = ra
         catalog[ikappa]['dec'] = dec
 
@@ -2497,3 +2496,7 @@ class CatalogAugmentor(ABC):
         **kwargs
             Per-bin options (``augmentor_kwargs`` of the catalog generator, e.g. ``ikappa``).
         """
+
+    def config(self) -> dict:
+        """Return the type and parameters of the augmentor, for the ``config.yaml`` of the catalogs."""
+        return {'type': type(self).__name__}

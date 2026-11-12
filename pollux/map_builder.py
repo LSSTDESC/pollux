@@ -6,6 +6,7 @@ smoothing, power spectra with their predictions, and plots.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import warnings
@@ -27,7 +28,7 @@ from tqdm.auto import tqdm, trange
 
 from .io import layout
 from .cosmo import Theory, Tracer
-from .utils.binning import make_nmtbin_logspaced
+from .utils.binning import binning_id, make_nmtbin_logspaced
 from .utils.sky import make_mask_radec_cuts
 
 logger = logging.getLogger(__name__)
@@ -191,7 +192,6 @@ class MapBuilder(ABC):
         # Cached attributes (lazy-initialized)
         self._masks = {}  # (padded, nest) -> [mask, ipix]
         self._ipix_oct_fullsky = None
-        self.predicted_cls = None
 
         # Make sure folder exists
         os.makedirs(self.save_dir, exist_ok=True)
@@ -494,13 +494,17 @@ class MapBuilder(ABC):
         nest : bool, optional
             Ordering of ``ipix``. Default is False (RING).
         dtype : data-type or None, optional
-            Data type of the map. Default is the builder's ``dtype``.
+            Data type of the map. Default is the builder's ``dtype``, or float32 for non-integer
+            values with an integer ``dtype`` (fields derived from counts).
 
         Returns
         -------
         hsp.HealSparseMap
         """
-        dtype = self.dtype if dtype is None else dtype
+        if dtype is None:
+            dtype = self.dtype
+            if np.issubdtype(dtype, np.integer) and values is not None and not np.issubdtype(np.asarray(values).dtype, np.integer):
+                dtype = np.float32
         hspmap = hsp.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=dtype)
         if ipix is not None:
             hspmap.update_values_pix(ipix, np.asarray(values).astype(dtype), nest=nest)
@@ -516,7 +520,8 @@ class MapBuilder(ABC):
         fname : str
             Output path (typically from :meth:`get_fname`).
         """
-        hspmap.write(fname, clobber=True, format=self.save_format, nocompress=self.nocompress)
+        with layout.atomic_write(fname) as tmp:
+            hspmap.write(tmp, clobber=True, format=self.save_format, nocompress=self.nocompress)
         logger.debug("Saved to file %s.", fname)
 
     def plot_maps(
@@ -713,6 +718,20 @@ class MapBuilder(ABC):
             cache[1] = ipix_nest if nest else hp.nest2ring(self.nside, ipix_nest)
         return cache[0], cache[1]
 
+    @cached_property
+    def footprint_id(self) -> str:
+        """Short identifier of the footprint, in the names of the files shared by realizations (padding, workspaces).
+
+        ``'fullsky'``, ``'octant'``, or the first eight hexadecimal characters of the SHA-1 of the
+        footprint's pixels (NEST), so that two footprints never share these files.
+        """
+        if self.footprint is None:
+            return 'fullsky'
+        if self.octant_only:
+            return 'octant'
+        _, ipix = self.get_mask(nest=True, return_ipix=True)
+        return hashlib.sha1(np.ascontiguousarray(ipix, dtype=np.int64).tobytes()).hexdigest()[:8]
+
     @property
     def fsky(self) -> float:
         """Sky fraction covered by the footprint mask.
@@ -796,10 +815,11 @@ class MapBuilder(ABC):
         Returns
         -------
         str
-            ``{wsp_dir}/{what}_nside{nside}_pad{padding_deg}[{apotype}]_res{padding_nside}.fits``.
+            ``{wsp_dir}/{what}_nside{nside}_{footprint_id}_pad{padding_deg}[{apotype}]_res{padding_nside}.fits``
+            (see :attr:`footprint_id`).
         """
         apotype = (self.apotype or '') if what == 'alm_weights' else ''
-        return os.path.join(self.wsp_dir, f'{what}_nside{self.nside}_pad{self.padding_deg:g}{apotype}_res{self.padding_nside}.fits')
+        return os.path.join(self.wsp_dir, f'{what}_nside{self.nside}_{self.footprint_id}_pad{self.padding_deg:g}{apotype}_res{self.padding_nside}.fits')
 
     def compute_padding(self) -> None:
         """Compute and save the padded footprint and the alm weights, if not on disk.
@@ -819,10 +839,8 @@ class MapBuilder(ABC):
                 continue
             values = np.ones(len(ipix), dtype=bool) if what == 'padded_mask' else self._alm_weights[hp.nest2ring(self.nside, ipix)]
             hspmap = self._make_hspmap(ipix, values, nest=True, dtype=values.dtype)
-            # via a temporary file, so readers never see a partial file
-            tmp = fname[:-len('.fits')] + '.tmp.fits'
-            hspmap.write(tmp, clobber=True, nocompress=self.nocompress)
-            os.replace(tmp, fname)
+            with layout.atomic_write(fname) as tmp:
+                hspmap.write(tmp, clobber=True, nocompress=self.nocompress)
             logger.info("Saved to file %s.", fname)
 
     def _octant_to_fullsky_ipix(self, nest: bool = True) -> np.ndarray:
@@ -1300,7 +1318,8 @@ class MapBuilder(ABC):
         padding = f'_pad{self.padding_deg:g}{self.apotype or ""}' if self.padding_deg is not None else ''
         if self.replicate_octant:
             padding = '_octrep'
-        fname = os.path.join(self.wsp_dir, f'wsp_nside{self.nside}{padding}.wsp')
+        # shared by the realizations with the same footprint and binning
+        fname = os.path.join(self.wsp_dir, f'wsp_nside{self.nside}_{self.footprint_id}{padding}_b{binning_id(self.b, self.f_ell)}.wsp')
         wsp = nmt.NmtWorkspace()
         if os.path.exists(fname):
             wsp.read_from(fname)
@@ -1310,7 +1329,8 @@ class MapBuilder(ABC):
             b = self.b
             dummy_f = nmt.NmtField(mask, [np.zeros_like(mask)], lite=True)
             wsp.compute_coupling_matrix(dummy_f, dummy_f, b)
-            wsp.write_to(fname)
+            with layout.atomic_write(fname) as tmp:
+                wsp.write_to(tmp)
             logger.info("Computed and saved workspace to file %s.", fname)
         return wsp
 
@@ -1440,7 +1460,8 @@ class MapBuilder(ABC):
             for _ell, _cl in zip(ell, cl[i, j], strict=True):
                 s.add_data_point(self.sacc_type, [tracers[i].name, tracers[j].name], _cl, ell=_ell)
         fname = self.get_fname(what='cls', format='fits')
-        s.save_fits(fname, overwrite=True)
+        with layout.atomic_write(fname) as tmp:
+            s.save_fits(tmp, overwrite=True)
         logger.debug("Saved to file %s.", fname)
         return fname
 
@@ -1513,7 +1534,6 @@ class MapBuilder(ABC):
             pairs: list | None = None,
             binning: str = 'wsp',
             error_bars: bool = False,
-            keep_cls: bool = False,
             stacked: bool = False,
             ell: np.ndarray | None = None) -> tuple:
         """Predict theory angular power spectra using CCL.
@@ -1533,8 +1553,6 @@ class MapBuilder(ABC):
         error_bars : bool, optional
             If True, compute Gaussian (diagonal-in-ell) error bars, with
             ``C_ell + N_ell`` for auto-spectra (noise from :meth:`_noise_cls`).
-        keep_cls : bool, optional
-            If True, cache the results on ``self.predicted_cls``.
         stacked : bool, optional
             If True, also return spectra stacked into a single vector (and, when
             ``error_bars=True``, a diagonal covariance matrix).
@@ -1562,9 +1580,6 @@ class MapBuilder(ABC):
         matter power spectrum, workspace bandpower windows, pixel window
         (``f_ell``), noise model (:meth:`_noise_cls`) and sky fraction.
         """
-        # cached prediction (see keep_cls)
-        if self.predicted_cls is not None:
-            return self.predicted_cls
 
         imaps, pairs = self._pairs(imaps, auto_only, pairs)
 
@@ -1601,8 +1616,6 @@ class MapBuilder(ABC):
                                       fsky=self.fsky,
                                       cross_covariance=not auto_only,
                                       progress=self.tqdm)
-        if keep_cls:
-            self.predicted_cls = res
         return res
 
     def reference_scales(self, smooth_Mpc: float | None = None) -> dict[str, np.ndarray]:
@@ -1779,7 +1792,8 @@ class MapBuilder(ABC):
 
         if save:
             fname = self.get_fname(what='2nd_3rd_4th_moments', format='npy')
-            np.save(fname, moments)
+            with layout.atomic_write(fname) as tmp:
+                np.save(tmp, moments)
             logger.info("Saved to file %s.", fname)
 
         return theta_smooth, moments['second_moment'], moments['third_moment'], moments['fourth_moment']

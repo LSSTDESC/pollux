@@ -75,7 +75,8 @@ class ShellBuilder(MapBuilder):
     seed : int, optional
         Random seed used to draw isometries/rotflips and for subsampling.
     dtype : data-type, optional
-        dtype used to store shell map values.
+        dtype used to store shell map values (particle counts, and the maps derived from them).
+        Default is float32.
     mask : ndarray or 'octant' or None, optional
         Footprint specification forwarded to :class:`~pollux.map_builder.MapBuilder`.
         Default is ``'octant'``. For ``'octant'``, particles outside
@@ -136,7 +137,7 @@ class ShellBuilder(MapBuilder):
             save_dir: str | None = None,
             root_dir: str | None = None,
             seed: int = 12345,
-            dtype: np.dtype = np.uint64,
+            dtype: np.dtype = np.float32,
             mask: np.ndarray | str | None = 'octant',
             apply_grid_isometry: bool | list = False,
             group_isometries: bool | float | None = None,
@@ -296,7 +297,7 @@ class ShellBuilder(MapBuilder):
             nside=self.nside,
             nshells=self.nshells,
             seed=self.seed,
-            mask=self.footprint if isinstance(self.footprint, str) or self.footprint is None else 'array',
+            mask=self.footprint if isinstance(self.footprint, str) or self.footprint is None else f'array {self.footprint_id}',
             padding_deg=self.padding_deg,
             apotype=self.apotype if self.padding_deg is not None else None,
             apply_grid_isometry=self.apply_grid_isometry,
@@ -412,10 +413,8 @@ class ShellBuilder(MapBuilder):
         if os.path.exists(fname):
             return
 
-        # written atomically (several workers may create it at once)
-        tmp = f'{fname}.{os.getpid()}'
-        fits.BinTableHDU(self.info_table(), name='SHELLS').writeto(tmp, overwrite=True)
-        os.replace(tmp, fname)
+        with layout.atomic_write(fname) as tmp:
+            fits.BinTableHDU(self.info_table(), name='SHELLS').writeto(tmp, overwrite=True)
         logger.debug("Saved to file %s.", fname)
 
     def random_isometries(self, group_isometries: bool | float | None = None, get_shell_identifier: bool = False) -> list:
@@ -1314,7 +1313,8 @@ class SnapshotShellBuilder(ShellBuilder):
 
                 hdul.append(fits.BinTableHDU.from_columns(cols, header))
 
-            fits.HDUList(hdul).writeto(fname, overwrite=True)
+            with layout.atomic_write(fname) as tmp:
+                fits.HDUList(hdul).writeto(tmp, overwrite=True)
             logger.debug("Saved to file %s.", fname)
 
             out[ishell] = hdul
@@ -1424,7 +1424,8 @@ class SnapshotShellBuilder(ShellBuilder):
                 # save all properties (as float32) for later calls
                 if save:
                     cols = [fits.Column(name=k, format='E', array=v) for k, v in cached.items()]
-                    fits.HDUList([fits.PrimaryHDU(), fits.BinTableHDU.from_columns(cols)]).writeto(props_fname, overwrite=True)
+                    with layout.atomic_write(props_fname) as tmp:
+                        fits.HDUList([fits.PrimaryHDU(), fits.BinTableHDU.from_columns(cols)]).writeto(tmp, overwrite=True)
                     logger.debug("Saved to file %s.", props_fname)
 
             out[ishell] = {k: cached[k] for k in variables}

@@ -119,13 +119,16 @@ class PolluxLoader:
         shell = hsp.HealSparseMap.read(self._shell_fname('shell', ishell))
         return shell / self.shell_info['pixel_density'][ishell] - 1. if density else shell
 
-    def load_shell_alms(self, ishell: int) -> np.ndarray:
+    def load_shell_alms(self, ishell: int, *, replicate_octant: bool = False) -> np.ndarray:
         """Load the a_lm of one shell (intermediate file).
 
         Parameters
         ----------
         ishell : int
             Shell index.
+        replicate_octant : bool, optional
+            If True, the a_lm of the octant replicated over the full sky (``alms_octrep``, see
+            ``replicate_octant`` of :class:`~pollux.map_builder.MapBuilder`).
 
         Returns
         -------
@@ -133,7 +136,7 @@ class PolluxLoader:
             a_lm (healpy ordering).
         """
         folder = layout.intermediate_dir(self.shells_dir, self.realization_dir)
-        return hp.read_alm(os.path.join(folder, f'alms_{ishell:03d}.fits'))
+        return hp.read_alm(os.path.join(folder, f'{_alms_what(replicate_octant)}_{ishell:03d}.fits'))
 
     def load_shell_cls(self) -> sacc.Sacc:
         """Load the measured angular power spectra of the shells.
@@ -223,20 +226,22 @@ class PolluxLoader:
         """
         return hsp.HealSparseMap.read(self._kappa_fname('kappa', ikappa, smooth_Mpc))
 
-    def load_kappa_alms(self, ikappa: int) -> np.ndarray:
+    def load_kappa_alms(self, ikappa: int, *, replicate_octant: bool = False) -> np.ndarray:
         """Load the a_lm of one convergence map (intermediate file).
 
         Parameters
         ----------
         ikappa : int
             Tomographic bin (or shell, for ``nz='snapshots'``).
+        replicate_octant : bool, optional
+            If True, the a_lm of the octant replicated over the full sky (``alms_octrep``).
 
         Returns
         -------
         ndarray
             a_lm (healpy ordering).
         """
-        fname = os.path.basename(self._kappa_fname('alms', ikappa))
+        fname = os.path.basename(self._kappa_fname(_alms_what(replicate_octant), ikappa))
         return hp.read_alm(os.path.join(layout.intermediate_dir(self._kappa_dir(), self.realization_dir), fname))
 
     def load_shear(self, ikappa: int, smooth_Mpc: float | None = None) -> tuple[hsp.HealSparseMap, hsp.HealSparseMap]:
@@ -295,3 +300,17 @@ class PolluxLoader:
         sacc.Sacc
         """
         return sacc.Sacc.load_fits(os.path.join(self.catalog_dir(), 'cat_2pt.fits'))
+
+    def load_catalog_cls(self) -> sacc.Sacc:
+        """Load the measured angular power spectra of the catalogs.
+
+        Returns
+        -------
+        sacc.Sacc
+        """
+        return sacc.Sacc.load_fits(os.path.join(self.catalog_dir(), 'cat_cls.fits'))
+
+
+def _alms_what(replicate_octant: bool) -> str:
+    """Return the name of the a_lm files, of the octant replicated over the full sky or not (as ``MapBuilder``)."""
+    return 'alms_octrep' if replicate_octant else 'alms'

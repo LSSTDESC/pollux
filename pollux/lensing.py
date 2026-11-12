@@ -120,12 +120,18 @@ class LensingBuilder(MapBuilder):
         if nzs == 'zsnapshots':
             nz_parameters = 'zsnapshots'
         else:
-            nz_values = [getattr(nz, '__name__', repr(nz)) if callable(nz) else [np.asarray(a, dtype=float).tolist() for a in nz] for nz in nzs]
+            # callable n(z) by their values on the grid of the tracers
+            zz = np.linspace(0, shell_builder.shell_edges_redshift[-1], 1000)
+            nz_values = [np.asarray(nz(zz), dtype=float).tolist() if callable(nz) else [np.asarray(a, dtype=float).tolist() for a in nz] for nz in nzs]
             nz_parameters = dict(nbins=self.nkappas, sha1=hashlib.sha1(repr(nz_values).encode()).hexdigest())
-        layout.write_config(
-            self.save_dir, 'kappa', dict(builder=type(self).__name__, nzs=nz_parameters), inputs=[shell_builder.save_dir], realization=self.realization_dir)
+        parameters = dict(builder=type(self).__name__, nzs=nz_parameters, **self._config_options())
+        layout.write_config(self.save_dir, 'kappa', parameters, inputs=[shell_builder.save_dir], realization=self.realization_dir)
         if nzs != 'zsnapshots':
             self._save_nzs()
+
+    def _config_options(self) -> dict:
+        """Return the options of the builder for the ``config.yaml`` of its products: those differing from their defaults (none here)."""
+        return {}
 
     def _save_nzs(self) -> None:
         """Save the redshift distributions, unless saved already.
@@ -138,10 +144,11 @@ class LensingBuilder(MapBuilder):
         fname = os.path.join(self.save_dir, 'nzs.txt' if common else 'nzs.npy')
         if os.path.exists(fname):
             return
-        if common:
-            np.savetxt(fname, np.column_stack([tables[0][0]] + [nz[1] for nz in tables]), header='z ' + ' '.join(f'nz_{i}' for i in range(len(tables))))
-        else:
-            np.save(fname, np.array(self.nzs, dtype=object), allow_pickle=True)
+        with layout.atomic_write(fname) as tmp:
+            if common:
+                np.savetxt(tmp, np.column_stack([tables[0][0]] + [nz[1] for nz in tables]), header='z ' + ' '.join(f'nz_{i}' for i in range(len(tables))))
+            else:
+                np.save(tmp, np.array(self.nzs, dtype=object), allow_pickle=True)
         logger.debug("Saved to file %s.", fname)
 
     def _smooth_distance(self, ikappa: int) -> float:
@@ -294,10 +301,10 @@ class BornLensingBuilder(LensingBuilder):
             multiple_planes: bool = False,
             nbar_from_maps: bool = False,
             **kwargs: Any) -> None:
-        super().__init__(shell_builder, nzs, tag=tag, save_dir=save_dir, dtype=dtype, **kwargs)
-
+        # options set first, for the configuration written by LensingBuilder
         self.multiple_planes = multiple_planes
         self.nbar_from_maps = nbar_from_maps
+        super().__init__(shell_builder, nzs, tag=tag, save_dir=save_dir, dtype=dtype, **kwargs)
 
         if multiple_planes:
             mpart = self.reader.mass_particles
@@ -309,6 +316,14 @@ class BornLensingBuilder(LensingBuilder):
             zmax = self.shell_builder.shell_edges_redshift[-1]
             self.dndz_norm = [quad(lambda z: t.ccl(self.cosmo).get_dndz(z), 0., zmax) if t.kind == 'shear' else np.nan for t in self.tracers]
             self.zlens = [self.shell_builder.mean_z_volume(ishell) for ishell in range(self.nshells)]
+
+    def _config_options(self) -> dict:
+        """Return the options of the builder for the ``config.yaml`` of its products: those differing from their defaults.
+
+        Options at their defaults are left out, so that the configurations of products made before
+        they were recorded stay valid.
+        """
+        return {k: True for k in ('multiple_planes', 'nbar_from_maps') if getattr(self, k)}
 
     def construct_maps(self, ikappas: int | Iterable[int] | None = None) -> hsp.HealSparseMap | dict[int, hsp.HealSparseMap]:
         """Construct and save convergence maps by summing weighted shells.

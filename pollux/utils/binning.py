@@ -1,6 +1,7 @@
 """NaMaster bandpower binnings."""
 from __future__ import annotations
 
+import hashlib
 import warnings
 from functools import partial
 from typing import Any, Callable
@@ -10,6 +11,32 @@ import numpy as np
 import pymaster as nmt
 
 from .numerics import powspace
+
+
+def binning_id(b: nmt.NmtBin, f_ell: str | np.ndarray | None = None, extra: tuple = ()) -> str:
+    """Return a short identifier of a binning, for the names of the files that depend on it (e.g. workspaces).
+
+    Parameters
+    ----------
+    b : pymaster.NmtBin
+        Binning: its multipoles and weights per bandpower.
+    f_ell : str, ndarray or None, optional
+        Field window of the binning (not readable from ``b``).
+    extra : tuple, optional
+        Other values the files depend on (e.g. the maximum multipole of the masks).
+
+    Returns
+    -------
+    str
+        Eight hexadecimal characters.
+    """
+    h = hashlib.sha1()
+    for i in range(b.get_n_bands()):
+        h.update(np.asarray(b.get_ell_list(i), dtype=np.int64).tobytes())
+        h.update(np.asarray(b.get_weight_list(i), dtype=np.float64).tobytes())
+    h.update(np.asarray(f_ell, dtype=np.float64).tobytes() if isinstance(f_ell, np.ndarray) else repr(f_ell).encode())
+    h.update(repr(extra).encode())
+    return h.hexdigest()[:8]
 
 
 def make_nmtbin(

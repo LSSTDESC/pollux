@@ -542,7 +542,8 @@ class Theory:
         def predict(t1: Tracer, t2: Tracer, w: np.ndarray | None = None) -> np.ndarray:
             # C_ell of two tracers, unbinned or binned
             if unbinned:
-                return self.angular_cl(t1, t2, ell)
+                cl = self.angular_cl(t1, t2, ell)
+                return cl if f_ell is None else cl * np.interp(ell, np.arange(len(f_ell)), f_ell)**2
             return self.binned_cl(t1, t2, b, bpws=w, f_ell=f_ell)
 
         # spectra of the pairs (all components with bandpower windows if all_components), keeping the first one per tracer pair

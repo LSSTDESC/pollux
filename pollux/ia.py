@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from typing import Any
 
 import numpy as np
@@ -113,15 +114,15 @@ class IACalculator(CatalogAugmentor):
             delta = catalog['density']
             bias = kwargs.get('bias', 0.0)
 
-            if delta_b_TA != 0.0 and 'TA' in self.model:
-                tmp_ta = (1. + (bias + delta_b_TA) * delta) / (1. + bias * delta)
-                catalog['e1_ia_ta'] *= tmp_ta
-                catalog['e2_ia_ta'] *= tmp_ta
+            for model, delta_b in (('TA', delta_b_TA), ('TT', delta_b_TT)):
+                if delta_b != 0.0 and model in self.model:
+                    factor = _density_factor(delta, bias, delta_b)
+                    catalog[f'e1_ia_{model.lower()}'] *= factor
+                    catalog[f'e2_ia_{model.lower()}'] *= factor
 
-            if delta_b_TT != 0.0 and 'TT' in self.model:
-                tmp_tt = (1. + (bias + delta_b_TT) * delta) / (1. + bias * delta)
-                catalog['e1_ia_tt'] *= tmp_tt
-                catalog['e2_ia_tt'] *= tmp_tt
+    def config(self) -> dict:
+        """Return the type and parameters of the augmentor, for the ``config.yaml`` of the catalogs."""
+        return {'type': type(self).__name__, 'model': self.model, 'model_params': self.model_params}
 
     def coefficients(self, cosmo: pyccl.Cosmology, z: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Return the coefficients of the TA and TT terms, as CCL's :func:`pyccl.nl_pt.translate_IA_norm`.
@@ -174,6 +175,20 @@ class IACalculator(CatalogAugmentor):
         if 'TT' in self.model:
             amplitudes['a2'] = self.model_params.get('A_TT', 1.0)
         return amplitudes
+
+
+def _density_factor(delta: np.ndarray, bias: float, delta_b: float) -> np.ndarray:
+    """Return the density modulation of the intrinsic alignments, ``max(0, 1 + (bias + delta_b) delta) / (1 + bias delta)``.
+
+    Galaxies are placed with the density smoothed for their positions, and ``delta`` (the
+    ``density`` field of the catalog) may have another smoothing: where ``1 + bias delta <= 0``,
+    the factor is 1 (no modulation) rather than infinite or of the wrong sign.
+    """
+    weight = 1. + bias * delta
+    factor = np.ones_like(delta, dtype=float)
+    ok = weight > 0.
+    factor[ok] = np.maximum(0., 1. + (bias + delta_b) * delta[ok]) / weight[ok]
+    return factor
 
 
 class CatalogAugmentorShear(CatalogAugmentor):
@@ -242,6 +257,16 @@ class CatalogAugmentorShear(CatalogAugmentor):
         if compute_observed:
             new_columns += ['e1_obs', 'e2_obs']
         self.new_columns = new_columns
+
+    def config(self) -> dict:
+        """Return the type and parameters of the augmentor, for the ``config.yaml`` of the catalogs.
+
+        The parameters setting the values of the shapes (``sigma_e``, ``include_ia``, ``seed``) are
+        recorded when they differ from their defaults, so that the configurations of catalogs made
+        before they were recorded stay valid.
+        """
+        defaults = inspect.signature(type(self)).parameters
+        return {'type': type(self).__name__, **{k: getattr(self, k) for k in ('sigma_e', 'include_ia', 'seed') if getattr(self, k) != defaults[k].default}}
 
     def augment_catalog(self, cosmo: pyccl.Cosmology, catalog: dict[str, np.ndarray], ikappa: int = 0, realization_seed: int = 0, **kwargs: Any) -> None:
         """Compute derived shear quantities and add them to the catalog.

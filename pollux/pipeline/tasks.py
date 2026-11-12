@@ -3,18 +3,23 @@
 from parsl import python_app
 
 
+def _make_halo_builder(reader_dict, shell_dict):
+    # halo catalogs: all halos (no subsampling of the boxes)
+    import pollux
+    return pollux.shells.SnapshotShellBuilder(pollux.reader.HACCHaloReader(**reader_dict), **{**shell_dict, 'subsample_box': None})
+
+
 def _make_baryon_builder(reader_dict, shell_dict, baryon_dict):
     import pollux
     reader = pollux.reader.HACCReader(**reader_dict)
     builder = pollux.shells.SnapshotShellBuilder(reader, **shell_dict)
-    reader_halo = pollux.reader.HACCHaloReader(**reader_dict)
-    builder_halo = pollux.shells.SnapshotShellBuilder(reader_halo, **{**shell_dict, 'subsample_box': None})  # as the halo catalogs
+    builder_halo = _make_halo_builder(reader_dict, shell_dict)
     builder_params = dict(baryon_dict)
     tag = builder_params.pop('tag', None)
     bfg_params = builder_params.pop('bfg_params')
     # the same profiles baryonify the shells and correct the predicted P(k)
     dmo, dmb = pollux.baryons.s19_profiles(bfg_params, builder_params['mass_def'])
-    return pollux.baryons.BaryonifiedShellBuilder(builder, builder_halo, dmo, dmb, tag=tag, **builder_params)
+    return pollux.baryons.BaryonifiedShellBuilder(builder, builder_halo, dmo, dmb, profile_parameters=bfg_params, tag=tag, **builder_params)
 
 
 def _make_shell_builder(reader_dict, shell_dict, baryon_dict):
@@ -130,10 +135,7 @@ def plot_shell_maps(reader_dict, shell_dict, baryon_dict=None, inputs=[]):
 
 @python_app(executors=['highmem'])
 def construct_halo_catalog(ishell, reader_dict, shell_dict, baryon_dict, inputs=[]):
-    import pollux
-    reader = pollux.reader.HACCHaloReader(**reader_dict)
-    builder = pollux.shells.SnapshotShellBuilder(reader, **shell_dict)
-    builder.construct_catalogs(ishell, extra_columns=[baryon_dict['mass_name']])
+    _make_halo_builder(reader_dict, shell_dict).construct_catalogs(ishell, extra_columns=[baryon_dict['mass_name']])
     _free_memory()
 
 

@@ -31,12 +31,12 @@ class IACalculator(CatalogAugmentor):
         IA model to use. Supported values are 'TA', 'TT', or 'TATT'.
         Default is 'TA'.
     model_params : dict, optional
-        Model parameters:
+        Model parameters, with the defaults of :attr:`PARAMETERS`:
 
-        - ``'A_TA'``: amplitude of the TA model (default 1.0);
-        - ``'A_TT'``: amplitude of the TT model (default 1.0);
-        - ``'delta_b_TA'``: bias of the density-dependent TA model (default 0.0);
-        - ``'delta_b_TT'``: bias of the density-dependent TT model (default 0.0).
+        - ``'A_TA'``: amplitude of the TA model;
+        - ``'A_TT'``: amplitude of the TT model;
+        - ``'delta_b_TA'``: bias of the density-dependent TA model;
+        - ``'delta_b_TT'``: bias of the density-dependent TT model.
 
     Notes
     -----
@@ -51,16 +51,23 @@ class IACalculator(CatalogAugmentor):
     https://arxiv.org/abs/2509.25166v1
     """
 
+    # model parameters and their defaults
+    PARAMETERS = {'A_TA': 1.0, 'A_TT': 1.0, 'delta_b_TA': 0.0, 'delta_b_TT': 0.0}
+
     def __init__(self, model: str = 'TA', model_params: dict | None = None) -> None:
         if model not in ['TA', 'TT', 'TATT']:
             raise ValueError(f"IA model '{model}' not recognized. Supported: 'TA', 'TT', 'TATT'.")
+        unknown = set(model_params or {}) - set(self.PARAMETERS)
+        if unknown:
+            raise ValueError(f"Unknown IA parameters {sorted(unknown)}, must be among {list(self.PARAMETERS)}")
 
         self.model = model
-        self.model_params = model_params or {}
+        self.model_params = model_params or {}  # as given, for the configuration of the catalogs
+        self.parameters = {**self.PARAMETERS, **self.model_params}  # with the defaults
         self.name = f"IA_{model}"
 
         required_fields = ['t11', 't22', 't12']
-        if self.model_params.get('delta_b_TA', 0.0) != 0.0 or self.model_params.get('delta_b_TT', 0.0) != 0.0:
+        if self.parameters['delta_b_TA'] != 0.0 or self.parameters['delta_b_TT'] != 0.0:
             required_fields.append('density')
         self.required_interp_fields = required_fields
 
@@ -106,15 +113,12 @@ class IACalculator(CatalogAugmentor):
             catalog['e1_ia_tt'] = C2 * (t11**2 - t22**2)
             catalog['e2_ia_tt'] = C2 * t12 * (t11 + t22)
 
-        # delta-TA/TT model
-        delta_b_TA = self.model_params.get('delta_b_TA', 0.0)
-        delta_b_TT = self.model_params.get('delta_b_TT', 0.0)
-
-        if delta_b_TA != 0.0 or delta_b_TT != 0.0:
+        # density modulation (delta-TA/TT model)
+        if 'density' in self.required_interp_fields:
             delta = catalog['density']
             bias = kwargs.get('bias', 0.0)
-
-            for model, delta_b in (('TA', delta_b_TA), ('TT', delta_b_TT)):
+            for model in ('TA', 'TT'):
+                delta_b = self.parameters[f'delta_b_{model}']
                 if delta_b != 0.0 and model in self.model:
                     factor = _density_factor(delta, bias, delta_b)
                     catalog[f'e1_ia_{model.lower()}'] *= factor
@@ -146,8 +150,8 @@ class IACalculator(CatalogAugmentor):
             Coefficients at ``z`` (zero for a term not in the model).
         """
         z = np.asarray(z, dtype=float)
-        a1 = self.model_params.get('A_TA', 1.0) if 'TA' in self.model else 0.
-        a2 = self.model_params.get('A_TT', 1.0) if 'TT' in self.model else 0.
+        a1 = self.parameters['A_TA'] if 'TA' in self.model else 0.
+        a2 = self.parameters['A_TT'] if 'TT' in self.model else 0.
         C1, _, C2 = pyccl.nl_pt.translate_IA_norm(cosmo, z=z, a1=a1, a2=a2)
         return C1 * np.ones_like(z), C2 * np.ones_like(z)
 
@@ -170,10 +174,10 @@ class IACalculator(CatalogAugmentor):
         dict
             ``a1``, and ``a2`` and ``a1delta`` for the terms beyond NLA.
         """
-        a1 = self.model_params.get('A_TA', 1.0) if 'TA' in self.model else 0.
-        amplitudes = {'a1': a1, 'a1delta': (bias + self.model_params.get('delta_b_TA', 0.0)) * a1}
+        a1 = self.parameters['A_TA'] if 'TA' in self.model else 0.
+        amplitudes = {'a1': a1, 'a1delta': (bias + self.parameters['delta_b_TA']) * a1}
         if 'TT' in self.model:
-            amplitudes['a2'] = self.model_params.get('A_TT', 1.0)
+            amplitudes['a2'] = self.parameters['A_TT']
         return amplitudes
 
 

@@ -698,7 +698,8 @@ class CatalogSourceGenerator(ABC):
             of the augmentor (:meth:`~pollux.ia.IACalculator.tracer_amplitudes`, with the bias of
             each bin) and the smoothing of the tidal field; None without intrinsic alignments.
         """
-        calculators = [a for a in self.augmentors if hasattr(a, 'tracer_amplitudes')]
+        from .ia import IACalculator  # here: pollux.ia imports this module
+        calculators = [a for a in self.augmentors if isinstance(a, IACalculator)]
         if not calculators:
             return None
         bias = getattr(self, 'bias', np.ones(self.ncats))

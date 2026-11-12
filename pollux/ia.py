@@ -151,7 +151,7 @@ class IACalculator(CatalogAugmentor):
         C1, _, C2 = pyccl.nl_pt.translate_IA_norm(cosmo, z=z, a1=a1, a2=a2)
         return C1 * np.ones_like(z), C2 * np.ones_like(z)
 
-    def theory_amplitudes(self, bias: float) -> dict[str, float]:
+    def tracer_amplitudes(self, bias: float) -> dict[str, float]:
         """Return the amplitudes of the model for the predictions (``ia`` of :class:`pollux.cosmo.Tracer`).
 
         Galaxies are placed with ``1 + bias delta``, and with ``delta_b_TA`` the tidal alignment

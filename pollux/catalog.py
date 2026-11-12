@@ -695,10 +695,10 @@ class CatalogSourceGenerator(ABC):
         -------
         list of pollux.cosmo.Tracer or None
             ``'ia'`` tracers named ``ia_{i}``, with the n(z) of the lensing tracers, the amplitudes
-            of the augmentor (:meth:`~pollux.ia.IACalculator.theory_amplitudes`, with the bias of
+            of the augmentor (:meth:`~pollux.ia.IACalculator.tracer_amplitudes`, with the bias of
             each bin) and the smoothing of the tidal field; None without intrinsic alignments.
         """
-        calculators = [a for a in self.augmentors if hasattr(a, 'theory_amplitudes')]
+        calculators = [a for a in self.augmentors if hasattr(a, 'tracer_amplitudes')]
         if not calculators:
             return None
         bias = getattr(self, 'bias', np.ones(self.ncats))
@@ -707,7 +707,7 @@ class CatalogSourceGenerator(ABC):
         smooth_Mpc = None if scales[0] is None else (tuple(self.lensing.shell_builder.shell_edges_comoving_distance), scales)
         tracers = []
         for i, t in enumerate(self.lensing_tracers):
-            amplitudes = calculators[0].theory_amplitudes(float(bias[i]))
+            amplitudes = calculators[0].tracer_amplitudes(float(bias[i]))
             tracers.append(Tracer(f"ia_{i}", 'ia', z=t.z, nz=t.nz, smooth_Mpc=smooth_Mpc, smooth_nside=self.lensing.nside, ia=amplitudes))
         return tracers
 

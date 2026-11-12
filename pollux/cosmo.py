@@ -352,7 +352,7 @@ class Theory:
         same smoothing). The density weighting of the tidal torquing term is not modelled.
         """
         key = tuple(sorted(((t.smooth_Mpc, t.smooth_nside or 0) for t in (t1, t2) if t.smooth_Mpc), key=repr))
-        cl = self._limber(t1.ccl(self.cosmo), t2.ccl(self.cosmo), ell, self._apply_smoothing(self.p_of_k_a, key))
+        cl = self._limber(t1.ccl(self.cosmo), t2.ccl(self.cosmo), ell, self._apply_pk_smoothing(self.p_of_k_a, key))
 
         # intrinsic alignments beyond NLA, with the IA leg first
         if t1.kind != 'ia' and t2.kind == 'ia':
@@ -370,7 +370,7 @@ class Theory:
         except pyccl.CCLError:
             return pyccl.angular_cl(self.cosmo, ccl1, ccl2, ell, p_of_k_a=pk, limber_integration_method='spline')
 
-    def _apply_smoothing(self, pk: pyccl.Pk2D | None, key: tuple, name: str = 'matter') -> pyccl.Pk2D | None:
+    def _apply_pk_smoothing(self, pk: pyccl.Pk2D | None, key: tuple, name: str = 'matter') -> pyccl.Pk2D | None:
         """Return a power spectrum multiplied by the Gaussian smoothing of the tracers ``key`` (cached by ``name``).
 
         Same grid as ``pk`` (CCL's nonlinear matter power spectrum if None), with the smoothing of
@@ -398,7 +398,7 @@ class Theory:
         (:class:`pyccl.nl_pt.EulerianPTCalculator`, FAST-PT): the NLA term itself is computed
         with the matter power spectrum of the predictions (nonlinear, possibly with baryons).
         ``t2`` is an ``'ia'`` tracer, or another tracer for the matter (its bias is in its CCL kernel).
-        The spectrum is smoothed as the tracers (``smooth_key``, see :meth:`_apply_smoothing`).
+        The spectrum is smoothed as the tracers (``smooth_key``, see :meth:`_apply_pk_smoothing`).
         """
         if self._pt_calculator is None:
             self._pt_calculator = pyccl.nl_pt.EulerianPTCalculator(with_IA=True, with_NC=False, with_matter_1loop=False, cosmo=self.cosmo)
@@ -413,7 +413,7 @@ class Theory:
             full = self._pt_calculator.get_biased_pk2d(t1._pt_tracer(self.cosmo), tracer2=full2)
             nla = self._pt_calculator.get_biased_pk2d(t1._pt_tracer(self.cosmo, nla_only=True), tracer2=nla2)
             self._pt_correction_pk[key] = full - nla
-        return self._apply_smoothing(self._pt_correction_pk[key], smooth_key, name=('ia', key))
+        return self._apply_pk_smoothing(self._pt_correction_pk[key], smooth_key, name=('ia', key))
 
     def binned_cl(self, t1: Tracer, t2: Tracer, b: pymaster.NmtBin, bpws: np.ndarray | None = None, f_ell: np.ndarray | None = None) -> np.ndarray:
         """Return the angular power spectrum of two tracers, binned into bandpowers.

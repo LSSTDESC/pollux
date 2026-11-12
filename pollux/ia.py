@@ -41,7 +41,8 @@ class IACalculator(CatalogAugmentor):
     -----
     The TA (Tidal Alignment) model computes IA shear proportional to the
     tidal field, while the TT model uses quadratic tidal field terms. The
-    normalization follows Brown et al. 2014, with C1bar = 5e-14 h^2 Msun^-1 Mpc^3.
+    normalization is CCL's (:meth:`coefficients`), with Cbar1 = 5e-14 h^-2 Msun^-1 Mpc^3
+    (Brown et al. 2002), so that theory predictions of CCL use the same amplitudes.
 
     References
     ----------
@@ -89,21 +90,18 @@ class IACalculator(CatalogAugmentor):
         ``'e2_ia_tt'`` (TT model), depending on the model.
         """
         z = catalog['z']
-        a = 1.0 / (1.0 + z)
-        C1bar = 5e-14 * cosmo['h']**2  # normalization constant in (Msun^-1 Mpc^3) from value of 5e14 (Msun^-1 h^2 Mpc^3) found in Brown et al. 2014
         t11 = catalog['t11']
         t22 = catalog['t22']
         t12 = catalog['t12']
+        C1, C2 = self.coefficients(cosmo, z)
 
         if 'TA' in self.model:
-            # TA (Tidal Alignment) model
-            C1 = -(self.model_params.get('A_TA', 1.0) * C1bar) * (cosmo.rho_x(a, species='matter') / cosmo.growth_factor(a))
+            # TA (Tidal Alignment) model: e = C1 s, with s the traceless tidal field (e1 = s11 - s22, e2 = 2 s12 = t12)
             catalog['e1_ia_ta'] = C1 * (t11 - t22)
             catalog['e2_ia_ta'] = C1 * t12
 
         if 'TT' in self.model:
-            # TT (tidal torque) model
-            C2 = 5 * self.model_params.get('A_TT', 1.0) * C1bar * (cosmo.rho_x(a, species='matter') / cosmo.growth_factor(a)**2)
+            # TT (tidal torque) model: e = C2 (s s), with (s s)_11 - (s s)_22 = s11^2 - s22^2 and 2 (s s)_12 = t12 (s11 + s22)
             catalog['e1_ia_tt'] = C2 * (t11**2 - t22**2)
             catalog['e2_ia_tt'] = C2 * t12 * (t11 + t22)
 
@@ -124,6 +122,58 @@ class IACalculator(CatalogAugmentor):
                 tmp_tt = (1. + (bias + delta_b_TT) * delta) / (1. + bias * delta)
                 catalog['e1_ia_tt'] *= tmp_tt
                 catalog['e2_ia_tt'] *= tmp_tt
+
+    def coefficients(self, cosmo: pyccl.Cosmology, z: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Return the coefficients of the TA and TT terms, as CCL's :func:`pyccl.nl_pt.translate_IA_norm`.
+
+        ``C1 = -A_TA Cbar1 rho_crit Omega_m / D(z)`` and ``C2 = 5 A_TT Cbar1 rho_crit Omega_m / D(z)^2``
+        (DES convention), with ``Cbar1 = 5e-14 h^-2 Msun^-1 Mpc^3``, the critical density today in
+        ``h^2 Msun Mpc^-3`` (so that ``Cbar1 rho_crit = 0.0139``), and the growth factor ``D``
+        normalized to 1 today. The tidal field is that of the (nonlinear) density contrast at
+        redshift ``z``, hence the growth factors: the NLA model with ``A_TA``.
+
+        Parameters
+        ----------
+        cosmo : pyccl.Cosmology
+            Cosmology.
+        z : array_like
+            Redshifts.
+
+        Returns
+        -------
+        C1, C2 : ndarray
+            Coefficients at ``z`` (zero for a term not in the model).
+        """
+        z = np.asarray(z, dtype=float)
+        a1 = self.model_params.get('A_TA', 1.0) if 'TA' in self.model else 0.
+        a2 = self.model_params.get('A_TT', 1.0) if 'TT' in self.model else 0.
+        C1, _, C2 = pyccl.nl_pt.translate_IA_norm(cosmo, z=z, a1=a1, a2=a2)
+        return C1 * np.ones_like(z), C2 * np.ones_like(z)
+
+    def theory_amplitudes(self, bias: float) -> dict[str, float]:
+        """Return the amplitudes of the model for the predictions (``ia`` of :class:`pollux.cosmo.Tracer`).
+
+        Galaxies are placed with ``1 + bias delta``, and with ``delta_b_TA`` the tidal alignment
+        of each galaxy is multiplied by ``(1 + (bias + delta_b_TA) delta) / (1 + bias delta)``: the
+        shapes summed over galaxies are those of ``C1 (1 + (bias + delta_b_TA) delta) s``, the
+        density-weighted term of TATT with ``a1delta = (bias + delta_b_TA) a1``. The density
+        weighting of the tidal torquing term (``bias`` and ``delta_b_TT``) is not modelled.
+
+        Parameters
+        ----------
+        bias : float
+            Linear bias of the galaxies (that placing them).
+
+        Returns
+        -------
+        dict
+            ``a1``, and ``a2`` and ``a1delta`` for the terms beyond NLA.
+        """
+        a1 = self.model_params.get('A_TA', 1.0) if 'TA' in self.model else 0.
+        amplitudes = {'a1': a1, 'a1delta': (bias + self.model_params.get('delta_b_TA', 0.0)) * a1}
+        if 'TT' in self.model:
+            amplitudes['a2'] = self.model_params.get('A_TT', 1.0)
+        return amplitudes
 
 
 class CatalogAugmentorShear(CatalogAugmentor):
@@ -148,11 +198,16 @@ class CatalogAugmentorShear(CatalogAugmentor):
         If True, include IA contributions in lensed shapes. Default is True.
     sigma_e : float, optional
         Standard deviation of the intrinsic ellipticity distribution. Default is 0.3.
-    seed : int, optional
-        Seed of the intrinsic shapes: the galaxies of tomographic bin ``ikappa``
-        in shell ``ishell`` use ``np.random.default_rng([seed, ikappa, ishell])``,
-        so shapes do not depend on how the catalog is split into shells. Default is 42.
+    seed : int or None, optional
+        Extra seed of the intrinsic shapes, if not None. The shapes of the galaxies of
+        tomographic bin ``ikappa`` in shell ``ishell`` are drawn from a stream of their own,
+        seeded by the seed of the realization (given by the catalog generator), ``ikappa`` and
+        ``ishell``: they differ between realizations, and do not depend on how the catalog is
+        split into shells. Default is None.
     """
+
+    # stream of the random numbers of the intrinsic shapes, distinct from those of the catalog generators
+    _SHAPE_STREAM = 10
 
     def __init__(
         self,
@@ -162,7 +217,7 @@ class CatalogAugmentorShear(CatalogAugmentor):
         compute_observed: bool = False,
         include_ia: bool = True,
         sigma_e: float = 0.3,
-        seed: int = 42,
+        seed: int | None = None,
     ) -> None:
         if compute_observed and not generate_intrinsic:
             raise ValueError("Intrinsic shapes must be generated to compute observed shapes.")
@@ -188,7 +243,7 @@ class CatalogAugmentorShear(CatalogAugmentor):
             new_columns += ['e1_obs', 'e2_obs']
         self.new_columns = new_columns
 
-    def augment_catalog(self, cosmo: pyccl.Cosmology, catalog: dict[str, np.ndarray], ikappa: int = 0, **kwargs: Any) -> None:
+    def augment_catalog(self, cosmo: pyccl.Cosmology, catalog: dict[str, np.ndarray], ikappa: int = 0, realization_seed: int = 0, **kwargs: Any) -> None:
         """Compute derived shear quantities and add them to the catalog.
 
         Parameters
@@ -200,6 +255,8 @@ class CatalogAugmentorShear(CatalogAugmentor):
             ``'gamma2'`` and ``'idx_shell'``; updated in place.
         ikappa : int, optional
             Tomographic-bin index, used to seed the intrinsic shapes.
+        realization_seed : int, optional
+            Seed of the realization (that of the shell builder), used to seed the intrinsic shapes.
         **kwargs
             Unused (other augmentor options).
         """
@@ -228,17 +285,17 @@ class CatalogAugmentorShear(CatalogAugmentor):
             catalog['e2_int'] = np.empty(len(idx_shell))
             for ishell in np.unique(idx_shell):
                 w = np.flatnonzero(idx_shell == ishell)
-                rng = np.random.default_rng([self.seed, ikappa, ishell])
+                rng = np.random.default_rng([realization_seed, self._SHAPE_STREAM, ikappa, ishell] + ([] if self.seed is None else [self.seed]))
                 catalog['e1_int'][w] = rng.normal(0., self.sigma_e, size=len(w))
                 catalog['e2_int'][w] = rng.normal(0., self.sigma_e, size=len(w))
 
         if self.compute_observed:
             # source ellipticity, plus the intrinsic alignments if computed
             e_int = catalog['e1_int'] + 1j * catalog['e2_int']
-            if 'e1_ia_ta' in catalog:
-                e_int += catalog['e1_ia_ta'] + 1j * catalog['e2_ia_ta']
-            if 'e1_ia_tt' in catalog:
-                e_int += catalog['e1_ia_tt'] + 1j * catalog['e2_ia_tt']
+            if self.include_ia:
+                for model in ('ta', 'tt'):
+                    if f'e1_ia_{model}' in catalog:
+                        e_int += catalog[f'e1_ia_{model}'] + 1j * catalog[f'e2_ia_{model}']
             # observed ellipticity e = (g + e_s) / (1 + g* e_s)
             g = g1 + 1j * g2
             e_obs = (g + e_int) / (1. + np.conj(g) * e_int)

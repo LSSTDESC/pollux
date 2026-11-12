@@ -25,7 +25,7 @@ The density used to place galaxies and the fields interpolated at galaxies can b
 - ``catalog.smooth_fields``: the smoothed fields, among ``kappa``, ``gamma1``, ``gamma2``, ``density``, ``t11``, ``t22``, ``t12`` and ``positions`` (the density placing galaxies);
 - ``smooth_Mpc``: the scale, or a dictionary of scales per field.
 
-Fields made together must share their scale (the tidal tensor components, and the shear components). Predictions account for the smoothing of ``positions`` (see :class:`pollux.cosmo.Tracer`).
+Fields made together must share their scale (the tidal tensor components, and the shear components). Predictions account for the smoothing of ``positions``, and of the tidal field for intrinsic alignments (see :class:`pollux.cosmo.Tracer`). The catalogs' 2pt functions are measured with the lensing shear by default (``shear_cols``); their predictions with intrinsic alignments, NLA or TATT, are those of ``predict_2pt(theta, shapes='observed')`` (shear plus intrinsic alignments, columns ``e1_obs``, ``e2_obs``) or ``shapes='ia'``.
 
 Linear galaxy bias
 ------------------

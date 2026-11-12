@@ -20,6 +20,7 @@ from .io import layout
 from .cosmo import Tracer
 from .map_builder import MapBuilder, MapSum
 from .utils.numerics import quad
+from .utils.sky import spin2_factor
 
 if TYPE_CHECKING:
     from .shells import ShellBuilder
@@ -186,9 +187,8 @@ class LensingBuilder(MapBuilder):
         if lmax is None:
             lmax = 3 * self.shell_builder.nside - 1
 
-        ell = np.arange(3 * self.shell_builder.nside)
-        fl = np.zeros(len(ell))
-        fl[1:] = -np.sqrt((ell[1:] + 2.) * (ell[1:] - 1.) / (ell[1:] * (ell[1:] + 1.)))
+        # E-mode of the shear from the convergence
+        fl = spin2_factor(3 * self.shell_builder.nside - 1)
 
         _, ipix = self.get_mask(nest=False, return_ipix=True, padded=True)
         save_field_map = save_field_map and smooth_Mpc is not None

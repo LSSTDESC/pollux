@@ -96,6 +96,10 @@ class CatalogSourceGenerator(ABC):
 
     # fields that can be interpolated at the galaxies
     FIELDS = ('kappa', 'gamma1', 'gamma2', 'density', 't11', 't22', 't12')
+    # fields averaged over each shell, not interpolated between shells (the others are at the shells' far edges)
+    SHELL_FIELDS = ('density', 't11', 't22', 't12')
+    # streams of random numbers, per (seed of the realization, stream, bin, shell)
+    _STREAM_Z, _STREAM_POS, _STREAM_COUNTS = 0, 1, 2
     # fields made together by the builders, which must share their smoothing
     _SMOOTHED_TOGETHER = (('t11', 't22', 't12'), ('gamma1', 'gamma2'))
 
@@ -146,7 +150,7 @@ class CatalogSourceGenerator(ABC):
                 if field_name not in self.interp_fields:
                     warnings.warn(f"Adding field '{field_name}' to interp_fields for augmentor '{augmentor.name}'.")
                     self.interp_fields += (field_name,)
-        self.augmentor_kwargs = {ikappa: {'ikappa': ikappa} for ikappa in self.lensing.iter()}
+        self.augmentor_kwargs = {ikappa: {'ikappa': ikappa, 'realization_seed': self.lensing.shell_builder.seed} for ikappa in self.lensing.iter()}
         self.cls_b = cls_b
         self.cls_lmax_mask = cls_lmax_mask
         self.predicted_cls = None
@@ -300,6 +304,14 @@ class CatalogSourceGenerator(ABC):
             Shells whose galaxies are generated. If None, all shells.
         """
 
+    def _rng(self, stream: int, ikappa: int, ishell: int = -1) -> np.random.Generator:
+        """Return the random generator of a stream (redshifts, positions, counts) of one bin and shell.
+
+        Seeded by ``[seed of the realization, stream, ikappa, ishell + 1]``: independent between
+        realizations, streams, bins and shells (``ishell=-1`` for draws over all shells).
+        """
+        return np.random.default_rng([self.lensing.shell_builder.seed, stream, ikappa, ishell + 1])
+
     def _generate_z(self, catalog: dict[int, dict[str, np.ndarray]], ikappa: int) -> None:
         """Draw redshifts from the tracer n(z) via inverse-CDF sampling.
 
@@ -318,7 +330,7 @@ class CatalogSourceGenerator(ABC):
         builder = self.lensing.shell_builder
         z_edges = builder.shell_edges_redshift
 
-        rng = np.random.default_rng(self.lensing.shell_builder.seed + ikappa * self.nshells)
+        rng = self._rng(self._STREAM_Z, ikappa)
 
         # Generate redshifts according to lensing object redshift distributions (using cdf sampling)
         t = self.lensing.tracers_ccl[ikappa]
@@ -348,10 +360,11 @@ class CatalogSourceGenerator(ABC):
 
         Notes
         -----
-        This performs linear interpolation between consecutive shells in comoving
-        distance and optionally interpolates across pixels (via HealSparse
-        ``interpolate_pos``). For ``k='delta'``, a density contrast map is built
-        from snapshot-lensing density shells.
+        Fields at the far edges of the shells (convergence, shear) are interpolated
+        linearly between consecutive shells in comoving distance; fields averaged over
+        a shell (:attr:`SHELL_FIELDS`: density, tidal field) take the value of the
+        galaxy's shell. Values are optionally interpolated across pixels (HealSparse
+        ``interpolate_pos``).
         """
         for k in self.interp_fields:
             if ishells is None:
@@ -363,7 +376,7 @@ class CatalogSourceGenerator(ABC):
                     self._interpolate_shell(catalog, k, ishell, map_low, map_high, ikappas=ikappas)
             else:
                 for ishell in ishells:
-                    map_low = self._load_interp_map(k, ishell - 1) if ishell > 0 and 'delta' not in k else None
+                    map_low = self._load_interp_map(k, ishell - 1) if ishell > 0 and k not in self.SHELL_FIELDS else None
                     map_high = self._load_interp_map(k, ishell)
                     self._interpolate_shell(catalog, k, ishell, map_low, map_high, ikappas=ikappas)
 
@@ -436,7 +449,7 @@ class CatalogSourceGenerator(ABC):
             Shell index.
         map_low, map_high : hsp.HealSparseMap or None
             Maps of field ``k`` for shells ``ishell - 1`` and ``ishell``; ``map_low``
-            is unused for ``ishell == 0`` and for ``'delta'`` fields.
+            is unused for ``ishell == 0`` and for :attr:`SHELL_FIELDS`.
         ikappas : int or array_like of int or None, optional
             Tomographic-bin indices to process.
         """
@@ -450,8 +463,8 @@ class CatalogSourceGenerator(ABC):
             if np.any(w):
                 ra = catalog[ikappa]['ra'][w]
                 dec = catalog[ikappa]['dec'][w]
-                if 'delta' in k:
-                    # no interpolation between shells for delta (integrated quantity)
+                if k in self.SHELL_FIELDS:
+                    # no interpolation between shells for fields averaged over the shell (density, tidal field)
                     if self.interp_method == 'bilinear':
                         catalog[ikappa][k][w] = map_high.interpolate_pos(
                             ra,
@@ -672,6 +685,30 @@ class CatalogSourceGenerator(ABC):
             Tracer(f"density_{i}", 'density', z=t.z, nz=t.nz, bias=bias[i], smooth_Mpc=smooth_Mpc, smooth_nside=self.lensing.nside)
             for i, t in enumerate(self.lensing_tracers)
         ]
+
+    @property
+    def ia_tracers(self) -> list[Tracer] | None:
+        """Intrinsic-alignment tracers of the catalog, from its :class:`~pollux.ia.IACalculator` augmentor.
+
+        Returns
+        -------
+        list of pollux.cosmo.Tracer or None
+            ``'ia'`` tracers named ``ia_{i}``, with the n(z) of the lensing tracers, the amplitudes
+            of the augmentor (:meth:`~pollux.ia.IACalculator.theory_amplitudes`, with the bias of
+            each bin) and the smoothing of the tidal field; None without intrinsic alignments.
+        """
+        calculators = [a for a in self.augmentors if hasattr(a, 'theory_amplitudes')]
+        if not calculators:
+            return None
+        bias = getattr(self, 'bias', np.ones(self.ncats))
+        # smoothing of the tidal field, one scale per shell
+        scales = self.smoothing['t11']
+        smooth_Mpc = None if scales[0] is None else (tuple(self.lensing.shell_builder.shell_edges_comoving_distance), scales)
+        tracers = []
+        for i, t in enumerate(self.lensing_tracers):
+            amplitudes = calculators[0].theory_amplitudes(float(bias[i]))
+            tracers.append(Tracer(f"ia_{i}", 'ia', z=t.z, nz=t.nz, smooth_Mpc=smooth_Mpc, smooth_nside=self.lensing.nside, ia=amplitudes))
+        return tracers
 
     def _reference_scales(self, roles: tuple[str, str]) -> dict:
         """Return the reference scales of a statistic: of the lensing maps, and the smoothing of the galaxy positions.
@@ -1843,7 +1880,10 @@ class CatalogSourceGenerator(ABC):
             return theta, xi, dxi
         return theta, xi
 
-    def predict_2pt(self, theta: dict, nell: int = 500) -> dict:
+    # shape fields of the shear legs of the predictions: lensing shear (G) and intrinsic alignments (I)
+    _SHAPES = {'shear': ('shear',), 'observed': ('shear', 'ia'), 'ia': ('ia',)}
+
+    def predict_2pt(self, theta: dict, nell: int = 500, *, shapes: str = 'shear') -> dict:
         """Predict the catalog two-point correlation functions.
 
         Predictions use the matter power spectrum of the catalog's shells (see :meth:`predict_cls`).
@@ -1855,22 +1895,40 @@ class CatalogSourceGenerator(ABC):
             (as returned by :meth:`load_2pt` or :meth:`compute_2pt` with ``theta_per_pair=True``).
         nell : int, optional
             Number of log-spaced multipoles up to the bandpower ``lmax`` used for the Hankel transforms.
+        shapes : {'shear', 'observed', 'ia'}, optional
+            Shapes of the shear legs: ``'shear'`` (default), the lensing shear (columns ``gamma1``,
+            ``gamma2``); ``'observed'``, lensing shear plus intrinsic alignments (GG + GI + IG + II
+            for cosmic shear, gG + gI for galaxy-galaxy lensing; columns ``e1_obs``, ``e2_obs``);
+            ``'ia'``, the intrinsic alignments alone (II, gI; columns ``e1_ia_*``, ``e2_ia_*``).
+            See :attr:`ia_tracers`.
 
         Returns
         -------
         dict
             Same structure as ``theta``; ``galaxy_shearDensity_xi_x`` is zero.
         """
+        if shapes not in self._SHAPES:
+            raise ValueError(f"shapes must be one of {sorted(self._SHAPES)}, got {shapes!r}")
         tracers = {'density': self.density_tracers, 'shear': self.lensing_tracers}
+        if shapes != 'shear':
+            tracers['ia'] = self.ia_tracers
+            if tracers['ia'] is None:
+                raise ValueError(f"shapes={shapes!r} needs an intrinsic-alignment augmentor")
         xi = {}
         for data_type, type_pairs in theta.items():
             if data_type not in self._SACC_TYPE_COMPONENT_2PT:
                 xi[data_type] = {ij: np.zeros(len(tt)) for ij, tt in type_pairs.items()}
                 continue
-            role_i, role_j = self._SACC_TYPE_LEGS_2PT[data_type]
+            legs = [self._SHAPES[shapes] if role == 'shear' else (role,) for role in self._SACC_TYPE_LEGS_2PT[data_type]]
             component = self._SACC_TYPE_COMPONENT_2PT[data_type]
-            res = self.lensing.theory.predict_2pt({(i, j): (tracers[role_i][i], tracers[role_j][j]) for i, j in type_pairs}, type_pairs, self.b.lmax, nell=nell)
-            xi[data_type] = {ij: r if component is None else r[component] for ij, r in res.items()}
+            # sum over the fields of the two legs (e.g. GG + GI + IG + II)
+            xi[data_type] = {ij: 0. for ij in type_pairs}
+            for kind_i in legs[0]:
+                for kind_j in legs[1]:
+                    pairs = {(i, j): (tracers[kind_i][i], tracers[kind_j][j]) for i, j in type_pairs}
+                    res = self.lensing.theory.predict_2pt(pairs, type_pairs, self.b.lmax, nell=nell)
+                    for ij, r in res.items():
+                        xi[data_type][ij] = xi[data_type][ij] + (r if component is None else r[component])
         return xi
 
     def plot_2pt(
@@ -2002,7 +2060,7 @@ class CatalogSourceUniform(CatalogSourceGenerator):
         ikappa : int
             Tomographic-bin index.
         """
-        rng = np.random.default_rng(self.lensing.shell_builder.seed + ikappa * self.nshells)
+        rng = self._rng(self._STREAM_POS, ikappa)
 
         # Generate random positions with a uniform distribution over the footprint
         if self.lensing.octant_only:
@@ -2215,7 +2273,7 @@ class CatalogSourceClusteredMultinomial(CatalogSourceClustered):
 
         # Loop over tomographic bins
         for ikappa in self.lensing.tqdm(ikappas, leave=False):
-            rng = np.random.default_rng(self.lensing.shell_builder.seed + ishell + ikappa * self.nshells)
+            rng = self._rng(self._STREAM_COUNTS, ikappa, ishell)
 
             # select galaxies in current shell
             w = (catalog[ikappa]['idx_shell'] == ishell)
@@ -2332,7 +2390,7 @@ class CatalogSourceClusteredPoisson(CatalogSourceClustered):
 
         # Loop over tomographic bins
         for ikappa in self.lensing.tqdm(ikappas, leave=False):
-            rng = np.random.default_rng(self.lensing.shell_builder.seed + ishell + ikappa * self.nshells)
+            rng = self._rng(self._STREAM_COUNTS, ikappa, ishell)
 
             # no galaxy of this bin in this shell
             if self.nbar_per_pix_per_bin[ikappa][ishell] == 0.:
@@ -2375,7 +2433,7 @@ class CatalogSourceClusteredPoisson(CatalogSourceClustered):
 
         t = self.lensing.tracers_ccl[ikappa]
         for i, ishell in enumerate(ishells):
-            rng = np.random.default_rng(self.lensing.shell_builder.seed + ishell + ikappa * self.nshells)
+            rng = self._rng(self._STREAM_Z, ikappa, ishell)
 
             zz = np.linspace(z_edges[ishell], z_edges[ishell + 1], 100)
             nz = t.get_dndz(zz)

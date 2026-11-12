@@ -32,6 +32,7 @@ from .io import layout
 from .cosmo import Tracer
 from .map_builder import MapBuilder, MapSum
 from .utils.numerics import arange_endpoint, quad, split_bins
+from .utils.sky import spin2_factor
 from .reader import DummyReader, Reader
 from .lensing import SnapshotBornLensingBuilder
 
@@ -703,7 +704,7 @@ class ShellBuilder(MapBuilder):
         logger.debug("Keeping %d particles, ie a fraction %s.", nkept, ratio)
         if nkept >= n:
             return arrays[0] if len(arrays) == 1 else arrays
-        rng = np.random.default_rng(self.seed + ishell)
+        rng = np.random.default_rng([self.seed, ishell])  # independent streams per seed and shell
         idx = rng.choice(n, size=nkept, replace=False)
         out = tuple(a[idx] for a in arrays)
         return out[0] if len(out) == 1 else out
@@ -962,7 +963,9 @@ class ShellBuilder(MapBuilder):
             else:
                 density = self.field_map(ishell, nest=False)[ipix]
 
-            Q, U = hp.alm2map_spin((alm, np.zeros_like(alm)), self.nside, spin=2, lmax=lmax)
+            # traceless tidal field (d_i d_j / laplacian) delta: E-mode a_lm with the factor of the shear from the
+            # convergence (same sign convention as the shear maps)
+            Q, U = hp.alm2map_spin((hp.almxfl(alm, spin2_factor(lmax)), np.zeros_like(alm)), self.nside, spin=2, lmax=lmax)
             Q = Q[ipix]
             U = U[ipix]
 

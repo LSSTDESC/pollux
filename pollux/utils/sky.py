@@ -58,6 +58,30 @@ def thetaphi2radec(theta: np.ndarray, phi: np.ndarray) -> tuple[np.ndarray, np.n
     return ra, dec
 
 
+def spin2_factor(lmax: int) -> np.ndarray:
+    """Return the factor turning the a_lm of a scalar field into the E-mode a_lm of its spin-2 tidal field.
+
+    ``-sqrt((ell + 2) (ell - 1) / (ell (ell + 1)))``, zero for ``ell < 2``: the shear from the
+    convergence, and in the same way the traceless tidal field ``(d_i d_j / laplacian) delta``
+    from the density contrast, with the same sign convention, so that intrinsic alignments
+    and lensing shear share their conventions.
+
+    Parameters
+    ----------
+    lmax : int
+        Maximum multipole.
+
+    Returns
+    -------
+    ndarray
+        Factor for ``ell = 0 .. lmax`` (for ``healpy.almxfl``).
+    """
+    ell = np.arange(lmax + 1, dtype=float)
+    fl = np.zeros(lmax + 1)
+    fl[2:] = -np.sqrt((ell[2:] + 2.) * (ell[2:] - 1.) / (ell[2:] * (ell[2:] + 1.)))
+    return fl
+
+
 @numba.njit(parallel=False)  # this operation does NOT support parallelization!
 def _add_at(a: np.ndarray, index: np.ndarray, b: np.ndarray) -> None:
     """Numba helper: add values ``b`` to ``a`` at given indices.

@@ -501,8 +501,8 @@ class Theory:
         bpws : ndarray or None, optional
             Bandpower windows of a workspace (``wsp.get_bandpower_windows()``, shape
             ``(n_cl, n_bands, n_cl, lmax + 1)``). Input power is put in the first
-            (E or density) component, and in the BB one for intrinsic alignments beyond NLA
-            (see :meth:`angular_cl`), and all output components are returned. If
+            (E or density) component, and, for two spin-2 fields, in the BB one for intrinsic
+            alignments beyond NLA (see :meth:`angular_cl`), and all output components are returned. If
             None, C_ell (E mode) are averaged over each bandpower.
         f_ell : ndarray or None, optional
             Window applied to the fields (e.g. the pixel window), multiplying C_ell by ``f_ell**2``.
@@ -518,9 +518,12 @@ class Theory:
         cl = self.angular_cl(t1, t2, ell) * window
         if bpws is None:
             return b.bin_cell(cl[None, :])
-        # E (or scalar) input in the first component of the windows, B in the BB one (zero but for intrinsic alignments)
-        cl_bb = self.angular_cl(t1, t2, ell, bb=True) * window
-        return bpws[:, :, 0, :] @ cl + bpws[:, :, 3, :] @ cl_bb
+        # E (or scalar) input in the first component of the windows
+        cl_binned = bpws[:, :, 0, :] @ cl
+        # B in the BB one, for two spin-2 fields only (zero but for intrinsic alignments)
+        if bpws.shape[2] == 4:
+            cl_binned = cl_binned + bpws[:, :, 3, :] @ (self.angular_cl(t1, t2, ell, bb=True) * window)
+        return cl_binned
 
     def predict_cls(
             self,

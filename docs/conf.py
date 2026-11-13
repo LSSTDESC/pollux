@@ -7,7 +7,7 @@ import sys
 sys.path.insert(0, os.path.abspath('..'))
 
 project = 'Pollux'
-copyright = '2026, LSST DESC'
+copyright = '2022-2026, LSST Dark Energy Science Collaboration (DESC)'
 author = 'Cyrille Doux'
 release = '0.1'
 
@@ -23,13 +23,14 @@ templates_path = ['_templates']
 exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store']
 
 html_theme = 'sphinx_rtd_theme'
-html_static_path = ['_static']
+
 
 # Napoleon settings for Google-style docstrings
 napoleon_google_docstring = False
 napoleon_numpy_docstring = True
 napoleon_include_private_members = False
 napoleon_include_special_members = False
+napoleon_use_ivar = True
 
 # Autodoc settings
 autodoc_member_order = 'bysource'
@@ -42,6 +43,8 @@ autosummary_generate_overwrite = False
 # Mock imports for heavy dependencies
 autodoc_mock_imports = [
     'astropy',
+    'BaryonForge',
+    'fitsio',
     'healpy',
     'healsparse',
     'matplotlib',
@@ -52,10 +55,12 @@ autodoc_mock_imports = [
     'pygio',
     'pymaster',
     'pynverse',
-    'pymaster',
     'sacc',
     'scipy',
+    'skyproj',
     'tqdm',
+    'treecorr',
+    'yaml',
 ]
 
 # Intersphinx mapping for external libraries

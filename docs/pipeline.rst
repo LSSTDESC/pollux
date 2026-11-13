@@ -1,0 +1,91 @@
+Running the pipeline
+====================
+
+The pipeline turns N-body snapshots into maps and mock catalogs. Each step is a parsl task (:mod:`pollux.pipeline.tasks`),
+run on Slurm jobs set by :mod:`pollux.pipeline.config`. A run is described by a Python script chaining the tasks and a YAML
+configuration file.
+
+Steps
+-----
+
+1. **Shells**: particles of each sub-volume are binned in count maps (``construct_shell``), then summed per shell (``construct_full_shells``).
+2. **Haloes and baryonification** (optional): halo catalogs per shell (``construct_halo_catalog``), used to baryonify the shells (``construct_maps``).
+3. **Lensing**: convergence maps summing weighted shells, per tomographic bin and per shell (``construct_kappas``), and their spherical harmonics (``construct_kappas_alms``).
+4. **Fields of the catalogs**: shear (``compute_shear_maps``), tidal (``compute_tidal_maps``) and smoothed density and convergence maps, as needed by the catalog (``catalog_map_tasks``).
+5. **Catalogs**: tomographic source catalogs (``construct_source_catalog``, or per shell with ``construct_source_catalog_shell`` then ``merge_source_catalog``).
+6. **Statistics**: map and catalog Cls and 2pt functions, compared to predictions in plots (``plot_catalog_stats``).
+
+Tasks skip the outputs already on disk, so a run can be resumed by launching it again. For the same reason, a run that must recompute a product needs a new output directory.
+
+Smoothing
+---------
+
+The density used to place galaxies and the fields interpolated at galaxies can be smoothed by a Gaussian of comoving scale ``smooth_Mpc``, set by two options of the configuration:
+
+- ``catalog.smooth_fields``: the smoothed fields, among ``kappa``, ``gamma1``, ``gamma2``, ``density``, ``t11``, ``t22``, ``t12`` and ``positions`` (the density placing galaxies);
+- ``smooth_Mpc``: the scale, or a dictionary of scales per field.
+
+Fields made together must share their scale (the tidal tensor components, and the shear components). Predictions account for the smoothing of ``positions``, and of the tidal field for intrinsic alignments (see :class:`pollux.cosmo.Tracer`). The catalogs' 2pt functions are measured with the lensing shear by default (``shear_cols``); their predictions with intrinsic alignments, NLA or TATT, are those of ``predict_2pt(theta, shapes='observed')`` (shear plus intrinsic alignments, columns ``e1_obs``, ``e2_obs``) or ``shapes='ia'``; the terms of TATT beyond NLA also have B modes, included in the predicted :math:`\xi_\pm` (``bb=True`` in :meth:`pollux.cosmo.Theory.angular_cl`).
+
+Linear galaxy bias
+------------------
+
+Clustered catalogs place galaxies with a density proportional to ``1 + b * delta``. With ``b > 1`` this is negative in underdense pixels: it is clipped to zero, with a warning giving the fraction of pixels affected.
+Clipping changes the effective bias, and the mean density of Poisson-sampled catalogs.
+
+Production in a shared space
+----------------------------
+
+Several users can run the same code from a shared space::
+
+    HACC-HOS-Y1/
+    |-- pollux/    clone of this repository at a fixed commit
+    |-- scripts/   run scripts, their configurations, and setup.sh
+    |-- data/      masks and redshift distributions
+    `-- deps/      pinned dependencies
+
+``setup.sh`` activates the shared Python environment, in which this clone of pollux is installed, and removes anything from the user's environment taking precedence over it. The ``.sh`` launchers do it themselves, so a run only takes::
+
+    /path/to/HACC-HOS-Y1/scripts/run_xxx.sh [configuration]
+
+Each user's outputs go to their own scratch (``save_dir_root`` of the configuration, where environment variables such as ``$PSCRATCH`` are expanded), and logs to ``$PSCRATCH/HACC-HOS-Y1/logs``.
+
+Two environment variables set the use of the NERSC allocation:
+
+- ``POLLUX_ACCOUNT``: account charged (default ``m1727``);
+- ``POLLUX_MAIL``: address of the Slurm notifications (default: none).
+
+Code version
+------------
+
+:func:`pollux.io.code_version.save_code_version` records each run in a new folder ``code_version/{date}`` of its output directory: git commit and state of pollux, date, host and command, lists of installed Python and conda packages, and copies of the run script and configuration.
+Run scripts refuse to start if pollux has uncommitted changes, unless the configuration sets ``allow_uncommitted: true``.
+
+Catalogs also store the commit in their FITS headers: ``POLLUXV`` (first 12 characters) and ``DIRTY`` (uncommitted changes).
+
+Output structure
+----------------
+
+Products are organised by realization and matter model (:mod:`pollux.io.layout`). Under
+``{save_dir_root}/{simulation}/nside{nside}/seed{seed}/`` (with ``pad{padding}/`` for masked footprints with padding):
+
+- ``dmo/``: the dark-matter-only products:
+
+  - ``shells/``: shell maps (``shell_{iii}.fits``), their Cls (``cls.fits``) and the table of the shells (``shells.fits``: redshift and distance edges, mean densities);
+  - ``smoothed/{s}Mpc/``: smoothed density and tidal maps (``density_{iii}``, ``t11_{iii}``, ...);
+  - ``kappa/{nz}/``: convergence and shear maps of the tomographic bins (``kappa_bin{b}``, ``gamma1_bin{b}``, ...), and their redshift distributions (``nzs.txt``);
+  - ``kappa/snapshots/``: convergence and shear maps with one source plane per shell (``kappa_{iii}``, ...);
+  - ``catalogs/{nz}/{tag}/``: source catalogs (``cat_bin{b}.fits``) and their statistics (``cat_2pt.fits``, ``cat_cls.fits``, and ``cat_2pt_ia.fits``, ``cat_2pt_observed.fits`` with the shapes ``'ia'`` and ``'observed'``);
+
+- ``dmb/{tag}/``: the same products for the baryon model ``tag``;
+- ``halos/``: halo catalogs, shared by all baryon models;
+- ``intermediate/``: files needed only to make or resume the products (sub-volume maps, spherical harmonics,
+  partial catalogs, workspaces), at the same relative paths;
+- ``code_version/``: the records of the runs.
+
+Each product directory has a ``config.yaml`` with its parameters (for shells and halos, also the simulation and its cosmology), inputs and the code version that made it,
+and its plots in ``plots/``. Products are resumed in place, and a directory made with other parameters
+raises an error instead of being mixed. NaMaster workspaces and padded masks, which depend only on the
+footprint, are in ``{save_dir_root}/{simulation}/nside{nside}/``.
+
+:class:`pollux.io.PolluxLoader` loads these products, and ``python -m pollux.io.index {save_dir_root}`` lists them.

@@ -10,10 +10,14 @@ The Pollux package is organized into the following core modules:
    modules/map_builder
    modules/shells
    modules/lensing
+   modules/baryons
    modules/catalog
-   modules/utils
+   modules/ia
    modules/cosmo
+   modules/plotting
+   modules/utils
    modules/io
+   modules/pipeline
 
 Module Descriptions
 -------------------
@@ -30,16 +34,30 @@ Module Descriptions
 **Lensing** (:mod:`pollux.lensing`)
    Generates weak lensing maps in the Born approximation with tomographic support.
 
+**Baryons** (:mod:`pollux.baryons`)
+   Baryonifies shells with BaryonForge, and computes the matching correction of the matter power spectrum.
+
 **Catalog** (:mod:`pollux.catalog`)
-   Generates tomographic galaxy catalogs from lightcone shells using uniform or clustered sampling methods.
+   Generates tomographic galaxy catalogs from lightcone shells using uniform or clustered sampling methods, measures their statistics and predicts them.
+
+**Intrinsic alignments** (:mod:`pollux.ia`)
+   Catalog augmentors adding intrinsic alignments, reduced shear, magnification and observed ellipticities.
 
 **Utils** (:mod:`pollux.utils`)
-   Helper functions for map operations, power spectrum computations, and array manipulations.
+   Helper functions, by theme: numerics (integration, grids, sampling), sky (coordinates, maps of points, masks) and NaMaster binnings.
 
 **Cosmology** (:mod:`pollux.cosmo`)
-   Fixed cosmologies and cosmological utility functions.
+   Fixed cosmologies, tracers of observable fields and their theory predictions.
+
+**Plotting** (:mod:`pollux.plotting`)
+   Plots of two-point statistics of bin pairs against theory.
 
 **I/O** (:mod:`pollux.io`)
-   Loads and manages Pollux simulation data.
+   Products on disk, with light dependencies only: their layout and ``config.yaml`` (:mod:`pollux.io.layout`), the code
+   version of runs (:mod:`pollux.io.code_version`), their index (``python -m pollux.io.index ROOT``) and loader
+   (:class:`pollux.io.PolluxLoader`).
+
+**Pipeline** (:mod:`pollux.pipeline`)
+   Parsl tasks and execution configuration, see :doc:`pipeline`.
 
 

@@ -1,7 +1,7 @@
 Cosmology
 =========
 
-Fixed cosmologies and cosmological utility functions.
+Fixed cosmologies, tracers of observable fields and their theory predictions.
 
 .. automodule:: pollux.cosmo
    :members:

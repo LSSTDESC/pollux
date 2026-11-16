@@ -1315,11 +1315,7 @@ class MapBuilder(ABC):
         Lazy, so that the builder stays light to pickle: the ``NmtWorkspace`` is
         not constructed until first accessed.
         """
-        padding = f'_pad{self.padding_deg:g}{self.apotype or ""}' if self.padding_deg is not None else ''
-        if self.replicate_octant:
-            padding = '_octrep'
-        # shared by the realizations with the same footprint and binning
-        fname = os.path.join(self.wsp_dir, f'wsp_nside{self.nside}_{self.footprint_id}{padding}_b{binning_id(self.b, self.f_ell)}.wsp')
+        fname = self._wsp_fname
         wsp = nmt.NmtWorkspace()
         if os.path.exists(fname):
             wsp.read_from(fname)
@@ -1333,6 +1329,32 @@ class MapBuilder(ABC):
                 wsp.write_to(tmp)
             logger.info("Computed and saved workspace to file %s.", fname)
         return wsp
+
+    @property
+    def _wsp_fname(self) -> str:
+        """File of the NaMaster workspace, shared by the realizations with the same footprint and binning."""
+        padding = f'_pad{self.padding_deg:g}{self.apotype or ""}' if self.padding_deg is not None else ''
+        if self.replicate_octant:
+            padding = '_octrep'
+        return os.path.join(self.wsp_dir, f'wsp_nside{self.nside}_{self.footprint_id}{padding}_b{binning_id(self.b, self.f_ell)}.wsp')
+
+    @cached_property
+    def bpws(self) -> np.ndarray:
+        """Return the bandpower windows of the workspace (see :attr:`wsp`).
+
+        They are saved apart, next to the workspace, so that predictions do not load the
+        coupling matrix (several GB at high resolution), only once to save them.
+
+        Returns
+        -------
+        ndarray
+            Shape ``(n_cl, n_bands, n_cl, lmax + 1)``.
+        """
+        fname = self._wsp_fname.replace('.wsp', '_bpws.npy')
+        if not os.path.exists(fname):
+            with layout.atomic_write(fname) as tmp:
+                np.save(tmp, self.wsp.get_bandpower_windows())
+        return np.load(fname)
 
     def _pairs(self, imaps: int | Iterable[int] | None = None, auto_only: bool = False, pairs: list | None = None) -> tuple[list[int], list[tuple[int, int]]]:
         """Return the map indices and ``(i, j)`` pairs selected by ``imaps``, ``auto_only`` or ``pairs``.
@@ -1592,7 +1614,7 @@ class MapBuilder(ABC):
         # bandpower windows of the workspace, and the field window (pixel window, or a given one above the first bandpower)
         bpws, f_ell = None, None
         if binning == 'wsp':
-            bpws = self.wsp.get_bandpower_windows()
+            bpws = self.bpws
         if binning != 'unbinned':
             if self.f_ell is not None:
                 if self.f_ell == 'pixwin':

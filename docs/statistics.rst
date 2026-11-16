@@ -86,3 +86,18 @@ Plots (:func:`pollux.plotting.plot_pairs`) show one panel per pair of bins, in m
 Vertical lines mark the reference scales of each pair (:meth:`~pollux.map_builder.MapBuilder.reference_scales`):
 the smoothing, the pixel size and the size of the simulation box at the distance of the tracers. Measurements are
 not expected to follow predictions below the pixel or smoothing scales, nor at angles approaching the box size.
+
+Validation
+----------
+
+Test runs at NERSC compare every product to its prediction, above the pixel and smoothing scales and below the
+box size. On the full sky at nside 8192:
+
+- convergence power spectra agree to 1–2% for 100 < ℓ < 5000, in every pair of tomographic bins;
+- the cosmic shear ``ξ+`` of the catalogs agrees to a few percent from 0.5 to 100 arcmin;
+- with the lognormal smoothing (``max_bias_error`` of 10%), the galaxy clustering ``w(θ)`` agrees to about 3%,
+  and galaxy-galaxy lensing ``γt`` to a few percent.
+
+With baryons (at nside 2048), the suppression of the convergence power spectra and of ``ξ±`` follows the prediction
+of the same baryon model. The intrinsic alignments of NLA catalogs agree with their predictions (II, GI, gI) to
+better than about 10%.

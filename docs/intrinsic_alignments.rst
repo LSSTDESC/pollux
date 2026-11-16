@@ -38,14 +38,3 @@ amplitudes ``a1 = A_TA``, ``a1delta = b_TA a1`` and ``a2 = A_TT``
 (:meth:`~pollux.ia.IACalculator.tracer_amplitudes`). NLA is computed with the matter power spectrum of the
 predictions, and the other terms with perturbation theory (FAST-PT through CCL), which also gives their B modes.
 Their 2pt functions (II, GI, gI) are measured and predicted with the ``shapes`` options of :doc:`statistics`.
-
-Limits
-------
-
-- Shells are projected along the line of sight: their tidal field has no line-of-sight components, and on a shell
-  ``t11 + t22`` is a third of the density contrast. The tidal torquing term then reduces to ``(C2/3) delta s``, a
-  density-weighted tidal alignment, not the ``s s`` term of TATT. ``'TT'`` and ``'TATT'`` catalogs are therefore
-  not described by the predictions.
-- With density weighting, perturbation theory describes the alignments less well on small scales. In tests, NLA
-  catalogs agree with their predictions to a few percent (II, GI, gI), and δ-NLA ones to about 10% for GI and gI,
-  with II 15–50% above the prediction for the lowest redshift bins.

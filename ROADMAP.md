@@ -1,6 +1,6 @@
 # Roadmap
 
-Planned developments of pollux, with their GitHub issue when there is one. Remove an item once it is done (the git history keeps the details).
+Planned technical developments of pollux, with their GitHub issue when there is one. The validation of the products and their known issues are in the report of the HACC-HOS-Y1 runs. Remove an item once it is done (the git history keeps the details).
 
 - Simulations
   - Ingest the Gower Street simulations ([#30](https://github.com/LSSTDESC/pollux/issues/30)).
@@ -18,7 +18,6 @@ Planned developments of pollux, with their GitHub issue when there is one. Remov
 - Statistics
   - Jackknife errors of the catalog 2pt functions: TreeCorr patches (`npatch`) with `var_method='jackknife'`, and the full covariance (`treecorr.estimate_multi_cov`). Only shot-noise errors are measured for now.
   - Theory covariances from [CosmoCov](https://github.com/CosmoLike/CosmoCov) or [TJPCov](https://github.com/LSSTDESC/TJPCov) ([#16](https://github.com/LSSTDESC/pollux/issues/16)).
-  - Understand the deficit of a few percent in the galaxy clustering of tomographic bins 2–4 at large scales, which does not come from clipping.
 - Performance
   - Column-oriented catalog format (Parquet or HDF5), so that reading a few columns or a subsample does not read whole FITS rows.
   - Move what can be to GPUs (spherical harmonic transforms, painting particles on maps, baryonification, catalog sampling).

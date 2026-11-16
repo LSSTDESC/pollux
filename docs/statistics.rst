@@ -51,7 +51,7 @@ fraction of the galaxies, and ``remove_mean`` subtracts the mean shear of each b
 
 The first three are measured on the same galaxies, so that GI is the difference ``shear_plus_ia - shear - ia``, which the
 plots of ``'ia'`` also show. Plots are named after the shapes: ``xi_shear``, ``xi_ia`` (II) and
-``xi_shear_plus_ia`` for ``ξ±``, with ``_density`` for ``γt`` (``xi_ia_density`` is gI), ``xi_shear_x_ia`` for GI,
+``xi_shear_plus_ia`` for ``ξ±``, with ``_x_density`` for ``γt`` (``xi_ia_x_density`` is gI), ``xi_shear_x_ia`` for GI,
 ``xi_observed`` for the observed ellipticities, and ``xi_density`` for ``w(θ)``.
 
 Predictions

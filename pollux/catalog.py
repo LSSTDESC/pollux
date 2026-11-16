@@ -1560,7 +1560,7 @@ class CatalogSourceGenerator(ABC):
 
         Notes
         -----
-        Saves ``cl_shear_ee``, ``cl_shear_density`` and ``cl_density``, with suffix
+        Saves ``cl_shear_ee``, ``cl_shear_x_density`` and ``cl_density``, with suffix
         ``_{mode}`` for modes other than ``'values'``.
         """
         from .plotting import plot_pairs
@@ -1576,7 +1576,7 @@ class CatalogSourceGenerator(ABC):
 
         # one figure per E-mode/density data type and mode
         st = sacc.standard_types
-        for data_type, name, color in ((st.galaxy_shear_cl_ee, 'cl_shear_ee', 'orange'), (st.galaxy_shearDensity_cl_e, 'cl_shear_density', 'red'),
+        for data_type, name, color in ((st.galaxy_shear_cl_ee, 'cl_shear_ee', 'orange'), (st.galaxy_shearDensity_cl_e, 'cl_shear_x_density', 'red'),
                                        (st.galaxy_density_cl, 'cl_density', 'green')):
             if data_type not in cl:
                 continue
@@ -2062,12 +2062,13 @@ class CatalogSourceGenerator(ABC):
 
         Notes
         -----
-        Saves, with suffix ``_{mode}`` for modes other than ``'values'``: ``xi_shear``,
-        ``xi_shear_density`` and ``xi_density`` for the lensing shear; ``xi_ia`` (II) and
-        ``xi_ia_density`` (gI) for the intrinsic alignments, and ``xi_shear_x_ia`` (GI: shear plus
+        Saves, with suffix ``_{mode}`` for modes other than ``'values'``, auto-correlations named
+        after their field and cross-correlations ``{field}_x_{field}``: ``xi_shear``,
+        ``xi_shear_x_density`` and ``xi_density`` for the lensing shear; ``xi_ia`` (II) and
+        ``xi_ia_x_density`` (gI) for the intrinsic alignments, and ``xi_shear_x_ia`` (GI: shear plus
         IA, minus shear, minus IA, when the three are measured); ``xi_shear_plus_ia`` and
-        ``xi_shear_plus_ia_density`` for the sum of the shear and IA (without shape noise);
-        ``xi_observed`` and ``xi_observed_density`` for the observed ellipticities (with shape noise).
+        ``xi_shear_plus_ia_x_density`` for the sum of the shear and IA (without shape noise);
+        ``xi_observed`` and ``xi_observed_x_density`` for the observed ellipticities (with shape noise).
         """
         from .plotting import plot_pairs
         plot_dir = plot_dir or os.path.join(self._catalog_dir, 'plots')
@@ -2095,7 +2096,7 @@ class CatalogSourceGenerator(ABC):
         }[shapes]
         prefix = f'xi_{shapes}'
         groups = [(prefix, rf'$\theta \xi{label}_\pm(\theta)$', shear_types),
-                  (f'{prefix}_density', rf'$\theta \gamma{label_t}_{{\rm t}}(\theta)$', (st.galaxy_shearDensity_xi_t,))]
+                  (f'{prefix}_x_density', rf'$\theta \gamma{label_t}_{{\rm t}}(\theta)$', (st.galaxy_shearDensity_xi_t,))]
         if shapes == 'shear':
             groups.append(('xi_density', r'$\theta w(\theta)$', (st.galaxy_density_xi,)))
         figures = []

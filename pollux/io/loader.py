@@ -297,9 +297,10 @@ class PolluxLoader:
 
         Parameters
         ----------
-        shapes : {'shear', 'ia', 'observed'}, optional
+        shapes : {'shear', 'ia', 'shear_plus_ia', 'observed'}, optional
             Shapes of the shear legs: lensing shear (``cat_2pt.fits``), intrinsic alignments
-            (``cat_2pt_ia.fits``) or their sum (``cat_2pt_observed.fits``).
+            (``cat_2pt_ia.fits``), their sum without shape noise (``cat_2pt_shear_plus_ia.fits``),
+            or the observed ellipticities, with shape noise (``cat_2pt_observed.fits``).
 
         Returns
         -------

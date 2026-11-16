@@ -90,6 +90,7 @@ def plot_pairs(
         color_scales: str = '0.2',
         color: str = 'dodgerblue',
         color_theory: str | None = None,
+        label: str | None = None,
         logx: bool = True,
         logy: bool = False,
         xlim: tuple | None = None,
@@ -139,6 +140,9 @@ def plot_pairs(
         Color of the reference-scale lines (e.g. that of the data, when overplotting several sets).
     color, color_theory : str, optional
         Colors of the data and theory. ``color_theory`` defaults to ``color``.
+    label : str or None, optional
+        Name of the statistic in the legend below the figure (e.g. to tell apart statistics
+        overplotted by several calls with ``figaxes``), with its color.
     logx, logy : bool, optional
         Logarithmic axes. ``logy`` only applies to ``'values'`` mode.
     xlim, ylim : tuple or None, optional
@@ -242,8 +246,11 @@ def plot_pairs(
         ax.set_xlim(*xrange)
         if ylim is not None:
             ax.set_ylim(*ylim)
-    # legend of the scale lines within the x range (replacing that of a previous call)
-    handles = [
+    # legend of the statistics of this and previous calls, and of the scale lines within the x range (replacing
+    # that of a previous call)
+    if label is not None:
+        fig._pollux_labels = getattr(fig, '_pollux_labels', []) + [Line2D([], [], color=color, ls=' ', marker='o', markersize=3, label=label)]
+    handles = getattr(fig, '_pollux_labels', []) + [
         Line2D([], [], color=color_scales, ls=_SCALE_LINES[key][0], lw=1, label=_SCALE_LINES[key][1]) for key, values in drawn.items() if any(
             xrange[0] <= v <= xrange[1] for v in values)
     ]

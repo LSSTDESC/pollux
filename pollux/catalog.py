@@ -680,7 +680,8 @@ class CatalogSourceGenerator(ABC):
             tracers (the galaxies are both lenses and sources), and the smoothing of
             the density used to place them (``'positions'`` smoothing, at least the pixel size).
         """
-        bias = getattr(self, 'bias', np.ones(self.ncats))
+        # bias placing the galaxies, none for uniform catalogs
+        bias = getattr(self, 'bias', np.zeros(self.ncats))
         # one scale per shell, between the shells' comoving distances
         scales = self.smoothing['positions']
         smooth_Mpc = None if scales[0] is None else (tuple(self.lensing.shell_builder.shell_edges_comoving_distance), scales)
@@ -703,7 +704,8 @@ class CatalogSourceGenerator(ABC):
         calculator = self._ia_calculator
         if calculator is None:
             return None
-        bias = getattr(self, 'bias', np.ones(self.ncats))
+        # bias placing the galaxies, none for uniform catalogs (as in the augmentor's density weighting)
+        bias = getattr(self, 'bias', np.zeros(self.ncats))
         # smoothing of the tidal field, one scale per shell
         scales = self.smoothing['t11']
         smooth_Mpc = None if scales[0] is None else (tuple(self.lensing.shell_builder.shell_edges_comoving_distance), scales)
@@ -719,15 +721,37 @@ class CatalogSourceGenerator(ABC):
         from .ia import IACalculator  # here: pollux.ia imports this module
         return next((a for a in self.augmentors if isinstance(a, IACalculator)), None)
 
+    @property
+    def _shear_augmentor(self) -> Any:
+        """The :class:`~pollux.ia.CatalogAugmentorShear` augmentor of the catalog, or None."""
+        from .ia import CatalogAugmentorShear  # here: pollux.ia imports this module
+        return next((a for a in self.augmentors if isinstance(a, CatalogAugmentorShear)), None)
+
+    def _shape_terms(self, shapes: str) -> tuple[str, ...]:
+        """Return the fields summed in the shapes ``shapes``: lensing shear ``'shear'`` and intrinsic alignments ``'ia'``.
+
+        The observed ellipticities include the intrinsic alignments if computed, with ``include_ia`` of
+        :class:`~pollux.ia.CatalogAugmentorShear`; their shape noise has zero mean, and their reduced
+        shear is approximated by the shear.
+        """
+        if shapes not in self._SHAPES:
+            raise ValueError(f"shapes must be one of {sorted(self._SHAPES)}, got {shapes!r}")
+        if shapes != 'observed':
+            return self._SHAPES[shapes]
+        augmentor = self._shear_augmentor
+        if augmentor is None or not augmentor.compute_observed:
+            raise ValueError("shapes='observed' needs a CatalogAugmentorShear with compute_observed=True")
+        return ('shear', 'ia') if augmentor.include_ia and self._ia_calculator is not None else ('shear',)
+
     def _shape_columns(self, shapes: str, shear_cols: tuple[str, str]) -> tuple[list[str], list[str]]:
         """Return the catalog columns summed into the two components of the shapes of the shear legs.
 
         Parameters
         ----------
-        shapes : {'shear', 'ia', 'observed'}
+        shapes : {'shear', 'ia', 'shear_plus_ia', 'observed'}
             Shapes, as in :meth:`predict_2pt`: the lensing shear (``shear_cols``), the intrinsic
-            alignments (the columns of the IA augmentor, e.g. ``e1_ia_ta``), or their sum (without
-            shape noise, unlike the ``e1_obs`` columns).
+            alignments (the columns of the IA augmentor, e.g. ``e1_ia_ta``), their sum (without
+            shape noise), or the observed ellipticities (``e1_obs``, ``e2_obs``, with shape noise).
         shear_cols : tuple of str
             Columns of the lensing shear.
 
@@ -736,13 +760,14 @@ class CatalogSourceGenerator(ABC):
         list of str, list of str
             Columns of the first and of the second component.
         """
-        if shapes not in self._SHAPES:
-            raise ValueError(f"shapes must be one of {sorted(self._SHAPES)}, got {shapes!r}")
+        terms = self._shape_terms(shapes)
+        if shapes == 'observed':
+            return ['e1_obs'], ['e2_obs']
         cols1, cols2 = [], []
-        if 'shear' in self._SHAPES[shapes]:
+        if 'shear' in terms:
             cols1.append(shear_cols[0])
             cols2.append(shear_cols[1])
-        if 'ia' in self._SHAPES[shapes]:
+        if 'ia' in terms:
             if self._ia_calculator is None:
                 raise ValueError(f"shapes={shapes!r} needs an intrinsic-alignment augmentor")
             # e1_ia_*, e2_ia_* of each IA model (TA, TT)
@@ -750,6 +775,10 @@ class CatalogSourceGenerator(ABC):
             cols1 += ia_cols[0::2]
             cols2 += ia_cols[1::2]
         return cols1, cols2
+
+    def _cls_fname(self) -> str:
+        """Return the file of the measured Cls of the catalogs (see :meth:`compute_cls`)."""
+        return os.path.join(self._catalog_dir, 'cat_cls.fits')
 
     def _2pt_fname(self, shapes: str = 'shear') -> str:
         """Return the file of the two-point functions measured with the shapes ``shapes`` (see :meth:`compute_2pt`)."""
@@ -1209,7 +1238,7 @@ class CatalogSourceGenerator(ABC):
             Seed for the random catalogs' RNG. Default is the shell builder's seed.
         save : bool, optional
             If True (default), save the spectra to a SACC FITS file via
-            :meth:`_save_cls`, at ``{self._catalog_dir}/cls.fits``.
+            :meth:`_save_cls`, at ``{self._catalog_dir}/cat_cls.fits``.
 
         Returns
         -------
@@ -1314,7 +1343,7 @@ class CatalogSourceGenerator(ABC):
             for (i, j), _cl in pairs.items():
                 for _ell, _cl_ell in zip(ell, _cl, strict=True):
                     s.add_data_point(data_type, [tracers_i[i].name, tracers_j[j].name], _cl_ell, ell=_ell)
-        fname = os.path.join(self._catalog_dir, 'cat_cls.fits')
+        fname = self._cls_fname()
         with layout.atomic_write(fname) as tmp:
             s.save_fits(tmp, overwrite=True)
         logger.debug("Saved to file %s.", fname)
@@ -1340,7 +1369,7 @@ class CatalogSourceGenerator(ABC):
             have computed all of them), with no dependency on ``self.lensing``
             beyond the file path.
         """
-        fname = os.path.join(self._catalog_dir, 'cat_cls.fits')
+        fname = self._cls_fname()
         s = sacc.Sacc.load_fits(fname)
         logger.debug("Found and loaded file at %s.", fname)
         if not return_dict:
@@ -1656,12 +1685,13 @@ class CatalogSourceGenerator(ABC):
         shear_cols : tuple of str, optional
             Names of the two catalog columns to use as the spin-2 shear field.
             See :meth:`compute_cls`.
-        shapes : {'shear', 'ia', 'observed'}, optional
+        shapes : {'shear', 'ia', 'shear_plus_ia', 'observed'}, optional
             Shapes of the shear legs, as in :meth:`predict_2pt`: the lensing shear
-            (``shear_cols``, default), the intrinsic alignments (II and gI), or their
-            sum without shape noise (GG + GI + IG + II and gG + gI). The same galaxies
+            (``shear_cols``, default), the intrinsic alignments (II and gI), their
+            sum without shape noise (GG + GI + IG + II and gG + gI), or the observed
+            ellipticities, with shape noise. The same galaxies
             are used for all (same ``subsample`` and ``seed``), so that GI is exactly the
-            difference of the three.
+            difference of the first three.
         subsample : float or None, optional
             If not None, randomly draw (without replacement, seeded by
             ``seed + ikappa``) this fraction of galaxies from each loaded
@@ -1951,7 +1981,7 @@ class CatalogSourceGenerator(ABC):
         return theta, xi
 
     # shape fields of the shear legs of the predictions: lensing shear (G) and intrinsic alignments (I)
-    _SHAPES = {'shear': ('shear',), 'observed': ('shear', 'ia'), 'ia': ('ia',)}
+    _SHAPES = {'shear': ('shear',), 'ia': ('ia',), 'shear_plus_ia': ('shear', 'ia'), 'observed': ('shear', 'ia')}
 
     def predict_2pt(self, theta: dict, nell: int = 500, *, shapes: str = 'shear') -> dict:
         """Predict the catalog two-point correlation functions.
@@ -1965,11 +1995,13 @@ class CatalogSourceGenerator(ABC):
             (as returned by :meth:`load_2pt` or :meth:`compute_2pt` with ``theta_per_pair=True``).
         nell : int, optional
             Number of log-spaced multipoles up to the bandpower ``lmax`` used for the Hankel transforms.
-        shapes : {'shear', 'observed', 'ia'}, optional
+        shapes : {'shear', 'ia', 'shear_plus_ia', 'observed'}, optional
             Shapes of the shear legs: ``'shear'`` (default), the lensing shear (columns ``gamma1``,
-            ``gamma2``); ``'observed'``, lensing shear plus intrinsic alignments (GG + GI + IG + II
-            for cosmic shear, gG + gI for galaxy-galaxy lensing; also columns ``e1_obs``, ``e2_obs``, with shape noise);
-            ``'ia'``, the intrinsic alignments alone (II, gI; columns ``e1_ia_*``, ``e2_ia_*``).
+            ``gamma2``); ``'ia'``, the intrinsic alignments alone (II, gI; columns ``e1_ia_*``, ``e2_ia_*``);
+            ``'shear_plus_ia'``, their sum without shape noise (GG + GI + IG + II for cosmic shear,
+            gG + gI for galaxy-galaxy lensing); ``'observed'``, the observed ellipticities ``e1_obs``,
+            ``e2_obs`` (with shape noise, of zero mean), predicted as ``'shear_plus_ia'``, or as
+            ``'shear'`` without intrinsic alignments (``include_ia`` of :class:`~pollux.ia.CatalogAugmentorShear`).
             See :attr:`ia_tracers`.
 
         Returns
@@ -1977,10 +2009,9 @@ class CatalogSourceGenerator(ABC):
         dict
             Same structure as ``theta``; ``galaxy_shearDensity_xi_x`` is zero.
         """
-        if shapes not in self._SHAPES:
-            raise ValueError(f"shapes must be one of {sorted(self._SHAPES)}, got {shapes!r}")
+        terms = self._shape_terms(shapes)
         tracers = {'density': self.density_tracers, 'shear': self.lensing_tracers}
-        if shapes != 'shear':
+        if 'ia' in terms:
             tracers['ia'] = self.ia_tracers
             if tracers['ia'] is None:
                 raise ValueError(f"shapes={shapes!r} needs an intrinsic-alignment augmentor")
@@ -1989,7 +2020,7 @@ class CatalogSourceGenerator(ABC):
             if data_type not in self._SACC_TYPE_COMPONENT_2PT:
                 xi[data_type] = {ij: np.zeros(len(tt)) for ij, tt in type_pairs.items()}
                 continue
-            legs = [self._SHAPES[shapes] if role == 'shear' else (role,) for role in self._SACC_TYPE_LEGS_2PT[data_type]]
+            legs = [terms if role == 'shear' else (role,) for role in self._SACC_TYPE_LEGS_2PT[data_type]]
             component = self._SACC_TYPE_COMPONENT_2PT[data_type]
             # sum over the fields of the two legs (e.g. GG + GI + IG + II)
             xi[data_type] = {ij: 0. for ij in type_pairs}
@@ -2026,16 +2057,17 @@ class CatalogSourceGenerator(ABC):
         xlim : tuple of float or None, optional
             Limits of the x axis, e.g. the edges of the binning, ``(theta_min, theta_max)`` of
             :meth:`compute_2pt`. Default is the range of the measured ``theta``.
-        shapes : {'shear', 'ia', 'observed'}, optional
+        shapes : {'shear', 'ia', 'shear_plus_ia', 'observed'}, optional
             Shapes of the shear legs of the measurement (see :meth:`compute_2pt`).
 
         Notes
         -----
         Saves, with suffix ``_{mode}`` for modes other than ``'values'``: ``xi_shear``,
         ``xi_shear_density`` and ``xi_density`` for the lensing shear; ``xi_ia`` (II) and
-        ``xi_ia_density`` (gI) for the intrinsic alignments, and ``xi_gi`` (GI: observed minus
-        shear minus IA, when the three are measured); ``xi_observed`` and
-        ``xi_observed_density`` for their sum.
+        ``xi_ia_density`` (gI) for the intrinsic alignments, and ``xi_shear_x_ia`` (GI: shear plus
+        IA, minus shear, minus IA, when the three are measured); ``xi_shear_plus_ia`` and
+        ``xi_shear_plus_ia_density`` for the sum of the shear and IA (without shape noise);
+        ``xi_observed`` and ``xi_observed_density`` for the observed ellipticities (with shape noise).
         """
         from .plotting import plot_pairs
         plot_dir = plot_dir or os.path.join(self._catalog_dir, 'plots')
@@ -2055,33 +2087,40 @@ class CatalogSourceGenerator(ABC):
 
         # figures: name, y label, and the values of the data types overplotted (theta, data, theory,
         # data errors, reference data and theory)
-        label, label_t = {'shear': ('', ''), 'ia': (r'^{\rm II}', r'^{\rm gI}'), 'observed': (r'^{\rm obs}', r'^{\rm obs}')}[shapes]
-        groups = [(f'xi_{shapes}', rf'$\theta \xi{label}_\pm(\theta)$', shear_types),
-                  (f'xi_{shapes}_density', rf'$\theta \gamma{label_t}_{{\rm t}}(\theta)$', (st.galaxy_shearDensity_xi_t,))]
+        label, label_t = {
+            'shear': ('', ''),
+            'ia': (r'^{\rm II}', r'^{\rm gI}'),
+            'shear_plus_ia': (r'^{\rm G+I}', r'^{\rm G+I}'),
+            'observed': (r'^{\rm obs}', r'^{\rm obs}')
+        }[shapes]
+        prefix = f'xi_{shapes}'
+        groups = [(prefix, rf'$\theta \xi{label}_\pm(\theta)$', shear_types),
+                  (f'{prefix}_density', rf'$\theta \gamma{label_t}_{{\rm t}}(\theta)$', (st.galaxy_shearDensity_xi_t,))]
         if shapes == 'shear':
             groups.append(('xi_density', r'$\theta w(\theta)$', (st.galaxy_density_xi,)))
         figures = []
         for fig_name, ylabel, data_types in groups:
             figures.append((fig_name, ylabel, {t: (theta[t], xi[t], xi_th[t], dxi.get(t), xi_ref.get(t), xi_th_ref.get(t)) for t in data_types if t in xi}))
 
-        # GI = observed - shear - IA, from the same galaxies (data) and from the predictions at the same theta
-        if shapes == 'ia' and all(os.path.exists(self._2pt_fname(s)) for s in ('shear', 'observed')):
-            _, xi_obs = self.load_2pt(return_dict=True, shapes='observed')
+        # GI = (shear + IA) - shear - IA, from the same galaxies (data) and from the predictions at the same theta
+        if shapes == 'ia' and all(os.path.exists(self._2pt_fname(s)) for s in ('shear', 'shear_plus_ia')):
+            _, xi_tot = self.load_2pt(return_dict=True, shapes='shear_plus_ia')
             _, xi_g = self.load_2pt(return_dict=True, shapes='shear')
-            th_obs, th_g = self.predict_2pt(theta, shapes='observed'), self.predict_2pt(theta, shapes='shear')
+            th_tot, th_g = self.predict_2pt(theta, shapes='shear_plus_ia'), self.predict_2pt(theta, shapes='shear')
             gi = {}
             for t in shear_types:
-                if t in xi and t in xi_obs and t in xi_g:
-                    pairs = [ij for ij in xi[t] if ij in xi_obs[t] and ij in xi_g[t]]
-                    data = {ij: xi_obs[t][ij] - xi_g[t][ij] - xi[t][ij] for ij in pairs}
-                    pred = {ij: th_obs[t][ij] - th_g[t][ij] - xi_th[t][ij] for ij in pairs}
+                if t in xi and t in xi_tot and t in xi_g:
+                    pairs = [ij for ij in xi[t] if ij in xi_tot[t] and ij in xi_g[t]]
+                    data = {ij: xi_tot[t][ij] - xi_g[t][ij] - xi[t][ij] for ij in pairs}
+                    pred = {ij: th_tot[t][ij] - th_g[t][ij] - xi_th[t][ij] for ij in pairs}
                     gi[t] = ({ij: theta[t][ij] for ij in pairs}, data, pred, None, None, None)
-            figures.append(('xi_gi', r'$\theta \xi^{\rm GI}_\pm(\theta)$', gi))
+            figures.append(('xi_shear_x_ia', r'$\theta \xi^{\rm GI}_\pm(\theta)$', gi))
 
-        # one figure per group of data types and mode, the data types of a group overplotted
+        # one figure per group of data types and mode, the data types of a group overplotted (and named in the legend)
+        pm_labels = {st.galaxy_shear_xi_plus: r'$\xi_+$', st.galaxy_shear_xi_minus: r'$\xi_-$'}
         for fig_name, ylabel, data_types in figures:
             for mode in modes:
-                if mode == 'ratio_to_reference' and fig_name == 'xi_gi':
+                if mode == 'ratio_to_reference' and fig_name == 'xi_shear_x_ia':
                     continue
                 # the last data type of the group saves the figure
                 figaxes = None
@@ -2097,8 +2136,9 @@ class CatalogSourceGenerator(ABC):
                         mode=mode,
                         auto_only=all(i == j for i, j in data),
                         ell_factor=1,
-                        scales=self._reference_scales(self._SACC_TYPE_LEGS_2PT[data_type], shapes='ia' if fig_name == 'xi_gi' else shapes),
+                        scales=self._reference_scales(self._SACC_TYPE_LEGS_2PT[data_type], shapes='ia' if fig_name == 'xi_shear_x_ia' else shapes),
                         color=colors[data_type],
+                        label=pm_labels.get(data_type) if len(data_types) > 1 else None,
                         xlabel=r'$\theta$ (arcmin)',
                         ylabel=ylabel if mode == 'values' else None,
                         xlim=xlim,

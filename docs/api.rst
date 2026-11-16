@@ -55,7 +55,7 @@ Module Descriptions
 **I/O** (:mod:`pollux.io`)
    Products on disk, with light dependencies only: their layout and ``config.yaml`` (:mod:`pollux.io.layout`), the code
    version of runs (:mod:`pollux.io.code_version`), their index (``python -m pollux.io.index ROOT``) and loader
-   (:class:`pollux.io.PolluxLoader`).
+   (:class:`pollux.io.PolluxLoader <pollux.io.loader.PolluxLoader>`).
 
 **Pipeline** (:mod:`pollux.pipeline`)
    Parsl tasks and execution configuration, see :doc:`pipeline`.

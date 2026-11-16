@@ -1,7 +1,9 @@
 Pipeline
 ========
 
-Parsl tasks and execution configuration, see :doc:`../pipeline`.
+.. automodule:: pollux.pipeline
+
+See :doc:`../pipeline`.
 
 .. automodule:: pollux.pipeline.tasks
    :members:
@@ -9,6 +11,11 @@ Parsl tasks and execution configuration, see :doc:`../pipeline`.
    :show-inheritance:
 
 .. automodule:: pollux.pipeline.config
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. automodule:: pollux.pipeline.report
    :members:
    :undoc-members:
    :show-inheritance:

@@ -1,7 +1,7 @@
 Utils
 =====
 
-Helper functions, by theme.
+.. automodule:: pollux.utils
 
 .. automodule:: pollux.utils.numerics
    :members:

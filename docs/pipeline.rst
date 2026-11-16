@@ -1,91 +1,87 @@
 Running the pipeline
 ====================
 
-The pipeline turns N-body snapshots into maps and mock catalogs. Each step is a parsl task (:mod:`pollux.pipeline.tasks`),
-run on Slurm jobs set by :mod:`pollux.pipeline.config`. A run is described by a Python script chaining the tasks and a YAML
-configuration file.
+Large runs chain the steps of :doc:`getting_started` as `Parsl <https://parsl.readthedocs.io/>`_ tasks
+(:mod:`pollux.pipeline.tasks`), on Slurm jobs set by :mod:`pollux.pipeline.config`. A run is a Python script
+chaining the tasks, with a YAML configuration file.
 
 Steps
 -----
 
 1. **Shells**: particles of each sub-volume are binned in count maps (``construct_shell``), then summed per shell (``construct_full_shells``).
-2. **Haloes and baryonification** (optional): halo catalogs per shell (``construct_halo_catalog``), used to baryonify the shells (``construct_maps``).
+2. **Haloes and baryonification** (optional): halo catalogs per shell (``construct_halo_catalog``), used to baryonify the shells (``construct_maps``, with a baryon model).
 3. **Lensing**: convergence maps summing weighted shells, per tomographic bin and per shell (``construct_kappas``), and their spherical harmonics (``construct_kappas_alms``).
 4. **Fields of the catalogs**: shear (``compute_shear_maps``), tidal (``compute_tidal_maps``) and smoothed density and convergence maps, as needed by the catalog (``catalog_map_tasks``).
 5. **Catalogs**: tomographic source catalogs (``construct_source_catalog``, or per shell with ``construct_source_catalog_shell`` then ``merge_source_catalog``).
-6. **Statistics**: map and catalog Cls and 2pt functions, compared to predictions in plots (``plot_catalog_stats``).
+6. **Statistics**: Cls of the shells, convergence maps and catalogs (``compute_shells_cls``, ``compute_kappas_cls``, ``compute_catalog_cls``) and 2pt functions of the catalogs (``compute_catalog_2pt``), with the lensing shear, the intrinsic alignments and their sum; plots compare them to their predictions (``plot_catalog_cls``, ``plot_catalog_2pt``).
 
-Tasks skip the outputs already on disk, so a run can be resumed by launching it again. For the same reason, a run that must recompute a product needs a new output directory.
+The tasks use :class:`~pollux.reader.HACCReader`, :class:`~pollux.shells.SnapshotShellBuilder` and
+:class:`~pollux.catalog.CatalogSourceClusteredPoisson`; the other readers, builders and catalogs are used from
+Python directly.
 
-Smoothing
+Tasks
+-----
+
+Each task makes one product (or part of one), and takes the options of the objects it needs as dictionaries:
+``reader_dict`` (:class:`~pollux.reader.HACCReader`), ``shell_dict``
+(:class:`~pollux.shells.SnapshotShellBuilder`), ``lensing_dict`` (:class:`~pollux.lensing.BornLensingBuilder`, or
+None for one source plane per shell), ``ia_dict`` (:class:`~pollux.ia.IACalculator`), ``catalog_dict``
+(:class:`~pollux.catalog.CatalogSourceClusteredPoisson`), ``baryon_dict`` (the tag, halo mass and profile
+parameters of :class:`~pollux.baryons.BaryonifiedShellBuilder`, or None for dark matter only) and ``stats_dict``.
+Workers rebuild the objects from these dictionaries, so tasks only pass small arguments, and the products go
+through the disk. Dependencies are the ``inputs`` of each task: the futures of the tasks making its inputs.
+
+Writing a run
+-------------
+
+A run script:
+
+1. reads its configuration (:func:`~pollux.pipeline.config.load_run_config`, which expands environment variables
+   such as ``$PSCRATCH`` in its paths), and builds the dictionaries of the tasks from it;
+2. creates a reader and a shell builder in the main process, for what the tasks need to know in advance (number of
+   sub-volumes, of shells, smoothing scales per shell from :meth:`~pollux.cosmo.Theory.lognormal_smoothing`);
+3. records its code version (:func:`~pollux.io.code_version.save_code_version`, see below);
+4. loads the Parsl configuration (:func:`~pollux.pipeline.config.get_config`) and creates the futures of all
+   tasks, chained by their ``inputs``;
+5. waits for the futures. A failed task makes the tasks depending on it fail, but not the others: catching the
+   exception of each future lets the run go on and list the failures at the end.
+
+Run scripts are launched from a login node, in the background (``nohup``), since they wait for the Slurm jobs of
+their tasks.
+
+Execution
 ---------
 
-The density used to place galaxies and the fields interpolated at galaxies can be smoothed by a Gaussian of comoving scale ``smooth_Mpc``, set by two options of the configuration:
+:func:`~pollux.pipeline.config.get_config` defines three executors, by the memory of their tasks, each submitting
+one-node Slurm jobs (blocks) on demand (``EXECUTORS``):
 
-- ``catalog.smooth_fields``: the smoothed fields, among ``kappa``, ``gamma1``, ``gamma2``, ``density``, ``t11``, ``t22``, ``t12`` and ``positions`` (the density placing galaxies);
-- ``smooth_Mpc``: the scale, or a dictionary of scales per field.
+- ``'default'``: many tasks of up to about 10 GB per node (sub-volume shells, assembly of shells, convergence);
+- ``'highmem'``: four tasks of up to about 120 GB per node (power spectra, halo catalogs, baryonification);
+- ``'heavy'``: one task per node, for full-sky harmonic transforms and catalogs.
 
-Fields made together must share their scale (the tidal tensor components, and the shear components). Predictions account for the smoothing of ``positions``, and of the tidal field for intrinsic alignments (see :class:`pollux.cosmo.Tracer`). The catalogs' 2pt functions are measured with the lensing shear by default (``shear_cols``); their predictions with intrinsic alignments, NLA or TATT, are those of ``predict_2pt(theta, shapes='observed')`` (shear plus intrinsic alignments, columns ``e1_obs``, ``e2_obs``) or ``shapes='ia'``; the terms of TATT beyond NLA also have B modes, included in the predicted :math:`\xi_\pm` (``bb=True`` in :meth:`pollux.cosmo.Theory.angular_cl`).
+Blocks stop taking tasks before the end of their walltime, so that running tasks finish. ``debug=True`` uses the
+debug queue. The NERSC account is ``$POLLUX_ACCOUNT``, and Slurm notifications go to ``$POLLUX_MAIL`` if set.
 
-Linear galaxy bias
-------------------
+Parsl records the tasks in a monitoring database, from which
+``python -m pollux.pipeline.report {monitoring.db}`` reports the time, memory and failures of each kind of task.
 
-Clustered catalogs place galaxies with a density proportional to ``1 + b * delta``. With ``b > 1`` this is negative in underdense pixels: it is clipped to zero, with a warning giving the fraction of pixels affected.
-Clipping changes the effective bias, and the mean density of Poisson-sampled catalogs.
+Resuming
+--------
 
-Production in a shared space
-----------------------------
-
-Several users can run the same code from a shared space::
-
-    HACC-HOS-Y1/
-    |-- pollux/    clone of this repository at a fixed commit
-    |-- scripts/   run scripts, their configurations, and setup.sh
-    |-- data/      masks and redshift distributions
-    `-- deps/      pinned dependencies
-
-``setup.sh`` activates the shared Python environment, in which this clone of pollux is installed, and removes anything from the user's environment taking precedence over it. The ``.sh`` launchers do it themselves, so a run only takes::
-
-    /path/to/HACC-HOS-Y1/scripts/run_xxx.sh [configuration]
-
-Each user's outputs go to their own scratch (``save_dir_root`` of the configuration, where environment variables such as ``$PSCRATCH`` are expanded), and logs to ``$PSCRATCH/HACC-HOS-Y1/logs``.
-
-Two environment variables set the use of the NERSC allocation:
-
-- ``POLLUX_ACCOUNT``: account charged (default ``m1727``);
-- ``POLLUX_MAIL``: address of the Slurm notifications (default: none).
+Tasks skip the products already on disk, and every file is written to a temporary name then renamed, so that an
+interrupted task leaves no partial file. Statistics are computed per bin pair, each pair saved as an intermediate
+file (in a folder named by an identifier of the binning and options of the statistic), then combined: tasks skip
+the pairs already saved, and the statistics already combined, but always redraw the plots. Launching a run again therefore resumes it. For the same reason, a product
+must be moved away (or the run given a new output directory) to be recomputed. A product whose ``config.yaml``
+differs from the options of the run raises an error, instead of mixing the two (see :doc:`outputs`).
 
 Code version
 ------------
 
-:func:`pollux.io.code_version.save_code_version` records each run in a new folder ``code_version/{date}`` of its output directory: git commit and state of pollux, date, host and command, lists of installed Python and conda packages, and copies of the run script and configuration.
-Run scripts refuse to start if pollux has uncommitted changes, unless the configuration sets ``allow_uncommitted: true``.
+:func:`pollux.io.code_version.save_code_version` records each run in a new folder ``code_version/{date}`` of its
+output directory: git commit and state of pollux, date, host and command, lists of installed Python and conda
+packages, and copies of the run script and configuration. With ``require_clean=True``, it refuses to run if pollux
+has uncommitted changes.
 
-Catalogs also store the commit in their FITS headers: ``POLLUXV`` (first 12 characters) and ``DIRTY`` (uncommitted changes).
-
-Output structure
-----------------
-
-Products are organised by realization and matter model (:mod:`pollux.io.layout`). Under
-``{save_dir_root}/{simulation}/nside{nside}/seed{seed}/`` (with ``pad{padding}/`` for masked footprints with padding):
-
-- ``dmo/``: the dark-matter-only products:
-
-  - ``shells/``: shell maps (``shell_{iii}.fits``), their Cls (``cls.fits``) and the table of the shells (``shells.fits``: redshift and distance edges, mean densities);
-  - ``smoothed/{s}Mpc/``: smoothed density and tidal maps (``density_{iii}``, ``t11_{iii}``, ...);
-  - ``kappa/{nz}/``: convergence and shear maps of the tomographic bins (``kappa_bin{b}``, ``gamma1_bin{b}``, ...), and their redshift distributions (``nzs.txt``);
-  - ``kappa/snapshots/``: convergence and shear maps with one source plane per shell (``kappa_{iii}``, ...);
-  - ``catalogs/{nz}/{tag}/``: source catalogs (``cat_bin{b}.fits``) and their statistics (``cat_2pt.fits``, ``cat_cls.fits``, and ``cat_2pt_ia.fits``, ``cat_2pt_observed.fits`` with the shapes ``'ia'`` and ``'observed'``);
-
-- ``dmb/{tag}/``: the same products for the baryon model ``tag``;
-- ``halos/``: halo catalogs, shared by all baryon models;
-- ``intermediate/``: files needed only to make or resume the products (sub-volume maps, spherical harmonics,
-  partial catalogs, workspaces), at the same relative paths;
-- ``code_version/``: the records of the runs.
-
-Each product directory has a ``config.yaml`` with its parameters (for shells and halos, also the simulation and its cosmology), inputs and the code version that made it,
-and its plots in ``plots/``. Products are resumed in place, and a directory made with other parameters
-raises an error instead of being mixed. NaMaster workspaces and padded masks, which depend only on the
-footprint, are in ``{save_dir_root}/{simulation}/nside{nside}/``.
-
-:class:`pollux.io.PolluxLoader` loads these products, and ``python -m pollux.io.index {save_dir_root}`` lists them.
+Catalogs also store the commit in their FITS headers: ``POLLUXV`` (first 12 characters) and ``DIRTY`` (uncommitted
+changes).

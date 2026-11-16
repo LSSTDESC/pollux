@@ -1,7 +1,7 @@
 I/O
 ===
 
-Products on disk: their layout, the code version of runs, their index and loader.
+.. automodule:: pollux.io
 
 .. automodule:: pollux.io.layout
    :members:

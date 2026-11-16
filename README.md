@@ -11,13 +11,14 @@ DESC package to create weak lensing and large-scale structure simulations from N
 
 ## Features
 - Interfaces with [HACC](https://cosmology.alcf.anl.gov/) and [SLICS](https://arxiv.org/abs/1805.04511) N-body simulations.
-- Construction of particle and halo lightcones with replicated boxes and random isometries (translations, rotations and flips), typically identical for groups of shells of width given by the box size.
-- Lensing in the Born approximation (`BornLensingBuilder`), including tomography from user-defined redshift tomographic distributions, with shear and tidal fields from spherical harmonics.
+- Construction of particle and halo lightcones with replicated boxes and random isometries (translations, rotations and flips), typically identical for groups of shells of width given by the box size, on the full sky or any footprint (optionally padded and apodized for harmonic transforms).
+- Three ways of building the shells from particles: from the snapshot of each shell, replicated over the shell (`SnapshotShellBuilder`), by slicing the lightcone outputs of the simulation (`LightconeSlicingBuilder`), or by interpolating the particle trajectories between consecutive snapshots to where they cross the lightcone (`SnapshotInterpBuilder`).
+- Lensing in the Born approximation (`BornLensingBuilder`), including tomography from user-defined redshift distributions, with shear and tidal fields from spherical harmonics.
 - Baryonification of the shells with [BaryonForge](https://github.com/DhayaaAnbajagane/BaryonForge) (`BaryonifiedShellBuilder`), with the matching correction of the matter power spectrum.
-- Generation of tomographic galaxy catalogs using uniform sampling (`CatalogSourceUniform`) or clustered sampling via (linearly biased) sampling of the density field with Multinomial (`CatalogSourceClusteredMultinomial`, fixed total number of galaxies) or Poisson (`CatalogSourceClusteredPoisson`, fixed density) samplings.
+- Generation of tomographic galaxy catalogs using uniform sampling (`CatalogSourceUniform`) or clustered sampling via (linearly biased) sampling of the density field with Multinomial (`CatalogSourceClusteredMultinomial`, fixed total number of galaxies) or Poisson (`CatalogSourceClusteredPoisson`, fixed density) samplings, with an optional Gaussian smoothing of the density chosen per shell.
 - Intrinsic alignments, reduced shear and observed shapes in the catalogs.
-- Catalog statistics (Cls and 2pt functions) and theory predictions.
-- Efficient parallel computation using the [Parsl](https://parsl.readthedocs.io/en/stable/index.html) framework to distribute tasks over computing resources (`pollux.pipeline`).
+- Catalog statistics (Cls with NaMaster, 2pt functions with TreeCorr, including those of the intrinsic alignments) and theory predictions with CCL.
+- Efficient parallel computation using the [Parsl](https://parsl.readthedocs.io/en/stable/index.html) framework to distribute tasks over computing resources (`pollux.pipeline`), with a record of the code and environment of each run.
 - Use of DESC tools: [CCL](https://github.com/LSSTDESC/CCL), [healsparse](https://github.com/LSSTDESC/healsparse) and [NaMaster](https://github.com/LSSTDESC/NaMaster).
 
 ## Organisation of the code
@@ -43,7 +44,7 @@ pip install -e .
 ```
 
 ## Running the pipeline
-A run is a Python script chaining the Parsl tasks of `pollux.pipeline.tasks` with a YAML configuration, on Slurm jobs set by `pollux.pipeline.config`. See the [documentation](https://lsstdesc-pollux.readthedocs.io/) and its [pipeline page](docs/pipeline.rst) for the steps, the options and the structure of the outputs.
+A run is a Python script chaining the Parsl tasks of `pollux.pipeline.tasks` with a YAML configuration, on Slurm jobs set by `pollux.pipeline.config`. The [documentation](https://lsstdesc-pollux.readthedocs.io/) describes each step and its options, how to use them from Python or in a run, and the outputs; the notebooks of `notebooks/` show examples.
 
 Each run records its code and environment in `code_version/` in its output directory, and catalogs store the git commit in their FITS headers.
 

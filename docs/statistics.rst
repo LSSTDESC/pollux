@@ -95,7 +95,7 @@ box size. On the full sky at nside 8192:
 
 - convergence power spectra agree to 1–2% for 100 < ℓ < 5000, in every pair of tomographic bins;
 - the cosmic shear ``ξ+`` of the catalogs agrees to a few percent from 0.5 to 100 arcmin;
-- with the lognormal smoothing (``max_bias_error`` of 10%), the galaxy clustering ``w(θ)`` agrees to about 3%,
+- with the lognormal smoothing (``max_bias_error`` of 10%), the galaxy clustering ``w(θ)`` agrees to 2–8%,
   and galaxy-galaxy lensing ``γt`` to a few percent.
 
 With baryons (at nside 2048), the suppression of the convergence power spectra and of ``ξ±`` follows the prediction

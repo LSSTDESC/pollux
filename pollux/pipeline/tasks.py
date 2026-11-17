@@ -304,21 +304,29 @@ def catalog_map_tasks(nshells, reader_dict, shell_dict, catalog_dict, kappa_alms
 
 @python_app(executors=['heavy'])
 def construct_source_catalog(ikappa, reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict=None, inputs=[]):
-    _make_source_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict).generate(ikappa)
+    # catalog of one tomographic bin, unless saved
+    catalog = _make_source_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict)
+    if not os.path.exists(catalog.get_fname(ikappa)):
+        catalog.generate(ikappa)
     _free_memory()
 
 
 @python_app(executors=['highmem'])
 def construct_source_catalog_shell(ishell, reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict=None, inputs=[]):
-    # galaxies of one shell, for all tomographic bins (partial catalogs)
-    _make_source_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict).generate(ishell=ishell)
+    # galaxies of one shell, for all tomographic bins (partial catalogs), unless saved or already merged
+    catalog = _make_source_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict)
+    bins = range(catalog.lensing.nmaps)
+    if not (all(os.path.exists(catalog.get_fname(i, ishell=ishell)) for i in bins) or all(os.path.exists(catalog.get_fname(i)) for i in bins)):
+        catalog.generate(ishell=ishell)
     _free_memory()
 
 
 @python_app(executors=['highmem'])
 def merge_source_catalog(ikappa, reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict=None, inputs=[]):
-    # inputs contains the construct_source_catalog_shell futures of all shells
-    _make_source_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict).combine_shells(ikappa)
+    # inputs contains the construct_source_catalog_shell futures of all shells; skipped if the catalog is saved
+    catalog = _make_source_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict)
+    if not os.path.exists(catalog.get_fname(ikappa)):
+        catalog.combine_shells(ikappa)
     _free_memory()
 
 

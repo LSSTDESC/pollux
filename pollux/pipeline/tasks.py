@@ -463,9 +463,20 @@ def compute_catalog_cls_wsp(stat, reader_dict, shell_dict, lensing_dict, ia_dict
 
 
 @python_app(executors=['heavy'])
+def compute_catalog_alms(ikappa, reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, stats_dict, baryon_dict=None, inputs=[]):
+    # catalog fields (a_lm) of one tomographic bin for the Cls, saved as intermediate files (skipped if saved, or if the
+    # Cls are saved): the Cls of all its pairs read them instead of loading the catalog again
+    catalog = _make_source_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict)
+    if not os.path.exists(catalog._cls_fname()):
+        options = {k: v for k, v in {**stats_dict['common'], **stats_dict['cls']}.items() if k not in ('shared_wsp', 'auto_only')}
+        catalog.compute_alms(ikappa, **options)
+    _free_memory()
+
+
+@python_app(executors=['highmem'])
 def compute_catalog_cls_sub(stat, pair, reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, stats_dict, baryon_dict=None, inputs=[]):
     # Cls of one statistic ('clustering', 'shear' or 'shear_clustering') for one bin pair, saved to an intermediate file
-    # (its name is returned; None if the Cls are saved)
+    # (its name is returned; None if the Cls are saved), from the fields of its bins (inputs: compute_catalog_alms)
     from pollux.utils.binning import binning_id
     catalog = _make_source_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict)
     if os.path.exists(catalog._cls_fname()):

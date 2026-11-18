@@ -5,8 +5,11 @@ Also measures their two-point statistics (Cls with NaMaster, two-point functions
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
+import pickle
 import warnings
 from abc import ABC, abstractmethod
 from functools import cached_property
@@ -894,27 +897,38 @@ class CatalogSourceGenerator(ABC):
         """Footprint mask (RING, float, at the shell builder's ``nside``), the mask of map-based fields."""
         return self.lensing.shell_builder.get_mask(nest=False).astype(np.float64)
 
-    def _cls_fields(
+    def compute_alms(
             self,
-            ikappas: list[int],
-            what: list[str],
+            ikappas: int | Iterable[int] | None = None,
+            what: str | list[str] = 'all',
+            *,
             shear_cols: tuple[str, str] = ('gamma1', 'gamma2'),
             subsample: float | None = None,
             remove_mean: bool = True,
             randoms: bool = False,
             nran_factor: int = 5,
             shared_randoms: bool = True,
-            seed: int | None = None) -> tuple[dict[int, nmt.NmtFieldCatalogClustering], dict[int, nmt.NmtFieldCatalog]]:
-        """Build the NaMaster catalog fields used by :meth:`compute_cls`.
+            seed: int | None = None,
+            save: bool = True) -> tuple[dict[int, nmt.NmtFieldCatalogClustering], dict[int, nmt.NmtFieldCatalog]]:
+        """Compute the NaMaster catalog fields of tomographic bins, used by :meth:`compute_cls`.
+
+        Each field (its a_lm and those of its mask) is the costly part of the catalog Cls: it is
+        computed once per bin and saved as an intermediate file (:meth:`_cls_field_fname`), read by
+        later calls instead of loading the catalog again.
 
         Parameters
         ----------
-        ikappas : list of int
-            Tomographic bins.
-        what : list of str
-            Statistics to compute (see :meth:`compute_cls`), which set the fields needed.
+        ikappas : int or array_like of int or None, optional
+            Tomographic bins. If None, all bins.
+        what : {'shear', 'clustering', 'shear_clustering', 'all'} or list of str, optional
+            Statistics to compute (see :meth:`compute_cls`), which set the fields needed: density
+            fields for ``'clustering'`` and ``'shear_clustering'``, shear fields for ``'shear'`` and
+            ``'shear_clustering'``.
         shear_cols, subsample, remove_mean, randoms, nran_factor, shared_randoms, seed : optional
             See :meth:`compute_cls`.
+        save : bool, optional
+            If True (default), read the fields saved, and save those computed. If False, compute
+            them without saving.
 
         Returns
         -------
@@ -924,58 +938,114 @@ class CatalogSourceGenerator(ABC):
             Each field has a ``mask_amplitude`` attribute, the ratio of its mask
             to :attr:`footprint` (its weighted number of galaxies or randoms per
             steradian of footprint, or 1 for density fields with the footprint mask).
+            Fields read from disk have their a_lm, not their catalog values or mask map.
         """
+        if isinstance(what, str):
+            what = list(self._STAT_TYPES_CLS) if what == 'all' else [what]
+        ikappas = list(self.lensing.iter(ikappas))
+        seed = self.lensing.shell_builder.seed if seed is None else seed
+        # density fields for clustering and galaxy-galaxy lensing, shear fields for cosmic shear and galaxy-galaxy lensing
+        kinds = [kind for kind, stats in (('density', ('clustering', 'shear_clustering')), ('shear', ('shear', 'shear_clustering'))) if set(stats) & set(what)]
+        options = dict(
+            shear_cols=tuple(shear_cols),
+            subsample=subsample,
+            remove_mean=remove_mean,
+            randoms=randoms,
+            nran_factor=nran_factor,
+            shared_randoms=shared_randoms,
+            seed=seed)
+
+        fields = {'density': {}, 'shear': {}}
+        for ikappa in self.lensing.tqdm(ikappas, desc="[compute_alms]"):
+            fnames = {kind: self._cls_field_fname(kind, ikappa, options) for kind in kinds}
+            missing = [kind for kind in kinds if not (save and os.path.exists(fnames[kind]))]
+            if missing:
+                built = self._build_cls_fields(ikappa, missing, **options)
+            for kind in kinds:
+                if kind in missing:
+                    fields[kind][ikappa] = built[kind]
+                    if save:
+                        self._save_cls_field(built[kind], fnames[kind])
+                else:
+                    with open(fnames[kind], 'rb') as f:
+                        fields[kind][ikappa] = pickle.load(f)
+                    logger.debug("Found and loaded field at %s.", fnames[kind])
+        return fields['density'], fields['shear']
+
+    def _cls_field_fname(self, kind: str, ikappa: int, options: dict) -> str:
+        """Return the intermediate file of the catalog field ``kind`` (density or shear) of a bin.
+
+        The folder is named by an identifier of what the field depends on: the multipoles of the
+        field and mask, and the options of :meth:`compute_alms` that apply to this kind of field.
+        """
+        keys = ('subsample', 'seed') + (('randoms', 'nran_factor', 'shared_randoms') if kind == 'density' else ('shear_cols', 'remove_mean'))
+        params = dict(lmax=self.b.lmax, lmax_mask=self.lmax_mask, **{k: options[k] for k in keys})
+        params_id = hashlib.sha1(json.dumps(params, sort_keys=True, default=str).encode()).hexdigest()[:8]
+        return os.path.join(self._intermediate_dir, f'cls_fields_{params_id}', f'{kind}_bin{ikappa}.pkl')
+
+    @staticmethod
+    def _save_cls_field(field: nmt.NmtField, fname: str) -> None:
+        # a field without its catalog values and mask map (the largest arrays), which pseudo-Cls and workspaces
+        # don't use once the a_lm of the field and of its mask are computed
+        if field.alm_mask is None:
+            field.alm_mask = field.get_mask_alms()  # not kept by "lite" fields
+        for attr in ('field', 'mask', 'maps'):
+            if hasattr(field, attr):
+                setattr(field, attr, None)
+        os.makedirs(os.path.dirname(fname), exist_ok=True)
+        with layout.atomic_write(fname) as tmp, open(tmp, 'wb') as f:
+            pickle.dump(field, f, protocol=pickle.HIGHEST_PROTOCOL)
+        logger.debug("Saved field to %s.", fname)
+
+    def _build_cls_fields(
+            self, ikappa: int, kinds: list[str], shear_cols: tuple[str, str], subsample: float | None, remove_mean: bool, randoms: bool, nran_factor: int,
+            shared_randoms: bool, seed: int) -> dict[str, nmt.NmtField]:
+        """Build the catalog fields ``kinds`` (``'density'``, ``'shear'``) of one bin (see :meth:`compute_alms`)."""
         builder = self.lensing.shell_builder
         lmax, lmax_mask = self.b.lmax, self.lmax_mask
-        seed = builder.seed if seed is None else seed
         # footprint pixels (to draw randoms) and area (to normalize the mask amplitudes)
         _, ipix_mask = builder.get_mask(nest=True, return_ipix=True)
         area = ipix_mask.size * hp.nside2pixarea(builder.nside)
-
-        # fields needed by the statistics
-        need_density = 'clustering' in what or 'shear_clustering' in what
-        need_shear = 'shear' in what or 'shear_clustering' in what
         col1, col2 = shear_cols
 
-        # Build each bin's catalog field(s) once, reused across all pairs
-        f_dens, f_shear = {}, {}
-        shared_radec = None
-        for ikappa in self.lensing.tqdm(ikappas, desc="[compute_cls] building fields"):
-            cat = self.load_catalogs(
-                ikappa, subsample=subsample, seed=seed, columns=['ra', 'dec', *shear_cols], remove_mean=list(shear_cols) if remove_mean else None)
-            positions = [cat['ra'], cat['dec']]
-            weights_gal = np.ones(cat['ra'].size)
+        cat = self.load_catalogs(
+            ikappa, subsample=subsample, seed=seed, columns=['ra', 'dec', *shear_cols], remove_mean=list(shear_cols) if remove_mean else None)
+        positions = [cat['ra'], cat['dec']]
+        weights_gal = np.ones(cat['ra'].size)
+        fields = {}
 
-            if need_density:
-                # density: footprint mask, or randoms drawn over the footprint
-                if not randoms:
-                    f = nmt.NmtFieldCatalogClustering(positions, weights_gal, None, None, lmax=lmax, lmax_mask=lmax_mask, lonlat=True, mask=self.footprint)
-                    f.mask_amplitude = 1.
+        if 'density' in kinds:
+            # density: footprint mask, or randoms drawn over the footprint
+            if not randoms:
+                f = nmt.NmtFieldCatalogClustering(positions, weights_gal, None, None, lmax=lmax, lmax_mask=lmax_mask, lonlat=True, mask=self.footprint)
+                f.mask_amplitude = 1.
+            else:
+                # one set of randoms for all bins (sized from the first bin, the same whatever the bins computed),
+                # or one per bin
+                if shared_randoms:
+                    rng = np.random.default_rng(seed)
+                    nran = int(nran_factor * self._ngal_used(0, subsample))
                 else:
-                    # one set of randoms for all bins, or one per bin
-                    if shared_randoms:
-                        if shared_radec is None:
-                            rng = np.random.default_rng(seed)
-                            nran = int(nran_factor * cat['ra'].size)
-                            shared_radec = generate_radec_in_pix(self.nside, rng.choice(ipix_mask, size=nran), rng)
-                        ra_rand, dec_rand = shared_radec
-                    else:
-                        rng = np.random.default_rng(seed + ikappa)
-                        nran = int(nran_factor * cat['ra'].size)
-                        ra_rand, dec_rand = generate_radec_in_pix(self.nside, rng.choice(ipix_mask, size=nran), rng)
-                    f = nmt.NmtFieldCatalogClustering(
-                        positions, weights_gal, [ra_rand, dec_rand], np.ones(len(ra_rand)), lmax=lmax, lmax_mask=lmax_mask, lonlat=True)
-                    # randoms per steradian of footprint
-                    f.mask_amplitude = len(ra_rand) / area
-                f_dens[ikappa] = f
+                    rng = np.random.default_rng(seed + ikappa)
+                    nran = int(nran_factor * cat['ra'].size)
+                ra_rand, dec_rand = generate_radec_in_pix(self.nside, rng.choice(ipix_mask, size=nran), rng)
+                f = nmt.NmtFieldCatalogClustering(
+                    positions, weights_gal, [ra_rand, dec_rand], np.ones(len(ra_rand)), lmax=lmax, lmax_mask=lmax_mask, lonlat=True)
+                # randoms per steradian of footprint
+                f.mask_amplitude = len(ra_rand) / area
+            fields['density'] = f
 
-            if need_shear:
-                # shear: spin-2 field of the galaxies, whose mask amplitude is their number per steradian
-                f = nmt.NmtFieldCatalog(positions, weights_gal, [cat[col1], cat[col2]], spin=2, lmax=lmax, lmax_mask=lmax_mask, lonlat=True)
-                f.mask_amplitude = weights_gal.sum() / area
-                f_shear[ikappa] = f
+        if 'shear' in kinds:
+            # shear: spin-2 field of the galaxies, whose mask amplitude is their number per steradian
+            f = nmt.NmtFieldCatalog(positions, weights_gal, [cat[col1], cat[col2]], spin=2, lmax=lmax, lmax_mask=lmax_mask, lonlat=True)
+            f.mask_amplitude = weights_gal.sum() / area
+            fields['shear'] = f
+        return fields
 
-        return f_dens, f_shear
+    def _ngal_used(self, ikappa: int, subsample: float | None) -> int:
+        """Number of galaxies of a bin used by the statistics (all, or the subsample read by :meth:`load_catalogs`)."""
+        nrows = fits.getheader(self.get_fname(ikappa, format='fits'), ext=1)['NAXIS2']
+        return nrows if subsample is None else int(subsample * nrows)
 
     def _wsp_fname(self, stat: str, pair: tuple[int, int] | None = None, randoms: bool = False) -> str:
         """Return the path of a workspace (see :meth:`get_wsp`).
@@ -1069,7 +1139,7 @@ class CatalogSourceGenerator(ABC):
             elif fields is None:
                 # per pair: the catalog fields of the two bins
                 i, j = pair
-                f_dens, f_shear = self._cls_fields(sorted({i, j}), [stat], **field_kwargs)
+                f_dens, f_shear = self.compute_alms(sorted({i, j}), [stat], **field_kwargs)
                 f1, f2 = {'clustering': (f_dens, f_dens), 'shear': (f_shear, f_shear), 'shear_clustering': (f_dens, f_shear)}[stat]
                 fields = (f1[i], f2[j])
             wsp.compute_coupling_matrix(*fields, self.b)
@@ -1161,7 +1231,8 @@ class CatalogSourceGenerator(ABC):
             nran_factor: int = 5,
             shared_randoms: bool = True,
             seed: int | None = None,
-            save: bool = True) -> tuple[np.ndarray, dict]:
+            save: bool = True,
+            use_precomputed_alms: bool = True) -> tuple[np.ndarray, dict]:
         """Measure angular power spectra directly from the generated catalog(s),
         including all cross-tomographic-bin combinations.
 
@@ -1234,11 +1305,15 @@ class CatalogSourceGenerator(ABC):
             This matches the fact that all bins share the same survey
             footprint, and is cheaper since randoms are only drawn once. If
             False, each bin gets its own randoms, seeded by ``seed + ikappa``.
+            The shared randoms are sized from the galaxies of the first bin, whatever the bins computed.
         seed : int or None, optional
             Seed for the random catalogs' RNG. Default is the shell builder's seed.
         save : bool, optional
             If True (default), save the spectra to a SACC FITS file via
             :meth:`_save_cls`, at ``{self._catalog_dir}/cat_cls.fits``.
+        use_precomputed_alms : bool, optional
+            If True (default), the fields of each bin come from :meth:`compute_alms`: read from their
+            intermediate files, or computed and saved. If False, they are computed and not saved.
 
         Returns
         -------
@@ -1260,7 +1335,7 @@ class CatalogSourceGenerator(ABC):
         # bandpowers, and the catalog fields of each bin (built once, reused by all pairs)
         b = self.b
         ell = b.get_effective_ells()
-        f_dens, f_shear = self._cls_fields(
+        f_dens, f_shear = self.compute_alms(
             ikappas,
             what,
             shear_cols=shear_cols,
@@ -1269,7 +1344,8 @@ class CatalogSourceGenerator(ABC):
             randoms=randoms,
             nran_factor=nran_factor,
             shared_randoms=shared_randoms,
-            seed=seed)
+            seed=seed,
+            save=use_precomputed_alms)
 
         # decoupled spectra, keyed by SACC data type then bin pair
         cl = {}

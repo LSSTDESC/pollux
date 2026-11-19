@@ -1,7 +1,7 @@
 Intrinsic alignments
 ====================
 
-:class:`~pollux.ia.IACalculator` adds intrinsic alignments to the catalogs, from the tidal field of each galaxy's
+:class:`~pollux.ia.CatalogAugmentorIA` adds intrinsic alignments to the catalogs, from the tidal field of each galaxy's
 shell interpolated at its position. The tidal field ``t11``, ``t22``, ``t12`` of a shell
 (:meth:`~pollux.shells.ShellBuilder.compute_tidal_tensor_maps`) is that of its density contrast, transverse to the
 line of sight, and can be smoothed (see :doc:`catalogs`). A shell has no line-of-sight component, so that
@@ -23,7 +23,7 @@ With :math:`t_{11}`, :math:`t_{22}`, :math:`t_{12}` the transverse tidal field o
     e^{\rm TA} = C_1 \left(t_{11} - t_{22},\; t_{12}\right), \qquad
     e^{\rm TT} = C_2 \left(t_{11}^2 - t_{22}^2,\; t_{12} (t_{11} + t_{22})\right)
 
-(see :meth:`~pollux.ia.IACalculator.augment_catalog`).
+(see :meth:`~pollux.ia.CatalogAugmentorIA.augment_catalog`).
 
 The coefficients ``C1`` and ``C2`` are those of CCL (``pyccl.nl_pt.translate_IA_norm``), with the amplitudes
 ``A_TA`` and ``A_TT`` of ``model_params``, so that predictions use the same amplitudes. Since the tidal field is
@@ -42,8 +42,8 @@ the tidal torquing term). Uniform catalogs have no density weighting unless ``de
 Predictions
 -----------
 
-:attr:`~pollux.catalog.CatalogSourceGenerator.ia_tracers` gives the tracers of the alignments of each bin, with
+:attr:`~pollux.catalog.CatalogGenerator.ia_tracers` gives the tracers of the alignments of each bin, with
 amplitudes ``a1 = A_TA``, ``a1delta = b_TA a1`` and ``a2 = A_TT``
-(:meth:`~pollux.ia.IACalculator.tracer_amplitudes`). NLA is computed with the matter power spectrum of the
+(:meth:`~pollux.ia.CatalogAugmentorIA.tracer_amplitudes`). NLA is computed with the matter power spectrum of the
 predictions, and the other terms with perturbation theory (FAST-PT through CCL), which also gives their B modes.
 Their 2pt functions (II, GI, gI) are measured and predicted with the ``shapes`` options of :doc:`statistics`.

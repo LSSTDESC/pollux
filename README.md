@@ -12,10 +12,10 @@ DESC package to create weak lensing and large-scale structure simulations from N
 ## Features
 - Interfaces with [HACC](https://cosmology.alcf.anl.gov/) and [SLICS](https://arxiv.org/abs/1805.04511) N-body simulations.
 - Construction of particle and halo lightcones with replicated boxes and random isometries (translations, rotations and flips), typically identical for groups of shells of width given by the box size, on the full sky or any footprint (optionally padded and apodized for harmonic transforms).
-- Three ways of building the shells from particles: from the snapshot of each shell, replicated over the shell (`SnapshotShellBuilder`), by slicing the lightcone outputs of the simulation (`LightconeSlicingBuilder`), or by interpolating the particle trajectories between consecutive snapshots to where they cross the lightcone (`SnapshotInterpBuilder`).
+- Three ways of building the shells from particles: from the snapshot of each shell, replicated over the shell (`SnapshotShellBuilder`), by slicing the lightcone outputs of the simulation (`LightconeShellBuilder`), or by interpolating the particle trajectories between consecutive snapshots to where they cross the lightcone (`SnapshotInterpShellBuilder`).
 - Lensing in the Born approximation (`BornLensingBuilder`), including tomography from user-defined redshift distributions, with shear and tidal fields from spherical harmonics.
 - Baryonification of the shells with [BaryonForge](https://github.com/DhayaaAnbajagane/BaryonForge) (`BaryonifiedShellBuilder`), with the matching correction of the matter power spectrum.
-- Generation of tomographic galaxy catalogs using uniform sampling (`CatalogSourceUniform`) or clustered sampling via (linearly biased) sampling of the density field with Multinomial (`CatalogSourceClusteredMultinomial`, fixed total number of galaxies) or Poisson (`CatalogSourceClusteredPoisson`, fixed density) samplings, with an optional Gaussian smoothing of the density chosen per shell.
+- Generation of tomographic galaxy catalogs using uniform sampling (`CatalogUniform`) or clustered sampling via (linearly biased) sampling of the density field with Multinomial (`CatalogClusteredMultinomial`, fixed total number of galaxies) or Poisson (`CatalogClusteredPoisson`, fixed density) samplings, with an optional Gaussian smoothing of the density chosen per shell.
 - Intrinsic alignments, reduced shear and observed shapes in the catalogs.
 - Catalog statistics (Cls with NaMaster, 2pt functions with TreeCorr, including those of the intrinsic alignments) and theory predictions with CCL.
 - Efficient parallel computation using the [Parsl](https://parsl.readthedocs.io/en/stable/index.html) framework to distribute tasks over computing resources (`pollux.pipeline`), with a record of the code and environment of each run.
@@ -27,7 +27,7 @@ DESC package to create weak lensing and large-scale structure simulations from N
 - `shells.py` implements `ShellBuilder` objects (subclass of `MapBuilder`) to generate particle and halo lightcone shells.
 - `lensing.py` implements `LensingBuilder` objects (subclass of `MapBuilder`) to generate lensing maps from lightcone shells. 
 - `baryons.py` implements `BaryonifiedShellBuilder` (subclass of `ShellBuilder`) to baryonify shells.
-- `catalog.py` implements `CatalogSourceGenerator` objects to generate tomographic galaxy catalogs from the lightcone shells and lensing maps, and to measure and predict their statistics.
+- `catalog.py` implements `CatalogGenerator` objects to generate tomographic galaxy catalogs from the lightcone shells and lensing maps, and to measure and predict their statistics.
 - `ia.py` implements catalog augmentors for intrinsic alignments and observed shapes.
 - `cosmo.py` contains fixed cosmologies, and the `Tracer` and `Theory` objects for predictions.
 - `plotting.py` plots two-point statistics against theory.

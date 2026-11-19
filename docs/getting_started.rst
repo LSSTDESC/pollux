@@ -44,7 +44,8 @@ functions to theory. At low resolution it fits on one node; :doc:`pipeline` dist
 
     import numpy as np
     import pollux
-    from pollux.ia import IACalculator, CatalogAugmentorShear
+    from pollux.catalog import CatalogAugmentorShear
+    from pollux.ia import CatalogAugmentorIA
 
     # simulation: one snapshot out of two (each one makes a shell)
     reader = pollux.reader.HACCReader(path='/path/to/simulation', run_params='run/indat.params', snap_sub_every_n=2)
@@ -68,9 +69,9 @@ functions to theory. At low resolution it fits on one node; :doc:`pipeline` dist
     snapshots.compute_shear_maps()
 
     # galaxies placed with 1 + 2 delta, with tidal alignments and observed shapes
-    catalog = pollux.catalog.CatalogSourceClusteredPoisson(
+    catalog = pollux.catalog.CatalogClusteredPoisson(
         lensing, tag='b2', nbar_input=1., bias=2.,
-        augmentors=[IACalculator('TA', {'A_TA': 1.}), CatalogAugmentorShear(generate_intrinsic=True, compute_observed=True)])
+        augmentors=[CatalogAugmentorIA('TA', {'A_TA': 1.}), CatalogAugmentorShear(generate_intrinsic=True, compute_observed=True)])
     catalog.generate()
 
     # w(theta), gamma_t and xi_pm, against their predictions (plots in the catalog directory)

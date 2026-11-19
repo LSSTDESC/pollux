@@ -592,7 +592,7 @@ class HACCLightconeReader(Reader):
     """Reader for HACC lightcone particle data.
 
     This reader loads GenericIO lightcone files stored under a ``Lightcones/``
-    directory, for :class:`~pollux.shells.LightconeSlicingBuilder`.
+    directory, for :class:`~pollux.shells.LightconeShellBuilder`.
 
     Unlike the other readers, :meth:`read_sub` returns only the particle positions
     (lightcone files have no sub-volume edges) and takes none of the other readers'

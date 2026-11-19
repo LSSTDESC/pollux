@@ -14,14 +14,14 @@ __all__ = ['PolluxLoader']
 try:
     from .lensing import BornLensingBuilder, SnapshotBornLensingBuilder
     from .reader import SLICSReader, HACCReader, HACCHaloReader, DummyReader
-    from .shells import SnapshotShellBuilder, SnapshotInterpBuilder, LightconeSlicingBuilder
-    from .catalog import CatalogSourceUniform, CatalogSourceClusteredMultinomial, CatalogSourceClusteredPoisson
-    from .ia import IACalculator, CatalogAugmentorShear
+    from .shells import SnapshotShellBuilder, SnapshotInterpShellBuilder, LightconeShellBuilder
+    from .catalog import CatalogUniform, CatalogClusteredMultinomial, CatalogClusteredPoisson, CatalogAugmentorShear
+    from .ia import CatalogAugmentorIA
     from .baryons import BaryonifiedShellBuilder
     __all__ += [
         'BornLensingBuilder', 'SnapshotBornLensingBuilder', 'SLICSReader', 'HACCReader', 'HACCHaloReader', 'DummyReader', 'SnapshotShellBuilder',
-        'SnapshotInterpBuilder', 'LightconeSlicingBuilder', 'CatalogSourceUniform', 'CatalogSourceClusteredMultinomial', 'CatalogSourceClusteredPoisson',
-        'IACalculator', 'CatalogAugmentorShear', 'BaryonifiedShellBuilder'
+        'SnapshotInterpShellBuilder', 'LightconeShellBuilder', 'CatalogUniform', 'CatalogClusteredMultinomial', 'CatalogClusteredPoisson', 'CatalogAugmentorIA',
+        'CatalogAugmentorShear', 'BaryonifiedShellBuilder'
     ]
 except ImportError as e:
     # e.g. on a machine with only the I/O dependencies, to read products

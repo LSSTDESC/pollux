@@ -27,9 +27,9 @@ Three builders make the shells from particles in different ways:
 - :class:`~pollux.shells.SnapshotShellBuilder` fills each shell with the snapshot of the closest time, replicating
   its periodic box as many times as needed. Shell edges are placed between snapshots (``shell_edges_match``: at
   the middle in redshift, scale factor, comoving distance or volume). This is the builder of the pipeline.
-- :class:`~pollux.shells.LightconeSlicingBuilder` slices the lightcone outputs of a simulation
+- :class:`~pollux.shells.LightconeShellBuilder` slices the lightcone outputs of a simulation
   (:class:`~pollux.reader.HACCLightconeReader`), stacking the outputs that overlap each shell.
-- :class:`~pollux.shells.SnapshotInterpBuilder` interpolates the position of each particle between consecutive
+- :class:`~pollux.shells.SnapshotInterpShellBuilder` interpolates the position of each particle between consecutive
   snapshots to where it crosses the lightcone, with orphans for particles that move between sub-volumes.
 
 All share the options of :class:`~pollux.shells.ShellBuilder`. Each particle sub-volume is binned on its own

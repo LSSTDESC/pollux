@@ -1,8 +1,7 @@
-"""Catalog augmentors: intrinsic alignments (:class:`IACalculator`), and reduced shear and observed shapes (:class:`CatalogAugmentorShear`)."""
+"""Intrinsic alignments of the galaxies of catalogs (:class:`CatalogAugmentorIA`)."""
 
 from __future__ import annotations
 
-import inspect
 from typing import Any
 
 import numpy as np
@@ -11,7 +10,7 @@ import pyccl
 from .catalog import CatalogAugmentor
 
 
-class IACalculator(CatalogAugmentor):
+class CatalogAugmentorIA(CatalogAugmentor):
     """Calculator for intrinsic alignment (IA) contributions to galaxy shapes.
 
     This class computes intrinsic alignment shear components from density and
@@ -210,140 +209,3 @@ def _density_factor(delta: np.ndarray, bias: float, delta_b: float) -> np.ndarra
     ok = weight > 0.
     factor[ok] = np.maximum(0., 1. + (bias + delta_b) * delta[ok]) / weight[ok]
     return factor
-
-
-class CatalogAugmentorShear(CatalogAugmentor):
-    """Augmentor that computes shear-derived quantities and shapes.
-
-    Options include reduced shear, magnification, intrinsic shapes, and
-    observed shapes. Intrinsic alignment (IA) shear contributions are included
-    when available and requested.
-
-    Parameters
-    ----------
-    compute_reduced_shear : bool, optional
-        If True, compute reduced shear g1, g2. Default is True.
-    compute_magnification : bool, optional
-        If True, compute magnification mu. Default is False.
-    generate_intrinsic : bool, optional
-        If True, generate random intrinsic shapes e1_int, e2_int. Default is False.
-    compute_observed : bool, optional
-        If True, compute observed shapes by adding lensing and IA contributions
-        to intrinsic shapes. Requires generate_intrinsic=True. Default is False.
-    include_ia : bool, optional
-        If True, include IA contributions in lensed shapes. Default is True.
-    sigma_e : float, optional
-        Standard deviation of the intrinsic ellipticity distribution. Default is 0.3.
-    seed : int or None, optional
-        Extra seed of the intrinsic shapes, if not None. The shapes of the galaxies of
-        tomographic bin ``ikappa`` in shell ``ishell`` are drawn from a stream of their own,
-        seeded by the seed of the realization (given by the catalog generator), ``ikappa`` and
-        ``ishell``: they differ between realizations, and do not depend on how the catalog is
-        split into shells. Default is None.
-    """
-
-    # stream of the random numbers of the intrinsic shapes, distinct from those of the catalog generators
-    _SHAPE_STREAM = 10
-
-    def __init__(
-        self,
-        compute_reduced_shear: bool = True,
-        compute_magnification: bool = False,
-        generate_intrinsic: bool = False,
-        compute_observed: bool = False,
-        include_ia: bool = True,
-        sigma_e: float = 0.3,
-        seed: int | None = None,
-    ) -> None:
-        if compute_observed and not generate_intrinsic:
-            raise ValueError("Intrinsic shapes must be generated to compute observed shapes.")
-
-        self.compute_reduced_shear = compute_reduced_shear
-        self.compute_magnification = compute_magnification
-        self.generate_intrinsic = generate_intrinsic
-        self.compute_observed = compute_observed
-        self.include_ia = include_ia
-        self.sigma_e = sigma_e
-        self.seed = seed
-        self.name = 'shear_derived'
-        self.required_interp_fields = ['kappa', 'gamma1', 'gamma2']
-
-        new_columns = []
-        if compute_reduced_shear:
-            new_columns += ['g1', 'g2']
-        if compute_magnification:
-            new_columns += ['mu']
-        if generate_intrinsic:
-            new_columns += ['e1_int', 'e2_int']
-        if compute_observed:
-            new_columns += ['e1_obs', 'e2_obs']
-        self.new_columns = new_columns
-
-    def config(self) -> dict:
-        """Return the type and parameters of the augmentor, for the ``config.yaml`` of the catalogs.
-
-        The parameters setting the values of the shapes (``sigma_e``, ``include_ia``, ``seed``) are
-        recorded when they differ from their defaults, so that the configurations of catalogs made
-        before they were recorded stay valid.
-        """
-        defaults = inspect.signature(type(self)).parameters
-        return {'type': type(self).__name__, **{k: getattr(self, k) for k in ('sigma_e', 'include_ia', 'seed') if getattr(self, k) != defaults[k].default}}
-
-    def augment_catalog(self, cosmo: pyccl.Cosmology, catalog: dict[str, np.ndarray], ikappa: int = 0, realization_seed: int = 0, **kwargs: Any) -> None:
-        """Compute derived shear quantities and add them to the catalog.
-
-        Parameters
-        ----------
-        cosmo : pyccl.Cosmology
-            Cosmology (unused).
-        catalog : dict[str, np.ndarray]
-            Catalog of one tomographic bin, with ``'kappa'``, ``'gamma1'``,
-            ``'gamma2'`` and ``'idx_shell'``; updated in place.
-        ikappa : int, optional
-            Tomographic-bin index, used to seed the intrinsic shapes.
-        realization_seed : int, optional
-            Seed of the realization (that of the shell builder), used to seed the intrinsic shapes.
-        **kwargs
-            Unused (other augmentor options).
-        """
-        kappa = catalog['kappa']
-        gamma1, gamma2 = catalog['gamma1'], catalog['gamma2']
-
-        if self.compute_magnification:
-            # magnification 1 / ((1 - kappa)^2 - |gamma|^2)
-            catalog['mu'] = 1. / ((1. - kappa)**2 - gamma1**2 - gamma2**2)
-
-        if self.compute_reduced_shear:
-            # reduced shear g = gamma / (1 - kappa)
-            denom = 1. - kappa
-            g1 = gamma1 / denom
-            g2 = gamma2 / denom
-            catalog['g1'] = g1
-            catalog['g2'] = g2
-        else:
-            g1 = gamma1
-            g2 = gamma2
-
-        if self.generate_intrinsic:
-            # Gaussian intrinsic shapes, drawn per shell so that they do not depend on how the generation is split
-            idx_shell = catalog['idx_shell']
-            catalog['e1_int'] = np.empty(len(idx_shell))
-            catalog['e2_int'] = np.empty(len(idx_shell))
-            for ishell in np.unique(idx_shell):
-                w = np.flatnonzero(idx_shell == ishell)
-                rng = np.random.default_rng([realization_seed, self._SHAPE_STREAM, ikappa, ishell] + ([] if self.seed is None else [self.seed]))
-                catalog['e1_int'][w] = rng.normal(0., self.sigma_e, size=len(w))
-                catalog['e2_int'][w] = rng.normal(0., self.sigma_e, size=len(w))
-
-        if self.compute_observed:
-            # source ellipticity, plus the intrinsic alignments if computed
-            e_int = catalog['e1_int'] + 1j * catalog['e2_int']
-            if self.include_ia:
-                for model in ('ta', 'tt'):
-                    if f'e1_ia_{model}' in catalog:
-                        e_int += catalog[f'e1_ia_{model}'] + 1j * catalog[f'e2_ia_{model}']
-            # observed ellipticity e = (g + e_s) / (1 + g* e_s)
-            g = g1 + 1j * g2
-            e_obs = (g + e_int) / (1. + np.conj(g) * e_int)
-            catalog['e1_obs'] = e_obs.real
-            catalog['e2_obs'] = e_obs.imag

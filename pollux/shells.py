@@ -119,7 +119,7 @@ class ShellBuilder(MapBuilder):
         'lightcone' uses reader-provided shell edges (typically already binned).
     add_orphans : bool
         Whether orphan particles should be added in :meth:`combine_maps_subs`.
-        ``False`` here; overridden to ``True`` in :class:`SnapshotInterpBuilder`.
+        ``False`` here; overridden to ``True`` in :class:`SnapshotInterpShellBuilder`.
     smoothed_field_what : str
         ``what`` of the smoothed density maps (``'density'``), see
         :meth:`~pollux.map_builder.MapBuilder.compute_maps_from_alms`.
@@ -846,7 +846,7 @@ class ShellBuilder(MapBuilder):
         Notes
         -----
         Orphan particles are added when ``self.add_orphans`` is True
-        (set on :class:`SnapshotInterpBuilder`; False everywhere else).
+        (set on :class:`SnapshotInterpShellBuilder`; False everywhere else).
         """
         shells = {}
 
@@ -1484,7 +1484,7 @@ class SnapshotShellBuilder(ShellBuilder):
         return out[ishells] if np.isscalar(ishells) else out
 
 
-class LightconeSlicingBuilder(ShellBuilder):
+class LightconeShellBuilder(ShellBuilder):
     """ShellBuilder that slices a lightcone by stacking multiple snapshots.
 
     For each shell, this builder reads multiple lightcone snapshots whose
@@ -1600,7 +1600,7 @@ class LightconeSlicingBuilder(ShellBuilder):
         return shell
 
 
-class SnapshotInterpBuilder(ShellBuilder):
+class SnapshotInterpShellBuilder(ShellBuilder):
     """ShellBuilder that interpolates particle worldlines between snapshots.
 
     This builder treats consecutive snapshot boxes as endpoints of particle

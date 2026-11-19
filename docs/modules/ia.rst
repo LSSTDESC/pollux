@@ -1,7 +1,7 @@
 Intrinsic alignments
 ====================
 
-Catalog augmentors adding intrinsic alignments, reduced shear, magnification and observed ellipticities.
+Catalog augmentor adding intrinsic alignments to the galaxies, from the tidal field of their shell.
 
 .. automodule:: pollux.ia
    :members:

@@ -6,6 +6,7 @@ Also measures their two-point statistics (Cls with NaMaster, two-point functions
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import logging
 import os
@@ -38,7 +39,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class CatalogSourceGenerator(ABC):
+class CatalogGenerator(ABC):
     """Generic generator for mock source-galaxy catalogs for lensing analyses.
 
     This class generates positions and redshifts for galaxies in each tomographic
@@ -236,7 +237,7 @@ class CatalogSourceGenerator(ABC):
             If given, only generate the galaxies of shell ``ishell`` and save them
             as partial catalogs (one per bin), to be combined with
             :meth:`combine_shells`. Only supported by subclasses drawing galaxies
-            shell by shell (:class:`CatalogSourceClusteredPoisson`).
+            shell by shell (:class:`CatalogClusteredPoisson`).
 
         Notes
         -----
@@ -701,16 +702,16 @@ class CatalogSourceGenerator(ABC):
 
     @property
     def ia_tracers(self) -> list[Tracer] | None:
-        """Intrinsic-alignment tracers of the catalog, from its :class:`~pollux.ia.IACalculator` augmentor.
+        """Intrinsic-alignment tracers of the catalog, from its :class:`~pollux.ia.CatalogAugmentorIA` augmentor.
 
         Returns
         -------
         list of pollux.cosmo.Tracer or None
             ``'ia'`` tracers named ``ia_{i}``, with the n(z) of the lensing tracers, the amplitudes
-            of the augmentor (:meth:`~pollux.ia.IACalculator.tracer_amplitudes`, with the bias of
+            of the augmentor (:meth:`~pollux.ia.CatalogAugmentorIA.tracer_amplitudes`, with the bias of
             each bin) and the smoothing of the tidal field; None without intrinsic alignments.
         """
-        calculator = self._ia_calculator
+        calculator = self._ia_augmentor
         if calculator is None:
             return None
         # bias placing the galaxies, none for uniform catalogs (as in the augmentor's density weighting)
@@ -725,22 +726,21 @@ class CatalogSourceGenerator(ABC):
         return tracers
 
     @property
-    def _ia_calculator(self) -> Any:
-        """The :class:`~pollux.ia.IACalculator` augmentor of the catalog, or None without intrinsic alignments."""
-        from .ia import IACalculator  # here: pollux.ia imports this module
-        return next((a for a in self.augmentors if isinstance(a, IACalculator)), None)
+    def _ia_augmentor(self) -> Any:
+        """The :class:`~pollux.ia.CatalogAugmentorIA` augmentor of the catalog, or None without intrinsic alignments."""
+        from .ia import CatalogAugmentorIA  # here: pollux.ia imports this module
+        return next((a for a in self.augmentors if isinstance(a, CatalogAugmentorIA)), None)
 
     @property
     def _shear_augmentor(self) -> Any:
-        """The :class:`~pollux.ia.CatalogAugmentorShear` augmentor of the catalog, or None."""
-        from .ia import CatalogAugmentorShear  # here: pollux.ia imports this module
+        """The :class:`~pollux.catalog.CatalogAugmentorShear` augmentor of the catalog, or None."""
         return next((a for a in self.augmentors if isinstance(a, CatalogAugmentorShear)), None)
 
     def _shape_terms(self, shapes: str) -> tuple[str, ...]:
         """Return the fields summed in the shapes ``shapes``: lensing shear ``'shear'`` and intrinsic alignments ``'ia'``.
 
         The observed ellipticities include the intrinsic alignments if computed, with ``include_ia`` of
-        :class:`~pollux.ia.CatalogAugmentorShear`; their shape noise has zero mean, and their reduced
+        :class:`~pollux.catalog.CatalogAugmentorShear`; their shape noise has zero mean, and their reduced
         shear is approximated by the shear.
         """
         if shapes not in self._SHAPES:
@@ -750,7 +750,7 @@ class CatalogSourceGenerator(ABC):
         augmentor = self._shear_augmentor
         if augmentor is None or not augmentor.compute_observed:
             raise ValueError("shapes='observed' needs a CatalogAugmentorShear with compute_observed=True")
-        return ('shear', 'ia') if augmentor.include_ia and self._ia_calculator is not None else ('shear',)
+        return ('shear', 'ia') if augmentor.include_ia and self._ia_augmentor is not None else ('shear',)
 
     def _shape_columns(self, shapes: str, shear_cols: tuple[str, str]) -> tuple[list[str], list[str]]:
         """Return the catalog columns summed into the two components of the shapes of the shear legs.
@@ -777,10 +777,10 @@ class CatalogSourceGenerator(ABC):
             cols1.append(shear_cols[0])
             cols2.append(shear_cols[1])
         if 'ia' in terms:
-            if self._ia_calculator is None:
+            if self._ia_augmentor is None:
                 raise ValueError(f"shapes={shapes!r} needs an intrinsic-alignment augmentor")
             # e1_ia_*, e2_ia_* of each IA model (TA, TT)
-            ia_cols = self._ia_calculator.new_columns
+            ia_cols = self._ia_augmentor.new_columns
             cols1 += ia_cols[0::2]
             cols2 += ia_cols[1::2]
         return cols1, cols2
@@ -1289,7 +1289,7 @@ class CatalogSourceGenerator(ABC):
             (reduced shear), ``('e1_obs', 'e2_obs')`` (observed ellipticity), or
             any IA-related pair such as ``('e1_ia_ta', 'e2_ia_ta')``. Must be
             present in the loaded catalog (see the augmentors used at generation
-            time, e.g. :class:`~pollux.ia.CatalogAugmentorShear`, :class:`~pollux.ia.IACalculator`).
+            time, e.g. :class:`~pollux.catalog.CatalogAugmentorShear`, :class:`~pollux.ia.CatalogAugmentorIA`).
         subsample : float or None, optional
             If not None, randomly draw (without replacement, seeded by
             ``seed + ikappa``) this fraction of galaxies from each loaded
@@ -2083,7 +2083,7 @@ class CatalogSourceGenerator(ABC):
             ``'shear_plus_ia'``, their sum without shape noise (GG + GI + IG + II for cosmic shear,
             gG + gI for galaxy-galaxy lensing); ``'observed'``, the observed ellipticities ``e1_obs``,
             ``e2_obs`` (with shape noise, of zero mean), predicted as ``'shear_plus_ia'``, or as
-            ``'shear'`` without intrinsic alignments (``include_ia`` of :class:`~pollux.ia.CatalogAugmentorShear`).
+            ``'shear'`` without intrinsic alignments (``include_ia`` of :class:`~pollux.catalog.CatalogAugmentorShear`).
             See :attr:`ia_tracers`.
 
         Returns
@@ -2119,7 +2119,7 @@ class CatalogSourceGenerator(ABC):
             plot_dir: str | None = None,
             *,
             modes: tuple[str, ...] = ('values', 'ratio'),
-            reference: CatalogSourceGenerator | None = None,
+            reference: CatalogGenerator | None = None,
             xlim: tuple[float, float] | None = None,
             shapes: str = 'shear') -> None:
         """Plot the saved two-point functions against their prediction (:meth:`predict_2pt`), one panel per bin pair.
@@ -2132,7 +2132,7 @@ class CatalogSourceGenerator(ABC):
             Plots to make, see :func:`pollux.plotting.plot_pairs` (``'values'``, ``'ratio'``,
             ``'diff_over_error'``, with the measurement errors). Default is ``('values', 'ratio')``.
             Values are multiplied by ``theta``.
-        reference : CatalogSourceGenerator or None, optional
+        reference : CatalogGenerator or None, optional
             Catalog with saved two-point functions (e.g. dark-matter-only, for a
             baryonified catalog): adds the ``'ratio_to_reference'`` mode, the ratio of the
             two catalogs' functions against the ratio of their predictions.
@@ -2230,7 +2230,7 @@ class CatalogSourceGenerator(ABC):
                         fname=os.path.join(plot_dir, fig_name + ('' if mode == 'values' else f'_{mode}') + '.png') if last else None)
 
 
-class CatalogSourceUniform(CatalogSourceGenerator):
+class CatalogUniform(CatalogGenerator):
     """Generate source galaxies uniformly over the footprint.
 
     Redshifts are drawn from the tomographic tracer distributions. Angular
@@ -2245,7 +2245,7 @@ class CatalogSourceUniform(CatalogSourceGenerator):
     nbar_input : float or array-like
         Galaxy surface density in gal/arcmin^2, per bin or for all (required, keyword only).
     interp_fields, interp_method, smooth_fields, smooth_Mpc
-        Interpolation and smoothing of the fields, see :class:`CatalogSourceGenerator`.
+        Interpolation and smoothing of the fields, see :class:`CatalogGenerator`.
     augmentors : list, optional
         List of augmentors. Default is empty list.
     """
@@ -2293,7 +2293,7 @@ class CatalogSourceUniform(CatalogSourceGenerator):
         catalog[ikappa]['dec'] = dec
 
 
-class CatalogSourceClustered(CatalogSourceGenerator):
+class CatalogClustered(CatalogGenerator):
     """Base class for clustered source galaxy catalogs.
 
     This class provides common functionality for generating clustered catalogs
@@ -2322,11 +2322,11 @@ class CatalogSourceClustered(CatalogSourceGenerator):
           linear bias ``b`` on large scales.
     interp_fields, interp_method, smooth_fields, smooth_Mpc : optional
         Interpolation and smoothing of the fields (including the density used to
-        place galaxies, ``'positions'``), see :class:`CatalogSourceGenerator`.
+        place galaxies, ``'positions'``), see :class:`CatalogGenerator`.
     augmentors : list, optional
         List of augmentors applied after map interpolation. Default is empty list.
     cls_b, cls_lmax_mask : optional
-        Binning of the catalog angular power spectra, see :class:`CatalogSourceGenerator`.
+        Binning of the catalog angular power spectra, see :class:`CatalogGenerator`.
     """
 
     BIAS_MODELS = ('linear', 'power_law')
@@ -2433,13 +2433,13 @@ class CatalogSourceClustered(CatalogSourceGenerator):
         return np.clip(weight, 0., None)
 
 
-class CatalogSourceClusteredMultinomial(CatalogSourceClustered):
+class CatalogClusteredMultinomial(CatalogClustered):
     """Generate clustered source galaxies using multinomial sampling.
 
     The total number of galaxies per tomographic bin is fixed, and positions are
     drawn per shell from a multinomial distribution over pixels, proportional to
     the relative density of the bias model (``1 + b * delta`` by default, where ``delta``
-    is the density contrast field, see :class:`CatalogSourceClustered`).
+    is the density contrast field, see :class:`CatalogClustered`).
 
     Parameters
     ----------
@@ -2450,9 +2450,9 @@ class CatalogSourceClusteredMultinomial(CatalogSourceClustered):
     nbar_input : float or array-like
         Galaxy surface density in gal/arcmin^2, per bin or for all (required, keyword only).
     bias, bias_model : optional
-        Galaxy bias per tomographic bin, and bias model, see :class:`CatalogSourceClustered`.
+        Galaxy bias per tomographic bin, and bias model, see :class:`CatalogClustered`.
     interp_fields, interp_method, smooth_fields, smooth_Mpc
-        Interpolation and smoothing of the fields, see :class:`CatalogSourceGenerator`.
+        Interpolation and smoothing of the fields, see :class:`CatalogGenerator`.
     augmentors : list, optional
         List of augmentors. Default is empty list.
     """
@@ -2521,12 +2521,12 @@ class CatalogSourceClusteredMultinomial(CatalogSourceClustered):
                 catalog[ikappa]['dec'][w] = dec
 
 
-class CatalogSourceClusteredPoisson(CatalogSourceClustered):
+class CatalogClusteredPoisson(CatalogClustered):
     r"""Generate clustered source galaxies using Poisson sampling.
 
     In each shell and tomographic bin, the number of galaxies per pixel is drawn
     as a Poisson random variable with mean ``<nbar>`` times the relative density of
-    the bias model (``1 + b * delta`` by default, see :class:`CatalogSourceClustered`).
+    the bias model (``1 + b * delta`` by default, see :class:`CatalogClustered`).
     The total number of galaxies therefore fluctuates.
 
     Parameters
@@ -2538,9 +2538,9 @@ class CatalogSourceClusteredPoisson(CatalogSourceClustered):
     nbar_input : float or array-like
         Galaxy surface density in gal/arcmin^2, per bin or for all (required, keyword only).
     bias, bias_model : optional
-        Galaxy bias per tomographic bin, and bias model, see :class:`CatalogSourceClustered`.
+        Galaxy bias per tomographic bin, and bias model, see :class:`CatalogClustered`.
     interp_fields, interp_method, smooth_fields, smooth_Mpc
-        Interpolation and smoothing of the fields, see :class:`CatalogSourceGenerator`.
+        Interpolation and smoothing of the fields, see :class:`CatalogGenerator`.
     augmentors : list, optional
         List of augmentors. Default is empty list.
 
@@ -2776,3 +2776,140 @@ class CatalogAugmentor(ABC):
     def config(self) -> dict:
         """Return the type and parameters of the augmentor, for the ``config.yaml`` of the catalogs."""
         return {'type': type(self).__name__}
+
+
+class CatalogAugmentorShear(CatalogAugmentor):
+    """Augmentor that computes shear-derived quantities and shapes.
+
+    Options include reduced shear, magnification, intrinsic shapes, and
+    observed shapes. Intrinsic alignment (IA) shear contributions are included
+    when available and requested.
+
+    Parameters
+    ----------
+    compute_reduced_shear : bool, optional
+        If True, compute reduced shear g1, g2. Default is True.
+    compute_magnification : bool, optional
+        If True, compute magnification mu. Default is False.
+    generate_intrinsic : bool, optional
+        If True, generate random intrinsic shapes e1_int, e2_int. Default is False.
+    compute_observed : bool, optional
+        If True, compute observed shapes by adding lensing and IA contributions
+        to intrinsic shapes. Requires generate_intrinsic=True. Default is False.
+    include_ia : bool, optional
+        If True, include IA contributions in lensed shapes. Default is True.
+    sigma_e : float, optional
+        Standard deviation of the intrinsic ellipticity distribution. Default is 0.3.
+    seed : int or None, optional
+        Extra seed of the intrinsic shapes, if not None. The shapes of the galaxies of
+        tomographic bin ``ikappa`` in shell ``ishell`` are drawn from a stream of their own,
+        seeded by the seed of the realization (given by the catalog generator), ``ikappa`` and
+        ``ishell``: they differ between realizations, and do not depend on how the catalog is
+        split into shells. Default is None.
+    """
+
+    # stream of the random numbers of the intrinsic shapes, distinct from those of the catalog generators
+    _SHAPE_STREAM = 10
+
+    def __init__(
+        self,
+        compute_reduced_shear: bool = True,
+        compute_magnification: bool = False,
+        generate_intrinsic: bool = False,
+        compute_observed: bool = False,
+        include_ia: bool = True,
+        sigma_e: float = 0.3,
+        seed: int | None = None,
+    ) -> None:
+        if compute_observed and not generate_intrinsic:
+            raise ValueError("Intrinsic shapes must be generated to compute observed shapes.")
+
+        self.compute_reduced_shear = compute_reduced_shear
+        self.compute_magnification = compute_magnification
+        self.generate_intrinsic = generate_intrinsic
+        self.compute_observed = compute_observed
+        self.include_ia = include_ia
+        self.sigma_e = sigma_e
+        self.seed = seed
+        self.name = 'shear_derived'
+        self.required_interp_fields = ['kappa', 'gamma1', 'gamma2']
+
+        new_columns = []
+        if compute_reduced_shear:
+            new_columns += ['g1', 'g2']
+        if compute_magnification:
+            new_columns += ['mu']
+        if generate_intrinsic:
+            new_columns += ['e1_int', 'e2_int']
+        if compute_observed:
+            new_columns += ['e1_obs', 'e2_obs']
+        self.new_columns = new_columns
+
+    def config(self) -> dict:
+        """Return the type and parameters of the augmentor, for the ``config.yaml`` of the catalogs.
+
+        The parameters setting the values of the shapes (``sigma_e``, ``include_ia``, ``seed``) are
+        recorded when they differ from their defaults, so that the configurations of catalogs made
+        before they were recorded stay valid.
+        """
+        defaults = inspect.signature(type(self)).parameters
+        return {'type': type(self).__name__, **{k: getattr(self, k) for k in ('sigma_e', 'include_ia', 'seed') if getattr(self, k) != defaults[k].default}}
+
+    def augment_catalog(self, cosmo: pyccl.Cosmology, catalog: dict[str, np.ndarray], ikappa: int = 0, realization_seed: int = 0, **kwargs: Any) -> None:
+        """Compute derived shear quantities and add them to the catalog.
+
+        Parameters
+        ----------
+        cosmo : pyccl.Cosmology
+            Cosmology (unused).
+        catalog : dict[str, np.ndarray]
+            Catalog of one tomographic bin, with ``'kappa'``, ``'gamma1'``,
+            ``'gamma2'`` and ``'idx_shell'``; updated in place.
+        ikappa : int, optional
+            Tomographic-bin index, used to seed the intrinsic shapes.
+        realization_seed : int, optional
+            Seed of the realization (that of the shell builder), used to seed the intrinsic shapes.
+        **kwargs
+            Unused (other augmentor options).
+        """
+        kappa = catalog['kappa']
+        gamma1, gamma2 = catalog['gamma1'], catalog['gamma2']
+
+        if self.compute_magnification:
+            # magnification 1 / ((1 - kappa)^2 - |gamma|^2)
+            catalog['mu'] = 1. / ((1. - kappa)**2 - gamma1**2 - gamma2**2)
+
+        if self.compute_reduced_shear:
+            # reduced shear g = gamma / (1 - kappa)
+            denom = 1. - kappa
+            g1 = gamma1 / denom
+            g2 = gamma2 / denom
+            catalog['g1'] = g1
+            catalog['g2'] = g2
+        else:
+            g1 = gamma1
+            g2 = gamma2
+
+        if self.generate_intrinsic:
+            # Gaussian intrinsic shapes, drawn per shell so that they do not depend on how the generation is split
+            idx_shell = catalog['idx_shell']
+            catalog['e1_int'] = np.empty(len(idx_shell))
+            catalog['e2_int'] = np.empty(len(idx_shell))
+            for ishell in np.unique(idx_shell):
+                w = np.flatnonzero(idx_shell == ishell)
+                rng = np.random.default_rng([realization_seed, self._SHAPE_STREAM, ikappa, ishell] + ([] if self.seed is None else [self.seed]))
+                catalog['e1_int'][w] = rng.normal(0., self.sigma_e, size=len(w))
+                catalog['e2_int'][w] = rng.normal(0., self.sigma_e, size=len(w))
+
+        if self.compute_observed:
+            # source ellipticity, plus the intrinsic alignments if computed
+            e_int = catalog['e1_int'] + 1j * catalog['e2_int']
+            if self.include_ia:
+                for model in ('ta', 'tt'):
+                    if f'e1_ia_{model}' in catalog:
+                        e_int += catalog[f'e1_ia_{model}'] + 1j * catalog[f'e2_ia_{model}']
+            # observed ellipticity e = (g + e_s) / (1 + g* e_s)
+            g = g1 + 1j * g2
+            e_obs = (g + e_int) / (1. + np.conj(g) * e_int)
+            catalog['e1_obs'] = e_obs.real
+            catalog['e2_obs'] = e_obs.imag

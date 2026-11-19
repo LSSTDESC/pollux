@@ -8,15 +8,15 @@ chaining the tasks, with a YAML configuration file.
 Steps
 -----
 
-1. **Shells**: particles of each sub-volume are binned in count maps (``construct_shell``), then summed per shell (``construct_full_shells``).
-2. **Haloes and baryonification** (optional): halo catalogs per shell (``construct_halo_catalog``), used to baryonify the shells (``construct_maps``, with a baryon model).
-3. **Lensing**: convergence maps summing weighted shells, per tomographic bin and per shell (``construct_kappas``), and their spherical harmonics (``construct_kappas_alms``).
+1. **Shells**: particles of each sub-volume are binned in count maps (``construct_shell_sub``), then summed per shell (``combine_shell_subs``).
+2. **Haloes and baryonification** (optional): halo catalogs per shell (``construct_halo_catalog``), used to baryonify the shells (``construct_baryonified_shell``, with a baryon model).
+3. **Lensing**: convergence maps summing weighted shells, per tomographic bin and per shell (``construct_kappa_map``), and their spherical harmonics (``compute_kappa_alms``).
 4. **Fields of the catalogs**: shear (``compute_shear_maps``), tidal (``compute_tidal_maps``) and smoothed density and convergence maps, as needed by the catalog (``catalog_map_tasks``).
-5. **Catalogs**: tomographic source catalogs (``construct_source_catalog``, or per shell with ``construct_source_catalog_shell`` then ``merge_source_catalog``).
-6. **Statistics**: Cls of the shells, convergence maps and catalogs (``compute_shells_cls``, ``compute_kappas_cls``, ``compute_catalog_cls``) and 2pt functions of the catalogs (``compute_catalog_2pt``), with the lensing shear, the intrinsic alignments and their sum; plots compare them to their predictions (``plot_catalog_cls``, ``plot_catalog_2pt``).
+5. **Catalogs**: tomographic source catalogs (``construct_catalog``, or per shell with ``construct_catalog_shell`` then ``merge_catalog``).
+6. **Statistics**: Cls of the shells, convergence maps and catalogs (``compute_shell_cls``, ``compute_kappa_cls``, ``compute_catalog_cls``) and 2pt functions of the catalogs (``compute_catalog_2pt``), with the lensing shear, the intrinsic alignments and their sum; plots compare them to their predictions (``plot_catalog_cls``, ``plot_catalog_2pt``).
 
 The tasks use :class:`~pollux.reader.HACCReader`, :class:`~pollux.shells.SnapshotShellBuilder` and
-:class:`~pollux.catalog.CatalogSourceClusteredPoisson`; the other readers, builders and catalogs are used from
+:class:`~pollux.catalog.CatalogClusteredPoisson`; the other readers, builders and catalogs are used from
 Python directly.
 
 Tasks
@@ -25,8 +25,8 @@ Tasks
 Each task makes one product (or part of one), and takes the options of the objects it needs as dictionaries:
 ``reader_dict`` (:class:`~pollux.reader.HACCReader`), ``shell_dict``
 (:class:`~pollux.shells.SnapshotShellBuilder`), ``lensing_dict`` (:class:`~pollux.lensing.BornLensingBuilder`, or
-None for one source plane per shell), ``ia_dict`` (:class:`~pollux.ia.IACalculator`), ``catalog_dict``
-(:class:`~pollux.catalog.CatalogSourceClusteredPoisson`), ``baryon_dict`` (the tag, halo mass and profile
+None for one source plane per shell), ``ia_dict`` (:class:`~pollux.ia.CatalogAugmentorIA`), ``catalog_dict``
+(:class:`~pollux.catalog.CatalogClusteredPoisson`), ``baryon_dict`` (the tag, halo mass and profile
 parameters of :class:`~pollux.baryons.BaryonifiedShellBuilder`, or None for dark matter only) and ``stats_dict``.
 Workers rebuild the objects from these dictionaries, so tasks only pass small arguments, and the products go
 through the disk. Dependencies are the ``inputs`` of each task: the futures of the tasks making its inputs.

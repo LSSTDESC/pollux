@@ -12,10 +12,10 @@ Sampling
 Redshifts are drawn from the redshift distribution of the bin, which assigns each galaxy to a shell. Positions are
 then drawn by one of:
 
-- :class:`~pollux.catalog.CatalogSourceUniform`: uniformly over the footprint;
-- :class:`~pollux.catalog.CatalogSourceClusteredMultinomial`: from the density of the galaxy's shell, with a fixed
+- :class:`~pollux.catalog.CatalogUniform`: uniformly over the footprint;
+- :class:`~pollux.catalog.CatalogClusteredMultinomial`: from the density of the galaxy's shell, with a fixed
   number of galaxies per bin;
-- :class:`~pollux.catalog.CatalogSourceClusteredPoisson`: a Poisson number of galaxies per pixel and shell, of mean
+- :class:`~pollux.catalog.CatalogClusteredPoisson`: a Poisson number of galaxies per pixel and shell, of mean
   set by the density, so that the total number fluctuates. This one can be generated shell by shell
   (``generate(ishell=...)``), then merged (``combine_shells``), to split the work.
 
@@ -83,9 +83,9 @@ Augmentors
 
 Augmentors add columns computed from the others:
 
-- :class:`~pollux.ia.IACalculator`: intrinsic alignments from the tidal field (columns ``e1_ia_ta``, ``e2_ia_ta``,
+- :class:`~pollux.ia.CatalogAugmentorIA`: intrinsic alignments from the tidal field (columns ``e1_ia_ta``, ``e2_ia_ta``,
   and ``e1_ia_tt``, ``e2_ia_tt``), see :doc:`intrinsic_alignments`;
-- :class:`~pollux.ia.CatalogAugmentorShear`: reduced shear ``g1``, ``g2``, magnification ``mu``, intrinsic shapes
+- :class:`~pollux.catalog.CatalogAugmentorShear`: reduced shear ``g1``, ``g2``, magnification ``mu``, intrinsic shapes
   ``e1_int``, ``e2_int`` (Gaussian of dispersion ``sigma_e``), and observed shapes ``e1_obs``, ``e2_obs``: the
   intrinsic shape plus the intrinsic alignments, sheared by the reduced shear.
 

@@ -278,7 +278,7 @@ class PolluxLoader:
         """Return the directory of the catalogs (``catalogs/{nz}/{catalog_tag}``)."""
         return os.path.join(self.matter_dir, 'catalogs', self.nz, self.catalog_tag or 'default')
 
-    def load_source_catalog(self, ibin: int) -> fits.HDUList:
+    def load_catalog(self, ibin: int) -> fits.HDUList:
         """Open the source catalog of one tomographic bin.
 
         Parameters

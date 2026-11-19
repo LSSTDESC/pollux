@@ -42,7 +42,7 @@ nodes_per_block = 1
 #               must exceed the executor's longest task. None: no draining (tasks
 #               still running at the walltime are killed and retried), for short tasks.
 EXECUTORS = {
-    # 16 threads per task: about 12% fewer core-hours than uncapped for construct_shell, whose 32 tasks would want 320 threads on 256
+    # 16 threads per task: about 12% fewer core-hours than uncapped for construct_shell_sub, whose 32 tasks would want 320 threads on 256
     'default':
         dict(
             workers=32,

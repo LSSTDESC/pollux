@@ -41,7 +41,7 @@ Module Descriptions
    Generates tomographic galaxy catalogs from lightcone shells using uniform or clustered sampling methods, measures their statistics and predicts them.
 
 **Intrinsic alignments** (:mod:`pollux.ia`)
-   Catalog augmentors adding intrinsic alignments, reduced shear, magnification and observed ellipticities.
+   Catalog augmentor adding intrinsic alignments to the galaxies, from the tidal field of their shell.
 
 **Utils** (:mod:`pollux.utils`)
    Helper functions, by theme: numerics (integration, grids, sampling), sky (coordinates, maps of points, masks) and NaMaster binnings.

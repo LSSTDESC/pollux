@@ -54,17 +54,18 @@ def _make_lensing(builder, lensing_dict):
     return pollux.lensing.BornLensingBuilder(builder, **lensing_dict)
 
 
-def _make_source_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict):
+def _make_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict):
     import pollux
-    from pollux.ia import IACalculator, CatalogAugmentorShear
+    from pollux.catalog import CatalogAugmentorShear
+    from pollux.ia import CatalogAugmentorIA
     lensing = _make_lensing(_make_shell_builder(reader_dict, shell_dict, baryon_dict), lensing_dict)
-    ia = IACalculator(**ia_dict)
+    ia = CatalogAugmentorIA(**ia_dict)
     shear_aug = CatalogAugmentorShear(
         compute_reduced_shear=True,
         generate_intrinsic=True,
         compute_observed=True,
     )
-    return pollux.catalog.CatalogSourceClusteredPoisson(
+    return pollux.catalog.CatalogClusteredPoisson(
         lensing,
         augmentors=[ia, shear_aug],
         **catalog_dict,
@@ -109,7 +110,7 @@ def _load_pairs(fnames):
 
 
 @python_app(executors=['default'])
-def construct_shell(ijob, reader_dict, shell_dict, inputs=[]):
+def construct_shell_sub(ijob, reader_dict, shell_dict, inputs=[]):
     import pollux
     reader = pollux.reader.HACCReader(**reader_dict)
     builder = pollux.shells.SnapshotShellBuilder(reader, **shell_dict)
@@ -117,7 +118,7 @@ def construct_shell(ijob, reader_dict, shell_dict, inputs=[]):
 
 
 @python_app(executors=['default'])
-def construct_orphans(ishell, reader_dict, shell_dict, inputs=[]):
+def construct_shell_orphans(ishell, reader_dict, shell_dict, inputs=[]):
     import pollux
     reader = pollux.reader.HACCReader(**reader_dict)
     builder = pollux.shells.SnapshotShellBuilder(reader, **shell_dict)
@@ -125,7 +126,7 @@ def construct_orphans(ishell, reader_dict, shell_dict, inputs=[]):
 
 
 @python_app(executors=['default'])
-def construct_full_shells(ishell, reader_dict, shell_dict, inputs=[]):
+def combine_shell_subs(ishell, reader_dict, shell_dict, inputs=[]):
     import pollux
     reader = pollux.reader.HACCReader(**reader_dict)
     builder = pollux.shells.SnapshotShellBuilder(reader, **shell_dict)
@@ -169,7 +170,7 @@ def construct_halo_catalog(ishell, reader_dict, shell_dict, baryon_dict, inputs=
 
 
 @python_app(executors=['highmem'])
-def construct_maps(ishell, reader_dict, shell_dict, baryon_dict=None, inputs=[]):
+def construct_baryonified_shell(ishell, reader_dict, shell_dict, baryon_dict=None, inputs=[]):
     _make_shell_builder(reader_dict, shell_dict, baryon_dict).construct_maps(ishell)
     _free_memory()
 
@@ -180,12 +181,12 @@ def construct_maps(ishell, reader_dict, shell_dict, baryon_dict=None, inputs=[])
 
 
 @python_app(executors=['default'])
-def construct_kappas(ikappa, reader_dict, shell_dict, lensing_dict, baryon_dict=None, inputs=[]):
+def construct_kappa_map(ikappa, reader_dict, shell_dict, lensing_dict, baryon_dict=None, inputs=[]):
     _make_lensing(_make_shell_builder(reader_dict, shell_dict, baryon_dict), lensing_dict).construct_maps(ikappa)
 
 
 @python_app(executors=['heavy'])
-def construct_kappas_alms(ikappa, reader_dict, shell_dict, lensing_dict, baryon_dict=None, inputs=[]):
+def compute_kappa_alms(ikappa, reader_dict, shell_dict, lensing_dict, baryon_dict=None, inputs=[]):
     _make_lensing(_make_shell_builder(reader_dict, shell_dict, baryon_dict), lensing_dict).compute_alms(ikappa)
     _free_memory()
 
@@ -202,7 +203,7 @@ def plot_kappa_maps(reader_dict, shell_dict, lensing_dict, baryon_dict=None, inp
 
 
 @python_app(executors=['heavy'])
-def compute_shells_alms(ishell, reader_dict, shell_dict, baryon_dict=None, inputs=[]):
+def compute_shell_alms(ishell, reader_dict, shell_dict, baryon_dict=None, inputs=[]):
     _make_shell_builder(reader_dict, shell_dict, baryon_dict).compute_alms(ishell)
     _free_memory()
 
@@ -223,21 +224,21 @@ def compute_tidal_maps(ishell, reader_dict, shell_dict, smooth_Mpc, save_field_m
 
 
 @python_app(executors=['heavy'])
-def compute_smoothed_density_maps(ishell, reader_dict, shell_dict, smooth_Mpc, baryon_dict=None, inputs=[]):
+def compute_smoothed_density_map(ishell, reader_dict, shell_dict, smooth_Mpc, baryon_dict=None, inputs=[]):
     # smoothed density map, when its smoothing differs from the tidal field's
     _make_shell_builder(reader_dict, shell_dict, baryon_dict).compute_maps_from_alms(ishell, smooth_Mpc=smooth_Mpc)
     _free_memory()
 
 
 @python_app(executors=['heavy'])
-def compute_smoothed_kappa_maps(ikappa, reader_dict, shell_dict, lensing_dict, smooth_Mpc, baryon_dict=None, inputs=[]):
+def compute_smoothed_kappa_map(ikappa, reader_dict, shell_dict, lensing_dict, smooth_Mpc, baryon_dict=None, inputs=[]):
     # smoothed convergence map, when its smoothing differs from the shear's
     _make_lensing(_make_shell_builder(reader_dict, shell_dict, baryon_dict), lensing_dict).compute_maps_from_alms(ikappa, smooth_Mpc=smooth_Mpc)
     _free_memory()
 
 
 def smoothing_plan(catalog_dict, nshells):
-    """Return, per shell, the smoothed maps needed by a catalog (see CatalogSourceGenerator smooth_fields/smooth_Mpc).
+    """Return, per shell, the smoothed maps needed by a catalog (see CatalogGenerator smooth_fields/smooth_Mpc).
 
     Each is a dict with the smoothing of the tidal and shear maps ('tidal', 'shear', None if not smoothed),
     whether these tasks also save the smoothed density/convergence ('density_with_tidal', 'kappa_with_shear'),
@@ -245,7 +246,7 @@ def smoothing_plan(catalog_dict, nshells):
     """
     import inspect
     import pollux
-    cls = pollux.catalog.CatalogSourceGenerator
+    cls = pollux.catalog.CatalogGenerator
     default_fields = inspect.signature(cls.__init__).parameters['smooth_fields'].default
     scales = cls.smoothing_scales(catalog_dict.get('smooth_fields', default_fields), catalog_dict.get('smooth_Mpc'), nshells)
     plans = []
@@ -287,11 +288,11 @@ def catalog_map_tasks(nshells, reader_dict, shell_dict, catalog_dict, kappa_alms
                 inputs=shell_inputs(ishell)),
         ]
         futures += [
-            compute_smoothed_density_maps(ishell, reader_dict, shell_dict, s, baryon_dict=baryon_dict, inputs=shell_inputs(ishell))
+            compute_smoothed_density_map(ishell, reader_dict, shell_dict, s, baryon_dict=baryon_dict, inputs=shell_inputs(ishell))
             for s in plan['density_extra']
         ]
         futures += [
-            compute_smoothed_kappa_maps(ishell, reader_dict, shell_dict, None, s, baryon_dict=baryon_dict, inputs=[kappa_alms[ishell]])
+            compute_smoothed_kappa_map(ishell, reader_dict, shell_dict, None, s, baryon_dict=baryon_dict, inputs=[kappa_alms[ishell]])
             for s in plan['kappa_extra']
         ]
         per_shell.append(futures)
@@ -303,18 +304,18 @@ def catalog_map_tasks(nshells, reader_dict, shell_dict, catalog_dict, kappa_alms
 
 
 @python_app(executors=['heavy'])
-def construct_source_catalog(ikappa, reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict=None, inputs=[]):
+def construct_catalog(ikappa, reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict=None, inputs=[]):
     # catalog of one tomographic bin, unless saved
-    catalog = _make_source_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict)
+    catalog = _make_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict)
     if not os.path.exists(catalog.get_fname(ikappa)):
         catalog.generate(ikappa)
     _free_memory()
 
 
 @python_app(executors=['highmem'])
-def construct_source_catalog_shell(ishell, reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict=None, inputs=[]):
+def construct_catalog_shell(ishell, reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict=None, inputs=[]):
     # galaxies of one shell, for all tomographic bins (partial catalogs), unless saved or already merged
-    catalog = _make_source_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict)
+    catalog = _make_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict)
     bins = range(catalog.lensing.nmaps)
     if not (all(os.path.exists(catalog.get_fname(i, ishell=ishell)) for i in bins) or all(os.path.exists(catalog.get_fname(i)) for i in bins)):
         catalog.generate(ishell=ishell)
@@ -322,9 +323,9 @@ def construct_source_catalog_shell(ishell, reader_dict, shell_dict, lensing_dict
 
 
 @python_app(executors=['highmem'])
-def merge_source_catalog(ikappa, reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict=None, inputs=[]):
-    # inputs contains the construct_source_catalog_shell futures of all shells; skipped if the catalog is saved
-    catalog = _make_source_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict)
+def merge_catalog(ikappa, reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict=None, inputs=[]):
+    # inputs contains the construct_catalog_shell futures of all shells; skipped if the catalog is saved
+    catalog = _make_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict)
     if not os.path.exists(catalog.get_fname(ikappa)):
         catalog.combine_shells(ikappa)
     _free_memory()
@@ -335,7 +336,7 @@ def merge_source_catalog(ikappa, reader_dict, shell_dict, lensing_dict, ia_dict,
 
 
 @python_app(executors=['highmem'])
-def compute_shells_cls_sub(pair, reader_dict, shell_dict, baryon_dict=None, inputs=[]):
+def compute_shell_cls_sub(pair, reader_dict, shell_dict, baryon_dict=None, inputs=[]):
     # Cls of one (i, j) pair of shells, saved to an intermediate file (its name is returned; None if the Cls are saved)
     from pollux.utils.binning import binning_id
     builder = _make_shell_builder(reader_dict, shell_dict, baryon_dict)
@@ -348,8 +349,8 @@ def compute_shells_cls_sub(pair, reader_dict, shell_dict, baryon_dict=None, inpu
 
 
 @python_app(executors=['default'])
-def compute_shells_cls(reader_dict, shell_dict, baryon_dict=None, inputs=[]):
-    # inputs contains the files of the (ell, cl) of compute_shells_cls_sub, saved unless the Cls already are
+def compute_shell_cls(reader_dict, shell_dict, baryon_dict=None, inputs=[]):
+    # inputs contains the files of the (ell, cl) of compute_shell_cls_sub, saved unless the Cls already are
     builder = _make_shell_builder(reader_dict, shell_dict, baryon_dict)
     if os.path.exists(builder.get_fname(what='cls', format='fits')):
         return
@@ -361,14 +362,14 @@ def compute_shells_cls(reader_dict, shell_dict, baryon_dict=None, inputs=[]):
 
 
 @python_app(executors=['highmem'])
-def plot_shells_cls(reader_dict, shell_dict, baryon_dict=None, inputs=[]):
+def plot_shell_cls(reader_dict, shell_dict, baryon_dict=None, inputs=[]):
     # auto-spectra of the shells against their predictions ({save_dir}/plots)
     _make_shell_builder(reader_dict, shell_dict, baryon_dict).plot_cls(auto_only=True, logy=True)
     _free_memory()
 
 
 @python_app(executors=['highmem'])
-def compute_kappas_cls_sub(pair, reader_dict, shell_dict, lensing_dict, baryon_dict=None, inputs=[]):
+def compute_kappa_cls_sub(pair, reader_dict, shell_dict, lensing_dict, baryon_dict=None, inputs=[]):
     # Cls of one (i, j) pair of convergence maps, saved to an intermediate file (its name is returned; None if the Cls
     # are saved)
     from pollux.utils.binning import binning_id
@@ -382,8 +383,8 @@ def compute_kappas_cls_sub(pair, reader_dict, shell_dict, lensing_dict, baryon_d
 
 
 @python_app(executors=['default'])
-def compute_kappas_cls(reader_dict, shell_dict, lensing_dict, baryon_dict=None, inputs=[]):
-    # inputs contains the files of the (ell, cl) of compute_kappas_cls_sub, saved unless the Cls already are
+def compute_kappa_cls(reader_dict, shell_dict, lensing_dict, baryon_dict=None, inputs=[]):
+    # inputs contains the files of the (ell, cl) of compute_kappa_cls_sub, saved unless the Cls already are
     lensing = _make_lensing(_make_shell_builder(reader_dict, shell_dict, baryon_dict), lensing_dict)
     if os.path.exists(lensing.get_fname(what='cls', format='fits')):
         return
@@ -395,7 +396,7 @@ def compute_kappas_cls(reader_dict, shell_dict, lensing_dict, baryon_dict=None, 
 
 
 @python_app(executors=['highmem'])
-def plot_kappas_cls(reader_dict, shell_dict, lensing_dict, baryon_dict=None, inputs=[]):
+def plot_kappa_cls(reader_dict, shell_dict, lensing_dict, baryon_dict=None, inputs=[]):
     # spectra of the convergence maps against their predictions ({save_dir}/plots): auto-spectra only for the
     # per-shell snapshot maps (lensing_dict None; all pairs would be too many)
     lensing = _make_lensing(_make_shell_builder(reader_dict, shell_dict, baryon_dict), lensing_dict)
@@ -410,9 +411,9 @@ def plot_kappas_cls(reader_dict, shell_dict, lensing_dict, baryon_dict=None, inp
 @python_app(executors=['heavy'])
 def compute_catalog_2pt_sub(stat, pair, reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, stats_dict, baryon_dict=None, shapes='shear', inputs=[]):
     # 2pt function of one statistic ('clustering', 'shear' or 'shear_clustering') for one bin pair, with the
-    # shapes of the shear legs ('shear', 'ia', 'shear_plus_ia' or 'observed', see CatalogSourceGenerator.compute_2pt),
+    # shapes of the shear legs ('shear', 'ia', 'shear_plus_ia' or 'observed', see CatalogGenerator.compute_2pt),
     # saved to an intermediate file (its name is returned; None if the 2pt functions of these shapes are saved)
-    catalog = _make_source_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict)
+    catalog = _make_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict)
     if os.path.exists(catalog._2pt_fname(shapes)):
         return None
     fname = _pair_fname(catalog._intermediate_dir, f'2pt_{shapes}', pair, [stats_dict['common'], stats_dict['2pt']], stat=stat)
@@ -427,7 +428,7 @@ def compute_catalog_2pt_sub(stat, pair, reader_dict, shell_dict, lensing_dict, i
 def compute_catalog_2pt(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict=None, shapes='shear', inputs=[]):
     # inputs contains the files of the (theta, xi, dxi) of compute_catalog_2pt_sub, saved to the file of the shapes
     # unless it exists
-    catalog = _make_source_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict)
+    catalog = _make_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict)
     if os.path.exists(catalog._2pt_fname(shapes)):
         return
     theta_out, xi_out, dxi_out = {}, {}, {}
@@ -445,10 +446,10 @@ def plot_catalog_2pt(
     # builder (S19-corrected with baryon_dict); with_dmo_reference adds the ratio to the dark-matter-only catalog's 2pt
     # functions, xlim are the x limits (the edges of the binning, theta_min and theta_max), and shapes those of the
     # shear legs (with 'ia', also GI, once the 'shear' and 'shear_plus_ia' ones are measured)
-    catalog = _make_source_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict)
+    catalog = _make_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict)
     reference = None
     if baryon_dict is not None and with_dmo_reference:
-        reference = _make_source_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, None)
+        reference = _make_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, None)
     catalog.plot_2pt(reference=reference, xlim=xlim, shapes=shapes)
     _free_memory()
 
@@ -456,7 +457,7 @@ def plot_catalog_2pt(
 @python_app(executors=['heavy'])
 def compute_catalog_cls_wsp(stat, reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, stats_dict, baryon_dict=None, inputs=[]):
     # workspace shared by all bin pairs of one statistic, from the footprint (compute_cls and predict_cls with shared_wsp=True)
-    catalog = _make_source_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict)
+    catalog = _make_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict)
     if not os.path.exists(catalog._wsp_fname(stat)):
         catalog.get_wsp(stat)
     _free_memory()
@@ -466,7 +467,7 @@ def compute_catalog_cls_wsp(stat, reader_dict, shell_dict, lensing_dict, ia_dict
 def compute_catalog_alms(ikappa, reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, stats_dict, baryon_dict=None, inputs=[]):
     # catalog fields (a_lm) of one tomographic bin for the Cls, saved as intermediate files (skipped if saved, or if the
     # Cls are saved): the Cls of all its pairs read them instead of loading the catalog again
-    catalog = _make_source_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict)
+    catalog = _make_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict)
     if not os.path.exists(catalog._cls_fname()):
         options = {k: v for k, v in {**stats_dict['common'], **stats_dict['cls']}.items() if k not in ('shared_wsp', 'auto_only')}
         catalog.compute_alms(ikappa, **options)
@@ -478,7 +479,7 @@ def compute_catalog_cls_sub(stat, pair, reader_dict, shell_dict, lensing_dict, i
     # Cls of one statistic ('clustering', 'shear' or 'shear_clustering') for one bin pair, saved to an intermediate file
     # (its name is returned; None if the Cls are saved), from the fields of its bins (inputs: compute_catalog_alms)
     from pollux.utils.binning import binning_id
-    catalog = _make_source_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict)
+    catalog = _make_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict)
     if os.path.exists(catalog._cls_fname()):
         return None
     params = [binning_id(catalog.b), stats_dict['common'], stats_dict['cls']]
@@ -491,7 +492,7 @@ def compute_catalog_cls_sub(stat, pair, reader_dict, shell_dict, lensing_dict, i
 @python_app(executors=['default'])
 def compute_catalog_cls(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict=None, inputs=[]):
     # inputs contains the files of the (ell, cl) of compute_catalog_cls_sub, saved unless the Cls already are
-    catalog = _make_source_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict)
+    catalog = _make_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict)
     if os.path.exists(catalog._cls_fname()):
         return
     cls_out = {}
@@ -504,6 +505,6 @@ def compute_catalog_cls(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_
 @python_app(executors=['default'])
 def plot_catalog_cls(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict=None, cls_kwargs=None, inputs=[]):
     # Cls against their predictions ({catalog_dir}/plots); cls_kwargs are the Cls options (shared_wsp, randoms)
-    catalog = _make_source_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict)
+    catalog = _make_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict)
     catalog.plot_cls(**{k: v for k, v in (cls_kwargs or {}).items() if k in ('shared_wsp', 'randoms')})
     _free_memory()

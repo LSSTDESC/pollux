@@ -305,6 +305,7 @@ class ShellBuilder(MapBuilder):
             apply_replicate_rotflip=self.apply_replicate_rotflip,
             subsample_box=self.subsample_box,
             dtype=self.dtype,
+            shell_edges_match=getattr(self, 'shell_edges_match', None),  # None for SnapshotInterpShellBuilder
         )
         return ('halos' if self.reader.kind.endswith('halo') else 'shells'), parameters, []
 
@@ -846,7 +847,9 @@ class ShellBuilder(MapBuilder):
         Notes
         -----
         Orphan particles are added when ``self.add_orphans`` is True
-        (set on :class:`SnapshotInterpShellBuilder`; False everywhere else).
+        (set on :class:`SnapshotInterpShellBuilder`; False everywhere else): their map is built here if missing
+        (``construct_maps_sub(None, None, do_orphan_ishell=ishell)``), from the orphan particles saved by the
+        sub-volumes of the shell, so all of them must be built first.
         """
         shells = {}
 
@@ -861,6 +864,8 @@ class ShellBuilder(MapBuilder):
             isubs = list(self.reader.isubs_for_snapshot(ishell))
             if self.add_orphans:
                 isubs.append('orphan')
+                if not os.path.exists(self.get_fname(ishell, sub='orphan')):
+                    self.construct_maps_sub(None, None, do_orphan_ishell=ishell)
             shell_sum = MapSum(mask, self.nside_c, self.dtype)
             for _, sub_map in self.iter_maps(ishell, isubs=isubs, allow_missing=allow_missing_subs, desc=f"[combine_maps_subs: shell {ishell}]"):
                 shell_sum.add(sub_map)
@@ -937,7 +942,14 @@ class ShellBuilder(MapBuilder):
 
         For each shell, computes a spin-2 transform of the E-mode a_lm of the
         density map, and combines it with the density (trace) to obtain
-        approximate 2D tidal components (t11, t22, t12) on the sky.
+        approximate 2D tidal components (t11, t22, t12) on the sky::
+
+            t11 = delta / 6 + Q / 2,  t22 = delta / 6 - Q / 2,  t12 = U = 2 s12
+
+        with (Q, U) the spin-2 field of the density (as the shear from the convergence),
+        Q = s11 - s22, and the trace delta / 3 of the 3D tidal field removed. ``t12`` is
+        twice the off-diagonal component, so that the tidal alignment is
+        ``e1 = C1 (t11 - t22)``, ``e2 = C1 t12`` (see :mod:`pollux.ia`).
 
         Parameters
         ----------
@@ -1690,6 +1702,11 @@ class SnapshotInterpShellBuilder(ShellBuilder):
         # read particles
         if do_orphan_ishell is not None:
             keys = ['x', 'y', 'z']
+            missing = [
+                isub for isub in self.reader.isubs_for_snapshot(ishell) if not os.path.exists(self.get_fname(ishell, sub=isub, what='orphan_i', format='npy'))
+            ]
+            if missing:
+                raise FileNotFoundError(f"No orphan particles of sub-volumes {missing} of shell {ishell}: build these sub-volumes first (construct_maps_sub).")
             xyzi = np.concatenate([np.load(self.get_fname(ishell, sub=isub, what='orphan_i', format='npy')) for isub in self.reader.isubs_for_snapshot(ishell)])
             xyzf = np.concatenate([np.load(self.get_fname(ishell, sub=isub, what='orphan_f', format='npy')) for isub in self.reader.isubs_for_snapshot(ishell)])
             logger.debug("Loaded %d orphan particles.", len(xyzi))
@@ -1727,11 +1744,13 @@ class SnapshotInterpShellBuilder(ShellBuilder):
 
             # dump orphan particles
             orphan_i_fname = self.get_fname(ishell, sub=isub, what='orphan_i', format='npy')
-            np.save(orphan_i_fname, np.rec.array((*xyz_i[idx_i_out].T, idx_i['id'][idx_i_out]), names=['x', 'y', 'z', 'id']))
+            with layout.atomic_write(orphan_i_fname) as tmp:
+                np.save(tmp, np.rec.array((*xyz_i[idx_i_out].T, idx_i['id'][idx_i_out]), names=['x', 'y', 'z', 'id']))
             logger.debug("Saved to file %s.", orphan_i_fname)
 
             orphan_f_fname = self.get_fname(ishell, sub=isub, what='orphan_f', format='npy')
-            np.save(orphan_f_fname, np.rec.array((*xyz_f[idx_f_out].T, idx_f['id'][idx_f_out]), names=['x', 'y', 'z', 'id']))
+            with layout.atomic_write(orphan_f_fname) as tmp:
+                np.save(tmp, np.rec.array((*xyz_f[idx_f_out].T, idx_f['id'][idx_f_out]), names=['x', 'y', 'z', 'id']))
             logger.debug("Saved to file %s.", orphan_f_fname)
 
             # keep matched particles

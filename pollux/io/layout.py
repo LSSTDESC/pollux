@@ -23,6 +23,8 @@ inputs and code version, so that it can be shared (e.g. registered) on its own. 
 from __future__ import annotations
 
 import os
+import socket
+import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
@@ -114,7 +116,8 @@ def atomic_write(fname: str) -> Iterator[str]:
         Temporary path, in the same directory.
     """
     root, ext = os.path.splitext(fname)
-    tmp = f'{root}.{os.getpid()}.tmp{ext}'
+    # unique among processes of all nodes (PIDs may coincide between nodes)
+    tmp = f'{root}.{socket.gethostname()}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp{ext}'
     try:
         yield tmp
         os.replace(tmp, fname)

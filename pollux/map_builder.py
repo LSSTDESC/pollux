@@ -1071,7 +1071,8 @@ class MapBuilder(ABC):
             weights, _map = self._alm_field(imap)
             alms[imap] = hp.map2alm(_map * weights, **map2alm_kwargs)
 
-            hp.write_alm(fname, alms[imap], overwrite=True)
+            with layout.atomic_write(fname) as tmp:
+                hp.write_alm(tmp, alms[imap], overwrite=True)
             logger.debug("Saved alms to file %s.", fname)
 
         return alms[imaps] if np.isscalar(imaps) else alms
@@ -1458,7 +1459,7 @@ class MapBuilder(ABC):
 
         return ell, cl
 
-    def _save_cls(self, ell: np.ndarray, cl: dict[tuple[int, int], np.ndarray]) -> str:
+    def _save_cls(self, ell: np.ndarray, cl: dict[tuple[int, int], np.ndarray], metadata: dict | None = None) -> str:
         """Save angular power spectra to a SACC FITS file.
 
         Parameters
@@ -1468,6 +1469,9 @@ class MapBuilder(ABC):
         cl : dict
             Dictionary keyed by (i, j) containing spectra arrays evaluated at
             ``ell``.
+        metadata : dict or None, optional
+            Metadata of the SACC file (e.g. the identifier of the options of the measurement, see
+            :mod:`pollux.pipeline.tasks`).
 
         Returns
         -------
@@ -1475,6 +1479,7 @@ class MapBuilder(ABC):
             Path to the saved SACC FITS file.
         """
         s = sacc.Sacc()
+        s.metadata.update(metadata or {})
         tracers = self.tracers_sacc
         for t in tracers:
             s.add_tracer_object(t)

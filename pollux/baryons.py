@@ -54,6 +54,8 @@ class BaryonifiedShellBuilder(ShellBuilder):
     profile_parameters : dict or None, optional
         Parameters of the profiles (e.g. the ``bfg_params`` of :func:`s19_profiles`), recorded in
         the ``config.yaml`` of the shells, so that shells of other parameters are not mixed with them.
+        Its ``epsilon_max`` (default 20) is the radius, in units of the halo radius, within which each halo
+        displaces the shell's mass (``epsilon_max`` of BaryonForge's ``BaryonifyShell``).
     tag : str or None, optional
         Tag of the baryon model: the shells go to ``{realization}/dmb/{tag}/shells`` (see
         :mod:`pollux.io.layout`), ``dmb/default`` if None.
@@ -83,6 +85,8 @@ class BaryonifiedShellBuilder(ShellBuilder):
         self.halo_builder = halo_builder
         self.dmo = dmo  # unconvolved, also used for the matter power spectrum prediction
         self.profile_parameters = profile_parameters
+        # radius of the baryonification around each halo, in units of R200c (the BaryonForge runner's epsilon_max)
+        self.epsilon_max = float((profile_parameters or {}).get('epsilon_max', 20.))
         self.dmb = dmb
         self.mass_def = mass_def
         self.mass_name = mass_name
@@ -212,7 +216,7 @@ class BaryonifiedShellBuilder(ShellBuilder):
             if keep.any():
                 logger.debug("Shell %d: using masses in range [%.3e, %.3e] Msun.", ishell, M[keep].min(), M[keep].max())
                 lightcone_halos = bfg.utils.HaloLightConeCatalog(halos['ra'][keep], halos['dec'][keep], M[keep], halos['z'][keep], self.cosmo_dict)
-                runner = bfg.Runners.BaryonifyShell(lightcone_halos, lightcone_shell, epsilon_max=20., model=self.model)
+                runner = bfg.Runners.BaryonifyShell(lightcone_halos, lightcone_shell, epsilon_max=self.epsilon_max, model=self.model)
                 baryonified_count = runner.process()
             else:
                 # No halos above M_min in this shell

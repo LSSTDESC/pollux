@@ -73,7 +73,10 @@ interrupted task leaves no partial file. Statistics are computed per bin pair, e
 file (in a folder named by an identifier of the binning and options of the statistic), then combined: tasks skip
 the pairs already saved, and the statistics already combined, but always redraw the plots. Launching a run again therefore resumes it. For the same reason, a product
 must be moved away (or the run given a new output directory) to be recomputed. A product whose ``config.yaml``
-differs from the options of the run raises an error, instead of mixing the two (see :doc:`outputs`).
+differs from the options of the run raises an error, instead of mixing the two (see :doc:`outputs`); it is checked
+before skipping, so a skipped product has the options of the run. Likewise, the combined statistics record the
+identifier of their binning and options (``options_id`` in the metadata of their SACC file), and one computed
+with other options raises an error.
 
 Code version
 ------------

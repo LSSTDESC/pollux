@@ -2,7 +2,7 @@
 
 The main classes are available from the package: readers, shell, lensing and baryonified builders, catalog
 generators and augmentors, and :class:`~pollux.io.PolluxLoader` to read products, which only needs the I/O
-dependencies (:mod:`pollux.io`).
+dependencies (:mod:`pollux.io`: no NaMaster, TreeCorr, BaryonForge or Parsl).
 """
 
 import warnings

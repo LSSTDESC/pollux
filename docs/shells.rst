@@ -80,7 +80,9 @@ From the count maps, builders derive:
 - the density contrast relative to the cosmic mean (``field_hspmap``);
 - spherical harmonics (``compute_alms``), and maps smoothed by a Gaussian of fixed comoving scale
   (``compute_maps_from_alms(smooth_Mpc=...)``);
-- the tidal field ``t11``, ``t22``, ``t12`` of each shell, transverse to the line of sight
+- the tidal field ``t11``, ``t22``, ``t12`` of each shell, transverse to the line of sight (``t11`` and ``t22``
+  traceless in 3D, and ``t12`` twice the off-diagonal component, :math:`t_{12} = 2 s_{12}`, so that the tidal
+  alignment is :math:`e_1 = C_1 (t_{11} - t_{22})`, :math:`e_2 = C_1 t_{12}`)
   (``compute_tidal_tensor_maps``), possibly smoothed;
 - halo catalogs, with a halo reader (``construct_catalogs``);
 - a lensing builder with one source plane at the far edge of each shell (``snapshot_lensing_builder``,

@@ -851,7 +851,8 @@ class CatalogGenerator(ABC):
             Density (``density_{i}``) or shear (``kappa_{i}``) tracer of bin ``i``.
         shear_cols : tuple of str, optional
             Shear columns used for the measurement (see :meth:`compute_cls`): shape
-            noise only for ellipticities (``e1_*``), none for the lensing shear.
+            noise only for the observed or intrinsic ellipticities (``e1_obs``, ``e1_int``), none for the lensing
+            shear or the intrinsic alignments.
         subsample : float or None, optional
             Fraction of galaxies used for the measurement.
 
@@ -865,7 +866,8 @@ class CatalogGenerator(ABC):
         n_sr = self.nbar[i] * (180. * 60. / np.pi)**2 * (subsample or 1.)
         if tracer.kind == 'density':
             return 1. / n_sr
-        if not shear_cols[0].startswith('e'):
+        # shape noise only in the intrinsic and observed ellipticities (not in the lensing shear or the intrinsic alignments)
+        if tuple(shear_cols) not in (('e1_obs', 'e2_obs'), ('e1_int', 'e2_int')):
             return 0.
         sigma_e = next((a.sigma_e for a in self.augmentors if hasattr(a, 'sigma_e')), 0.)
         return sigma_e**2 / n_sr
@@ -1306,12 +1308,11 @@ class CatalogGenerator(ABC):
             clustering random catalog. Default is 5.
         shared_randoms : bool, optional
             With ``randoms``, if True (default), draw a single random-point realization (sized
-            from the first processed bin) and reuse it for every bin's
+            from the galaxies of the first bin, whatever the bins computed) and reuse it for every bin's
             density field, rather than drawing independent randoms per bin.
             This matches the fact that all bins share the same survey
             footprint, and is cheaper since randoms are only drawn once. If
             False, each bin gets its own randoms, seeded by ``seed + ikappa``.
-            The shared randoms are sized from the galaxies of the first bin, whatever the bins computed.
         seed : int or None, optional
             Seed for the random catalogs' RNG. Default is the shell builder's seed.
         save : bool, optional
@@ -1388,7 +1389,7 @@ class CatalogGenerator(ABC):
 
         return ell, cl
 
-    def _save_cls(self, ell: np.ndarray, cl: dict) -> str:
+    def _save_cls(self, ell: np.ndarray, cl: dict, metadata: dict | None = None) -> str:
         """Save catalog-based angular power spectra to a SACC FITS file.
 
         The catalog's density and shear fields share the same underlying n(z)
@@ -1404,6 +1405,9 @@ class CatalogGenerator(ABC):
         cl : dict
             Dictionary keyed by SACC data type, each mapping to a dict keyed
             by ``(i, j)`` (as returned by :meth:`compute_cls`).
+        metadata : dict or None, optional
+            Metadata of the SACC file (e.g. the identifier of the options of the measurement, see
+            :mod:`pollux.pipeline.tasks`).
 
         Returns
         -------
@@ -1412,6 +1416,7 @@ class CatalogGenerator(ABC):
         """
         self._write_config()
         s = sacc.Sacc()
+        s.metadata.update(metadata or {})
         shear_tracers = self.lensing.tracers_sacc
         density_tracers = [t.sacc() for t in self.density_tracers]
         for t in shear_tracers + density_tracers:
@@ -1791,7 +1796,7 @@ class CatalogGenerator(ABC):
             subtracting additive bias in ``gamma_t/x(theta)``. Default is 5.
         shared_randoms : bool, optional
             If True (default), draw a single random-point realization (sized
-            from the first processed bin) and reuse it for every bin's
+            from the galaxies of the first bin, whatever the bins computed) and reuse it for every bin's
             random catalog (used both for the ``w(theta)`` estimator and for
             the ``gamma_t/x(theta)`` random-lens subtraction), rather than
             drawing independent randoms per bin. This matches the fact that
@@ -1869,8 +1874,9 @@ class CatalogGenerator(ABC):
                 # randoms over the footprint (for w(theta) and the random-lens subtraction of gamma_t): one set for all bins, or one per bin
                 if shared_randoms:
                     if shared_cat_rand is None:
+                        # sized from the galaxies of the first bin, the same whatever the bins of the call
                         rng = np.random.default_rng(seed)
-                        nran = int(nran_factor * cat['ra'].size)
+                        nran = int(nran_factor * self._ngal_used(0, subsample))
                         ra_rand, dec_rand = generate_radec_in_pix(self.nside, rng.choice(ipix_mask, size=nran), rng)
                         shared_cat_rand = treecorr.Catalog(ra=ra_rand, dec=dec_rand, ra_units='deg', dec_units='deg')
                     cat_rand[ikappa] = shared_cat_rand
@@ -1953,7 +1959,7 @@ class CatalogGenerator(ABC):
         else:
             return theta_out, xi
 
-    def _save_2pt(self, theta: dict, xi: dict, dxi: dict | None = None, shapes: str = 'shear') -> str:
+    def _save_2pt(self, theta: dict, xi: dict, dxi: dict | None = None, shapes: str = 'shear', metadata: dict | None = None) -> str:
         """Save catalog-based real-space two-point functions to a SACC FITS file.
 
         Mirrors :meth:`_save_cls`: the catalog's density and shear fields
@@ -1976,6 +1982,9 @@ class CatalogGenerator(ABC):
             diagonal of the SACC covariance.
         shapes : str, optional
             Shapes of the shear legs (see :meth:`compute_2pt`), which set the file name.
+        metadata : dict or None, optional
+            Metadata of the SACC file (e.g. the identifier of the options of the measurement, see
+            :mod:`pollux.pipeline.tasks`).
 
         Returns
         -------
@@ -1984,6 +1993,7 @@ class CatalogGenerator(ABC):
         """
         self._write_config()
         s = sacc.Sacc()
+        s.metadata.update(metadata or {})
         shear_tracers = self.lensing.tracers_sacc
         density_tracers = [t.sacc() for t in self.density_tracers]
         for t in shear_tracers + density_tracers:

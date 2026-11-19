@@ -37,7 +37,7 @@ Index and loader
 ``python -m pollux.io.index {root_dir}`` lists the products under a directory, with their main parameters.
 
 :class:`pollux.io.PolluxLoader <pollux.io.loader.PolluxLoader>` reads the products of one realization from their files only, without creating
-builders, so that it only needs the I/O dependencies (healsparse, astropy, sacc):
+builders, so that it only needs the I/O dependencies (numpy, healpy, healsparse, pyccl, sacc, astropy and PyYAML, but not NaMaster, TreeCorr, BaryonForge or Parsl):
 
 .. code-block:: python
 

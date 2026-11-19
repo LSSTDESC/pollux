@@ -28,10 +28,10 @@ DESC package to create weak lensing and large-scale structure simulations from N
 - `lensing.py` implements `LensingBuilder` objects (subclass of `MapBuilder`) to generate lensing maps from lightcone shells. 
 - `baryons.py` implements `BaryonifiedShellBuilder` (subclass of `ShellBuilder`) to baryonify shells.
 - `catalog.py` implements `CatalogGenerator` objects to generate tomographic galaxy catalogs from the lightcone shells and lensing maps, and to measure and predict their statistics.
-- `ia.py` implements catalog augmentors for intrinsic alignments and observed shapes.
+- `ia.py` implements the catalog augmentor of intrinsic alignments (`CatalogAugmentorIA`); the observed shapes (`CatalogAugmentorShear`) are in `catalog.py`.
 - `cosmo.py` contains fixed cosmologies, and the `Tracer` and `Theory` objects for predictions.
 - `plotting.py` plots two-point statistics against theory.
-- `io/` handles the products on disk, with light dependencies only: their organisation (`layout.py`: directories, file names, intermediate files and the `config.yaml` of each product), the code version of runs (`code_version.py`), their index (`index.py`, `python -m pollux.io.index ROOT`) and `PolluxLoader` to read them (`loader.py`).
+- `io/` handles the products on disk, without the dependencies of the builders (numpy, healpy, healsparse, pyccl, sacc, astropy and PyYAML, but not NaMaster, TreeCorr, BaryonForge or Parsl): their organisation (`layout.py`: directories, file names, intermediate files and the `config.yaml` of each product), the code version of runs (`code_version.py`), their index (`index.py`, `python -m pollux.io.index ROOT`) and `PolluxLoader` to read them (`loader.py`).
 - `utils/` contains helper functions by theme: numerics, sky (coordinates, maps of points, masks) and NaMaster binnings.
 - `pipeline/` contains the Parsl tasks and execution configuration, see the documentation.
 

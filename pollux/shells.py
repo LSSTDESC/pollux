@@ -418,7 +418,7 @@ class ShellBuilder(MapBuilder):
         logger.debug("Saved to file %s.", fname)
 
     def random_isometries(self, group_isometries: bool | float | None = None, get_shell_identifier: bool = False) -> list:
-        """Generate random affine isometries for shells.
+        r"""Generate random affine isometries for shells.
 
         Parameters
         ----------
@@ -436,6 +436,20 @@ class ShellBuilder(MapBuilder):
             - ``b`` is a (3,) translation vector.
         dict, optional
             Only if ``get_shell_identifier=True``. Maps ``ishell -> iso_id``.
+
+        Notes
+        -----
+        Each isometry moves the particles of a box (and all its replicas) as
+
+        .. math::
+
+            \mathbf{x}' = (\mathbf{x} + \mathbf{b})\, A, \qquad A = R\, \mathrm{diag}(s_1, s_2, s_3),
+
+        with :math:`R` a uniformly random rotation, :math:`s_k = \pm 1` random flips and :math:`\mathbf{b}` a uniformly
+        random translation in :math:`[0, L)^3`; the replica :math:`\mathbf{n} \in \mathbb{Z}^3` is shifted by
+        :math:`L\, \mathbf{n} A`. With ``group_isometries``, consecutive shells share an isometry until their cumulative
+        radial width would exceed ``group_isometries`` times the box size :math:`L`, so that structures are not cut at
+        each shell.
         """
         rng = np.random.default_rng(self.seed)
         boxsize = self.reader.boxsize
@@ -636,7 +650,7 @@ class ShellBuilder(MapBuilder):
         return valid
 
     def subsample_ratio(self, ishell: int) -> float:
-        """Return the particle subsampling ratio applied for a given shell.
+        r"""Return the particle subsampling ratio applied for a given shell.
 
         Parameters
         ----------
@@ -652,6 +666,21 @@ class ShellBuilder(MapBuilder):
         ------
         ValueError
             If ``subsample_box`` has an unsupported type or key.
+
+        Notes
+        -----
+        With ``{'densitymax_z': z*}``, shells keep the fraction
+
+        .. math::
+
+            r_i = \min\left(1, \frac{\bar N(z_*)}{\bar N_i}\right), \qquad
+            \bar N_i = \frac{4\pi (\chi_{i+1}^3 - \chi_i^3)}{3}\, \frac{N_p}{L^3 N_{\rm pix}},
+
+        where :math:`\bar N_i` is the mean number of particles per pixel of shell :math:`i` (:math:`N_p` particles in a box
+        of side :math:`L`, :math:`N_{\rm pix}` pixels on the sky) and :math:`\bar N(z_*)` its value interpolated at
+        :math:`z_*` in the volume-weighted mean redshift of the shells: beyond :math:`z_*`, the particle shot noise
+        per pixel stays that of the shell at :math:`z_*`. With ``{'clmax_r': r}``, the shot noise :math:`1 / (r_i \bar n_i)`
+        (:math:`\bar n_i` per steradian) is :math:`r` times below the predicted :math:`C_\ell` at the largest multipole.
         """
         if isinstance(self.subsample_box, dict):
             if not hasattr(self, 'subsample_ratios'):
@@ -904,7 +933,7 @@ class ShellBuilder(MapBuilder):
             smooth_Mpc: float | None = None,
             lmax: int | None = None,
             save_field_map: bool = True) -> list[hsp.HealSparseMap] | dict[int, list[hsp.HealSparseMap]]:
-        """Compute tidal tensor component maps from shell density maps.
+        r"""Compute tidal tensor component maps from shell density maps.
 
         For each shell, computes a spin-2 transform of the E-mode a_lm of the
         density map, and combines it with the density (trace) to obtain
@@ -932,6 +961,19 @@ class ShellBuilder(MapBuilder):
             - If ``ishells`` is ``None`` or an iterable: returns a dict keyed by shell index
               with list values ``[t11, t22, t12]``. Also writes maps to disk as
               ``what='t11'/'t22'/'t12'`` or with ``_{smooth_Mpc}Mpc`` suffix if smoothing is applied.
+
+        Notes
+        -----
+        With :math:`(Q, U)` the spin-2 maps of the density contrast :math:`\delta` of the shell (its E-mode
+        :math:`a_{\ell m}` multiplied by :math:`\sqrt{(\ell - 1)(\ell + 2) / (\ell (\ell + 1))}`, as the shear from the
+        convergence),
+
+        .. math::
+
+            t_{11} = \frac{\delta}{6} + \frac{Q}{2}, \qquad t_{22} = \frac{\delta}{6} - \frac{Q}{2}, \qquad t_{12} = U,
+
+        the transverse part of the traceless tidal tensor :math:`s_{ij} = (\partial_i \partial_j / \nabla^2 - \delta_{ij} / 3)\,
+        \delta`, for a shell with no line-of-sight component: :math:`t_{11} + t_{22} = \delta / 3`.
         """
         if lmax is None:
             lmax = 3 * self.nside - 1
@@ -1010,7 +1052,7 @@ class ShellBuilder(MapBuilder):
         return tracers
 
     def _noise_cls(self, ishell: int) -> float:
-        """Return the Poisson shot-noise level for shell density maps.
+        r"""Return the Poisson shot-noise level for shell density maps.
 
         Parameters
         ----------
@@ -1022,6 +1064,15 @@ class ShellBuilder(MapBuilder):
         float
             White noise level N_ell = 1 / nbar, where nbar is the expected sky
             density for this shell (per steradian).
+
+        Notes
+        -----
+        .. math::
+
+            N_\ell^{\delta_i} = \frac{1}{r_i\, \bar n_i},
+
+        with :math:`\bar n_i` the expected number of particles per steradian in shell :math:`i` and :math:`r_i` its
+        subsampling ratio (:meth:`subsample_ratio`).
         """
         return 1. / self.sky_density(ishell)
 

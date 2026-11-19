@@ -49,7 +49,9 @@ fraction of the galaxies, and ``remove_mean`` subtracts the mean shear of each b
   they do not include the intrinsic alignments), the shape noise having zero mean and the reduced shear being
   approximated by the shear; the error bars include the shape noise.
 
-The first three are measured on the same galaxies, so that GI is the difference ``shear_plus_ia - shear - ia``, which the
+The first three are measured on the same galaxies: with :math:`\gamma` the shear and :math:`e^I` the intrinsic
+alignments, :math:`\xi^{\gamma + e^I} = \xi^{GG} + \xi^{GI} + \xi^{IG} + \xi^{II}`, so that GI (with IG) is the
+difference ``shear_plus_ia - shear - ia``, which the
 plots of ``'ia'`` also show. Plots are named after the shapes: ``xi_shear``, ``xi_ia`` (II) and
 ``xi_shear_plus_ia`` for ``ξ±``, with ``_x_density`` for ``γt`` (``xi_ia_x_density`` is gI), ``xi_shear_x_ia`` for GI,
 ``xi_observed`` for the observed ellipticities, and ``xi_density`` for ``w(θ)``.
@@ -66,6 +68,10 @@ Predictions use two objects of :mod:`pollux.cosmo`, shared by builders and catal
   Limber approximation), bandpowers (:meth:`~pollux.cosmo.Theory.predict_cls`) and correlation functions
   (:meth:`~pollux.cosmo.Theory.predict_2pt`, by Hankel transform), with a matter power spectrum: CCL's nonlinear
   one, or that of the baryon model (see :doc:`baryons`).
+
+Bandpowers are predicted as measured: with the bandpower windows :math:`W_{b\ell}` of the NaMaster workspace and
+the pixel window :math:`p_\ell`, :math:`C_b = \sum_\ell W_{b\ell}\, p_\ell^2\, C_\ell`
+(:meth:`~pollux.cosmo.Theory.binned_cl`).
 
 A tracer smoothed by a Gaussian of comoving scale ``s`` multiplies the matter power spectrum by
 ``exp(-k² s² / 2)``, which is exact in Limber for a transverse smoothing. Scales that change from shell to shell

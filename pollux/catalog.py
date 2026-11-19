@@ -52,11 +52,10 @@ class CatalogSourceGenerator(ABC):
         interpolate.
     tag : str or None, optional
         Tag of the catalogs: they go to ``catalogs/{nz}/{tag}/`` next to the maps (see :mod:`pollux.io.layout`), ``default`` if None.
-    nbar_input : float, array-like, or None, optional
-        Galaxy surface density in gal/arcmin^2. If a float, the same surface
+    nbar_input : float or array-like
+        Galaxy surface density in gal/arcmin^2 (required, keyword only). If a float, the same surface
         density is used for all tomographic bins; if an array-like, it must
-        have length ``lensing.nmaps`` and provide a per-bin value. If ``None``,
-        the values are taken from ``lensing.nbar``. Default is None.
+        have length ``lensing.nmaps`` and provide a per-bin value.
     interp_fields : tuple of str, optional
         Fields interpolated at the galaxies, among ``FIELDS`` (``'kappa'``,
         ``'gamma1'``, ``'gamma2'``, ``'density'``, ``'t11'``, ``'t22'``, ``'t12'``);
@@ -111,7 +110,8 @@ class CatalogSourceGenerator(ABC):
         self,
         lensing: LensingBuilder,
         tag: str | None = None,
-        nbar_input: float | np.ndarray | None = None,
+        *,
+        nbar_input: float | np.ndarray,
         interp_fields: tuple[str, ...] = ('kappa', 'gamma1', 'gamma2'),
         interp_method: str = 'bilinear',
         smooth_fields: tuple[str, ...] = ('positions', 'density', 't11', 't22', 't12'),
@@ -160,14 +160,11 @@ class CatalogSourceGenerator(ABC):
         self._wsp = {}
 
         # Handle nbar
-        if self.nbar_input is None:
-            nbar_arr = np.atleast_1d(self.lensing.nbar).astype(float)
-        else:
-            nbar_arr = np.atleast_1d(self.nbar_input).astype(float)
-            if nbar_arr.size == 1:
-                nbar_arr = np.full(self.lensing.nmaps, float(nbar_arr[0]))
-            elif nbar_arr.size != self.lensing.nmaps:
-                raise ValueError(f"nbar must be a scalar or array of length {self.lensing.nmaps}, got {nbar_arr.size}")
+        nbar_arr = np.atleast_1d(self.nbar_input).astype(float)
+        if nbar_arr.size == 1:
+            nbar_arr = np.full(self.lensing.nmaps, float(nbar_arr[0]))
+        elif nbar_arr.size != self.lensing.nmaps:
+            raise ValueError(f"nbar must be a scalar or array of length {self.lensing.nmaps}, got {nbar_arr.size}")
         self.nbar = nbar_arr
 
         # galaxy counts over the footprint, and per pixel
@@ -349,7 +346,7 @@ class CatalogSourceGenerator(ABC):
 
     def _interpolate_maps(
             self, catalog: dict[int, dict[str, np.ndarray]], ikappas: int | Iterable[int] | None = None, ishells: list[int] | None = None) -> None:
-        """Interpolate map quantities at galaxy positions.
+        r"""Interpolate map quantities at galaxy positions.
 
         Parameters
         ----------
@@ -368,6 +365,15 @@ class CatalogSourceGenerator(ABC):
         a shell (:attr:`SHELL_FIELDS`: density, tidal field) take the value of the
         galaxy's shell. Values are optionally interpolated across pixels (HealSparse
         ``interpolate_pos``).
+
+        For a galaxy of shell :math:`i` at comoving distance :math:`\chi`, a field known at the far edges of the shells
+        (:math:`f_i` at :math:`\chi_{i+1}`, and :math:`f_{-1} = 0` at the observer) is
+
+        .. math::
+
+            f(\chi) = f_{i-1} + \frac{\chi - \chi_i}{\chi_{i+1} - \chi_i} \left(f_i - f_{i-1}\right),
+
+        and a field averaged over the shells is :math:`f(\chi) = f_i`.
         """
         for k in self.interp_fields:
             if ishells is None:
@@ -2236,8 +2242,8 @@ class CatalogSourceUniform(CatalogSourceGenerator):
         Lensing map builder.
     tag : str or None, optional
         Tag of the catalogs: they go to ``catalogs/{nz}/{tag}/`` next to the maps (see :mod:`pollux.io.layout`), ``default`` if None.
-    nbar_input : float, array-like, or None, optional
-        Galaxy surface density. Default is None.
+    nbar_input : float or array-like
+        Galaxy surface density in gal/arcmin^2, per bin or for all (required, keyword only).
     interp_fields, interp_method, smooth_fields, smooth_Mpc
         Interpolation and smoothing of the fields, see :class:`CatalogSourceGenerator`.
     augmentors : list, optional
@@ -2299,8 +2305,8 @@ class CatalogSourceClustered(CatalogSourceGenerator):
         Lensing map builder.
     tag : str or None, optional
         Tag of the catalogs: they go to ``catalogs/{nz}/{tag}/`` next to the maps (see :mod:`pollux.io.layout`), ``default`` if None.
-    nbar_input : float, array-like, or None, optional
-        Galaxy surface density in gal/arcmin^2. Default is None.
+    nbar_input : float or array-like
+        Galaxy surface density in gal/arcmin^2, per bin or for all (required, keyword only).
     bias : float or array-like, optional
         Galaxy bias per tomographic bin. If a float, the same bias is used
         for all tomographic bins; if an array-like, it must have length
@@ -2329,7 +2335,8 @@ class CatalogSourceClustered(CatalogSourceGenerator):
         self,
         lensing: LensingBuilder,
         tag: str | None = None,
-        nbar_input: float | np.ndarray | None = None,
+        *,
+        nbar_input: float | np.ndarray,
         bias: float | np.ndarray | None = None,
         bias_model: str = 'linear',
         interp_fields: tuple[str, ...] = ('kappa', 'gamma1', 'gamma2'),
@@ -2377,7 +2384,7 @@ class CatalogSourceClustered(CatalogSourceGenerator):
             self.header_dict[f'BIAS_{i}'] = b
 
     def _density_weight(self, density: np.ndarray, ikappa: int, ishell: int) -> np.ndarray:
-        """Return the relative galaxy density per pixel of the bias model (``bias_model``).
+        r"""Return the relative galaxy density per pixel of the bias model (``bias_model``).
 
         - ``'linear'``: ``1 + b * delta``. With ``b > 1`` it is negative in underdense
           pixels, where no galaxies can be placed: clipped to zero, with a warning
@@ -2400,6 +2407,15 @@ class CatalogSourceClustered(CatalogSourceGenerator):
         -------
         ndarray
             Non-negative weights, same shape as ``density``.
+
+        Notes
+        -----
+        The relative density of galaxies in a pixel of density contrast :math:`\delta` is
+
+        .. math::
+
+            w = \max(0, 1 + b \delta) \quad (\text{linear}), \qquad
+            w = \frac{\max(0, 1 + \delta)^b}{\langle \max(0, 1 + \delta)^b \rangle} \quad (\text{power law}).
         """
         b = self.bias[ikappa]
         if self.bias_model == 'power_law':
@@ -2431,8 +2447,8 @@ class CatalogSourceClusteredMultinomial(CatalogSourceClustered):
         Lensing map builder.
     tag : str or None, optional
         Tag of the catalogs: they go to ``catalogs/{nz}/{tag}/`` next to the maps (see :mod:`pollux.io.layout`), ``default`` if None.
-    nbar_input : float, array-like, or None, optional
-        Galaxy surface density in gal/arcmin^2. Default is None.
+    nbar_input : float or array-like
+        Galaxy surface density in gal/arcmin^2, per bin or for all (required, keyword only).
     bias, bias_model : optional
         Galaxy bias per tomographic bin, and bias model, see :class:`CatalogSourceClustered`.
     interp_fields, interp_method, smooth_fields, smooth_Mpc
@@ -2506,7 +2522,7 @@ class CatalogSourceClusteredMultinomial(CatalogSourceClustered):
 
 
 class CatalogSourceClusteredPoisson(CatalogSourceClustered):
-    """Generate clustered source galaxies using Poisson sampling.
+    r"""Generate clustered source galaxies using Poisson sampling.
 
     In each shell and tomographic bin, the number of galaxies per pixel is drawn
     as a Poisson random variable with mean ``<nbar>`` times the relative density of
@@ -2519,14 +2535,27 @@ class CatalogSourceClusteredPoisson(CatalogSourceClustered):
         Lensing map builder.
     tag : str or None, optional
         Tag of the catalogs: they go to ``catalogs/{nz}/{tag}/`` next to the maps (see :mod:`pollux.io.layout`), ``default`` if None.
-    nbar_input : float, array-like, or None, optional
-        Galaxy surface density in gal/arcmin^2. Default is None.
+    nbar_input : float or array-like
+        Galaxy surface density in gal/arcmin^2, per bin or for all (required, keyword only).
     bias, bias_model : optional
         Galaxy bias per tomographic bin, and bias model, see :class:`CatalogSourceClustered`.
     interp_fields, interp_method, smooth_fields, smooth_Mpc
         Interpolation and smoothing of the fields, see :class:`CatalogSourceGenerator`.
     augmentors : list, optional
         List of augmentors. Default is empty list.
+
+    Notes
+    -----
+    In shell :math:`i` and bin :math:`j`, pixel :math:`p` gets
+
+    .. math::
+
+        N_p \sim \mathrm{Poisson}\left(\bar N_{ij}\, w(\delta_p)\right), \qquad
+        \bar N_{ij} = \bar n_j\, \Omega_{\rm pix} \frac{\int_{z_i}^{z_{i+1}} n_j(z)\, dz}{\sum_k \int_{z_k}^{z_{k+1}} n_j(z)\, dz},
+
+    with :math:`\bar n_j` the density of the bin (``nbar_input``), :math:`w` the relative density of
+    :meth:`_density_weight`, and :math:`\delta_p` the density contrast smoothed for the positions. Galaxies are placed
+    uniformly within their pixel, at redshifts drawn from :math:`n_j(z)` within the shell.
     """
 
     def _generate_galaxies(

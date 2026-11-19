@@ -42,7 +42,9 @@ Replicating the same box along the line of sight repeats structures at the same 
 ``apply_grid_isometry=True``, each shell gets a random isometry of the periodic box: a random translation, a
 random rotation and a random flip of the axes. ``group_isometries=True`` uses the same isometry for consecutive
 shells within one box size, so that structures are not cut at each shell edge. The ``seed`` sets the isometries:
-each seed is a realization of the lightcone from the same simulation.
+each seed is a realization of the lightcone from the same simulation. An isometry moves the box and its replicas as
+:math:`\mathbf{x}' = (\mathbf{x} + \mathbf{b}) A`, with :math:`A` a random rotation times random flips and
+:math:`\mathbf{b}` a random translation (see :meth:`~pollux.shells.ShellBuilder.random_isometries`).
 
 The alternative ``apply_replicate_rotflip`` applies instead one of the 48 rotations and flips of the cubic grid to
 each replica, as in HACC.
@@ -55,8 +57,12 @@ one fraction per shell:
 
 - ``{'densitymax_z': z}``: shells beyond redshift ``z``, which have more particles per pixel, are subsampled down
   to the particle density per pixel of the shell at ``z``;
-- ``{'clmax_r': r}``: the shot noise of each shell stays below ``r`` times its theory power spectrum at the
-  largest multipole.
+- ``{'clmax_r': r}``: the shot noise of each shell is ``r`` times below its theory power spectrum at the largest
+  multipole.
+
+The fractions are given by :meth:`~pollux.shells.ShellBuilder.subsample_ratio`. The shot noise of a shell is
+``1 / (r n)``, with ``n`` its expected number of particles per steradian and ``r`` its fraction; that of a
+convergence map follows from its weights (see :doc:`lensing`).
 
 Footprint
 ---------

@@ -79,7 +79,7 @@ class IACalculator(CatalogAugmentor):
         self.new_columns = new_columns
 
     def augment_catalog(self, cosmo: pyccl.Cosmology, catalog: dict[str, np.ndarray], **kwargs: Any) -> None:
-        """Compute and add intrinsic alignment shear components to a catalog.
+        r"""Compute and add intrinsic alignment shear components to a catalog.
 
         Parameters
         ----------
@@ -96,6 +96,23 @@ class IACalculator(CatalogAugmentor):
         -----
         Adds ``'e1_ia_ta'``, ``'e2_ia_ta'`` (TA model) and/or ``'e1_ia_tt'``,
         ``'e2_ia_tt'`` (TT model), depending on the model.
+
+        With :math:`C_1` and :math:`C_2` of :meth:`coefficients` and the tidal field :math:`t_{ab}` of the galaxy's shell
+        (see :meth:`~pollux.shells.ShellBuilder.compute_tidal_tensor_maps`),
+
+        .. math::
+
+            e^{\rm TA} = C_1 \left(t_{11} - t_{22},\; t_{12}\right), \qquad
+            e^{\rm TT} = C_2 \left(t_{11}^2 - t_{22}^2,\; t_{12} (t_{11} + t_{22})\right),
+
+        each multiplied, with ``delta_b_TA`` (``delta_b_TT``), by the density weighting
+
+        .. math::
+
+            F = \frac{\max\left(0, 1 + (b + \Delta b)\, \delta\right)}{1 + b \delta},
+
+        with :math:`b` the bias placing the galaxies (1 where :math:`1 + b \delta \le 0`): summed over galaxies, placed
+        with :math:`1 + b \delta`, the alignments are weighted by :math:`1 + (b + \Delta b)\, \delta`.
         """
         z = catalog['z']
         t11 = catalog['t11']

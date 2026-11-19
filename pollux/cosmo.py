@@ -256,7 +256,7 @@ class Tracer:
 
     @staticmethod
     def effective_smooth_Mpc(smooth_Mpc: float | tuple, chi: float | np.ndarray, nside: int | None) -> float | np.ndarray:
-        """Return the comoving smoothing scale actually applied at a distance: at least the pixel size.
+        r"""Return the comoving smoothing scale actually applied at a distance: at least the pixel size.
 
         Smoothing below the pixel size is not possible (the pixel window cannot be
         deconvolved beyond it, and maps would ring), so maps at ``nside`` are smoothed
@@ -279,6 +279,16 @@ class Tracer:
         -------
         float or ndarray
             Comoving smoothing scale in Mpc, the shape of ``chi``.
+
+        Notes
+        -----
+        .. math::
+
+            s_{\rm eff}(\chi) = \max\left(s(\chi),\, \theta_{\rm pix}\, \chi\right), \qquad
+            s(\chi) = s_i \frac{\chi}{\chi_{i+1}} \quad \text{for } \chi_i \le \chi < \chi_{i+1},
+
+        with :math:`\theta_{\rm pix}` the pixel size (``hp.nside2resol``) and, for one scale per shell, :math:`s_i` that of
+        shell :math:`i` (a constant :math:`s` otherwise).
         """
         chi = np.asarray(chi, dtype=float)
         if isinstance(smooth_Mpc, tuple):
@@ -402,7 +412,7 @@ class Theory:
             return pyccl.angular_cl(self.cosmo, kernel1, kernel2, ell, p_of_k_a=pk, limber_integration_method='spline')
 
     def _apply_pk_smoothing(self, pk: pyccl.Pk2D | None, smoothing: tuple, name: str | tuple = 'matter') -> pyccl.Pk2D | None:
-        """Return a power spectrum multiplied by the Gaussian smoothing of the tracers ``smoothing`` (cached by ``name``).
+        r"""Return a power spectrum multiplied by the Gaussian smoothing of the tracers ``smoothing`` (cached by ``name``).
 
         Same grid as ``pk`` (CCL's nonlinear matter power spectrum if None), with the smoothing of
         each tracer at the comoving distance of each scale factor. Positive spectra are
@@ -425,6 +435,15 @@ class Theory:
         pyccl.Pk2D or None
             Smoothed power spectrum, multiplied by ``exp(-k^2 sum(sigma^2) / 2)`` (the product of
             the Gaussian filters of the two tracers, of variances ``sigma^2``, one per smoothed tracer).
+
+        Notes
+        -----
+        .. math::
+
+            \tilde P(k, z) = P(k, z) \exp\left(-\frac{k^2}{2} \sum_t s_{{\rm eff}, t}^2(\chi(z))\right),
+
+        summed over the smoothed tracers :math:`t` of the pair (:meth:`Tracer.effective_smooth_Mpc`): the product of
+        their Gaussian filters, exact in the Limber approximation for a transverse smoothing.
         """
         if not smoothing:
             return pk
@@ -748,7 +767,7 @@ class Theory:
     SMOOTHING_SCALES = (0.1, 0.12, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.8, 1., 1.2, 1.5, 2., 2.5, 3., 4., 5., 6., 8., 10., 12., 15., 20., 25., 30., 40., 50.)
 
     def smoothed_variance(self, tracer: Tracer, chi: float, nside: int, smooth_Mpc: float | np.ndarray) -> float | np.ndarray:
-        """Return the variance of a map of a tracer, smoothed by a Gaussian at the effective scale.
+        r"""Return the variance of a map of a tracer, smoothed by a Gaussian at the effective scale.
 
         As the maps of :meth:`pollux.map_builder.MapBuilder._smooth_alms`: Gaussian at
         :meth:`Tracer.effective_smooth_Mpc` (at least the pixel size), band-limited at
@@ -769,6 +788,13 @@ class Theory:
         -------
         float or ndarray
             Variance per smoothing scale.
+
+        Notes
+        -----
+        .. math::
+
+            \sigma^2(s) = \sum_{\ell = 2}^{3 N_{\rm side} - 1} \frac{2 \ell + 1}{4 \pi} C_\ell\, e^{-\ell (\ell + 1)\, \theta_s^2},
+            \qquad \theta_s = s_{\rm eff}(\chi) / \chi.
         """
         lmax = 3 * nside - 1
         ell = np.arange(2, lmax + 1)
@@ -780,7 +806,7 @@ class Theory:
 
     @staticmethod
     def lognormal_clipping(variance: float | np.ndarray, b: float) -> float | np.ndarray:
-        """Return the fraction of pixels with ``1 + b * delta < 0``, for a lognormal density contrast.
+        r"""Return the fraction of pixels with ``1 + b * delta < 0``, for a lognormal density contrast.
 
         ``1 + delta = exp(G - s2 / 2)``, with ``G`` Gaussian of variance ``s2 = ln(1 + variance)``.
         For the projected density of the simulation shells this overestimates the clipped
@@ -796,6 +822,17 @@ class Theory:
         Returns
         -------
         float or ndarray
+
+        Notes
+        -----
+        With :math:`1 + \delta = e^{G - \sigma_G^2 / 2}`, :math:`G` Gaussian of variance :math:`\sigma_G^2 = \ln(1 + \sigma^2)`,
+        :math:`1 + b \delta < 0` where :math:`G < c`, so that
+
+        .. math::
+
+            f_{\rm clip} = \Phi\left(\frac{c}{\sigma_G}\right), \qquad c = \ln\left(1 - \frac{1}{b}\right) + \frac{\sigma_G^2}{2},
+
+        with :math:`\Phi` the standard normal cumulative distribution.
         """
         if b <= 1.:
             return 0. * np.asarray(variance)
@@ -804,7 +841,7 @@ class Theory:
 
     @staticmethod
     def lognormal_bias_ratio(variance: float | np.ndarray, b: float) -> float | np.ndarray:
-        """Return the large-scale bias of ``max(0, 1 + b * delta)`` over ``b``, for a lognormal density contrast.
+        r"""Return the large-scale bias of ``max(0, 1 + b * delta)`` over ``b``, for a lognormal density contrast.
 
         From Price's theorem, ``b_eff = <dw/dG> / <w>`` for ``w = max(0, 1 + b * delta)`` and
         ``1 + delta = exp(G - s2 / 2)``. For the simulation shells this overestimates the
@@ -821,6 +858,15 @@ class Theory:
         -------
         float or ndarray
             ``b_eff / b``, at most 1.
+
+        Notes
+        -----
+        With :math:`c` and :math:`\sigma_G` as in :meth:`lognormal_clipping`, for :math:`w = \max(0, 1 + b \delta)`,
+
+        .. math::
+
+            \frac{b_{\rm eff}}{b} = \frac{\langle \partial w / \partial G \rangle}{b \langle w \rangle}
+            = \frac{\Phi\left((\sigma_G^2 - c) / \sigma_G\right)}{b\, \Phi\left((\sigma_G^2 - c) / \sigma_G\right) + (1 - b)\, \Phi(-c / \sigma_G)}.
         """
         if b <= 1.:
             return 1. + 0. * np.asarray(variance)

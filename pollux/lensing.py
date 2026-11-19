@@ -35,8 +35,8 @@ class LensingBuilder(MapBuilder):
     ----------
     shell_builder : pollux.shells.ShellBuilder
         Shell builder providing matter shells and geometry.
-    nzs : {'zsnapshots'} or sequence
-        If 'zsnapshots', produce one convergence map per shell edge (CMB-like).
+    nzs : {'snapshots'} or sequence
+        If 'snapshots', produce one convergence map per shell edge (CMB-like).
         Otherwise, a list describing source n(z) per tomographic bin. Each entry
         can be a callable ``nz(z)`` or a tuple ``(z, n(z))``.
     tag : str or None, optional
@@ -46,14 +46,6 @@ class LensingBuilder(MapBuilder):
         Explicit output directory.
     dtype : data-type, optional
         Output dtype for kappa and shear maps.
-    sigma_e : float, optional
-        Shape noise (ellipticity dispersion) used for noise spectra.
-    nbar : float or array_like, optional
-        Galaxy surface density in gal/arcmin^2 used for noise spectra. If a
-        float is provided it applies uniformly to all maps; if an array_like
-        is provided it must have length matching the number of maps and gives
-        per-map values. Values are converted to per-steradian internally
-        where needed.
     **kwargs
         Forwarded to :class:`pollux.map_builder.MapBuilder`. The footprint, padding,
         octant replication, monopole removal and workspace directory default to
@@ -67,8 +59,6 @@ class LensingBuilder(MapBuilder):
             tag: str | None = None,
             save_dir: str | None = None,
             dtype: np.dtype = np.float32,
-            sigma_e: float | np.ndarray = 0.3,
-            nbar: float | np.ndarray = 5.,
             **kwargs: Any) -> None:
         self.shell_builder = shell_builder
         self.tag = tag
@@ -82,25 +72,7 @@ class LensingBuilder(MapBuilder):
 
         # initialize nzs and number of kappa maps
         self.nzs = nzs
-        self.nkappas = self.shell_builder.nshells if nzs == 'zsnapshots' else len(nzs)
-
-        # normalize sigma_e: accept scalar or per-bin array
-        sigma_arr = np.atleast_1d(sigma_e).astype(float)
-        if sigma_arr.size == 1:
-            sigma_arr = np.full(self.nkappas, float(sigma_arr[0]))
-        elif sigma_arr.size != self.nkappas:
-            raise ValueError(f"sigma_e must be a scalar or array of length {self.nkappas}, got {sigma_arr.size}")
-        self.sigma_e = sigma_arr
-
-        # normalize nbar: accept scalar or per-bin array (API units: gal/arcmin^2)
-        nbar_arr = np.atleast_1d(nbar).astype(float)
-        if nbar_arr.size == 1:
-            nbar_arr = np.full(self.nkappas, float(nbar_arr[0]))
-        elif nbar_arr.size != self.nkappas:
-            raise ValueError(f"nbar must be a scalar or array of length {self.nkappas}, got {nbar_arr.size}")
-        # store API-facing nbar in gal/arcmin^2 and an internal copy in gal/steradian
-        self.nbar = nbar_arr
-        self.nbar_sr = nbar_arr * (60.0 * 180.0 / np.pi)**2
+        self.nkappas = self.shell_builder.nshells if nzs == 'snapshots' else len(nzs)
 
         base_fname = 'kappa'
 
@@ -113,12 +85,12 @@ class LensingBuilder(MapBuilder):
             nside=shell_builder.nside, dtype=dtype, save_dir=save_dir, base_fname=base_fname, nmaps=self.nkappas, sacc_type="galaxy_convergence_cl", **kwargs)
 
         # tomographic bins in file names (kappa_bin{b}), shells for snapshot lensing (kappa_{iii})
-        if nzs != 'zsnapshots':
+        if nzs != 'snapshots':
             self._index_format = 'bin{}'
 
         # configuration of the products: the n(z), and the shells they come from
-        if nzs == 'zsnapshots':
-            nz_parameters = 'zsnapshots'
+        if nzs == 'snapshots':
+            nz_parameters = 'snapshots'
         else:
             # callable n(z) by their values on the grid of the tracers
             zz = np.linspace(0, shell_builder.shell_edges_redshift[-1], 1000)
@@ -126,7 +98,7 @@ class LensingBuilder(MapBuilder):
             nz_parameters = dict(nbins=self.nkappas, sha1=hashlib.sha1(repr(nz_values).encode()).hexdigest())
         parameters = dict(builder=type(self).__name__, nzs=nz_parameters, **self._config_options())
         layout.write_config(self.save_dir, 'kappa', parameters, inputs=[shell_builder.save_dir], realization=self.realization_dir)
-        if nzs != 'zsnapshots':
+        if nzs != 'snapshots':
             self._save_nzs()
 
     def _config_options(self) -> dict:
@@ -153,9 +125,9 @@ class LensingBuilder(MapBuilder):
 
     def _smooth_distance(self, ikappa: int) -> float:
         """Return the comoving distance of the source plane of a per-shell convergence map, converting smoothing scales to angles."""
-        if self.nzs != 'zsnapshots':
+        if self.nzs != 'snapshots':
             raise ValueError(
-                "smoothing in Mpc is only meaningful for snapshot lensing (nzs='zsnapshots'); "
+                "smoothing in Mpc is only meaningful for snapshot lensing (nzs='snapshots'); "
                 "for n(z) bins there is no single comoving distance to convert Mpc to an angle.")
         return self.shell_builder.shell_edges_comoving_distance[ikappa + 1]
 
@@ -174,7 +146,7 @@ class LensingBuilder(MapBuilder):
         smooth_Mpc : float or None, optional
             Comoving Gaussian smoothing scale in Mpc of the convergence a_lm before
             deriving shear (angular width at the source plane, see
-            :meth:`_smooth_sigma`; only for per-shell maps, ``nzs='zsnapshots'``).
+            :meth:`_smooth_sigma`; only for per-shell maps, ``nzs='snapshots'``).
             Shear maps are saved with the suffix ``_{smooth_Mpc}Mpc``.
         lmax : int or None, optional
             Maximum multipole used in harmonic transforms. Defaults to
@@ -258,21 +230,6 @@ class LensingBuilder(MapBuilder):
         """Return the matter power spectrum of the shell builder (see :meth:`MapBuilder.matter_power_spectrum`)."""
         return self.shell_builder.matter_power_spectrum()
 
-    def _noise_cls(self, imap: int) -> float:
-        """Return the (white) shape-noise power spectrum.
-
-        Parameters
-        ----------
-        imap : int
-            Tomographic-bin index.
-
-        Returns
-        -------
-        float
-            Noise level N_ell (constant in ell).
-        """
-        return self.sigma_e[imap]**2 / self.nbar_sr[imap]
-
 
 class BornLensingBuilder(LensingBuilder):
     """Convergence-map builder in the Born approximation.
@@ -288,7 +245,7 @@ class BornLensingBuilder(LensingBuilder):
         If True, estimate the mean density from the shell maps themselves.
         This can affect large-scale modes.
     **kwargs
-        Forwarded to :class:`LensingBuilder` (e.g. ``sigma_e``, ``nbar``).
+        Forwarded to :class:`LensingBuilder`.
     """
 
     def __init__(
@@ -383,8 +340,43 @@ class BornLensingBuilder(LensingBuilder):
 
         return kappas[ikappas] if np.isscalar(ikappas) else kappas
 
+    def _noise_cls(self, imap: int) -> float:
+        r"""Return the white noise of a convergence map: the particle shot noise of its shells, propagated.
+
+        The map sums the density contrast of the shells with weights ``w_i``, so its noise is
+        ``sum_i w_i^2 N_i``, with ``N_i`` the shot noise of shell ``i`` (:meth:`ShellBuilder._noise_cls`,
+        with its subsampling); with ``multiple_planes`` the weights apply to the particle counts, i.e. to the
+        density contrast times the number of particles per pixel.
+
+        Parameters
+        ----------
+        imap : int
+            Convergence map index.
+
+        Returns
+        -------
+        float
+            Noise level N_ell (constant in ell).
+
+        Notes
+        -----
+        .. math::
+
+            N_\ell^{\kappa_j} = \sum_i w_{ij}^2\, N_\ell^{\delta_i},
+
+        with :math:`w_{ij}` the weights of :meth:`compute_weight`, multiplied by :math:`\bar N_i` with ``multiple_planes``.
+        """
+        noise = 0.
+        for ishell in range(self.nshells):
+            w = self.compute_weight(ishell, imap)
+            if w != 0.:
+                if self.multiple_planes:
+                    w = w * self.shell_builder.pixel_density(ishell)
+                noise += w**2 * self.shell_builder._noise_cls(ishell)
+        return noise
+
     def compute_weight(self, ishell: int, ikappa: int) -> float:
-        """Compute the shell weight contributing to a given convergence map.
+        r"""Compute the shell weight contributing to a given convergence map.
 
         Parameters
         ----------
@@ -398,6 +390,32 @@ class BornLensingBuilder(LensingBuilder):
         float
             Scalar weight applied to the shell density/contrast when summing into
             the convergence map.
+
+        Notes
+        -----
+        The convergence of map :math:`j` sums the shells :math:`i` with weights :math:`w_{ij}`. By default (Born
+        approximation, integrating the lensing kernel :math:`q_j` of CCL over each shell),
+
+        .. math::
+
+            \kappa_j = \sum_i w_{ij}\, \delta_i, \qquad
+            w_{ij} = \int_{\chi_i}^{\chi_{i+1}} q_j(\chi)\, d\chi, \qquad
+            q_j(\chi) = \frac{3}{2} \Omega_m H_0^2 \frac{\chi}{a(\chi)} \int_\chi^\infty d\chi'\, n_j(\chi') \frac{\chi' - \chi}{\chi'},
+
+        with :math:`\delta_i = N_i / \bar N_i - 1` the density contrast of the particle counts :math:`N_i` per pixel
+        (:math:`\bar N_i` expected from the simulation, or the mean of the map with ``nbar_from_maps``). With
+        ``multiple_planes``, each shell is a lens plane at its volume-weighted mean redshift :math:`z_i`, of surface
+        density :math:`m_p (N_i - \bar N_i) / (\Omega_{\rm pix} D_A(z_i)^2)`, with :math:`m_p` the mass of a particle
+        and :math:`\Omega_{\rm pix}` the pixel area:
+
+        .. math::
+
+            \kappa_j = \sum_i w_{ij} (N_i - \bar N_i), \qquad
+            w_{ij} = \frac{m_p}{\Omega_{\rm pix} D_A(z_i)^2}
+            \frac{\int_{z_i}^{z_{\max}} n_j(z_s)\, \Sigma_{\rm crit}^{-1}(z_i, z_s)\, dz_s}{\int_0^{z_{\max}} n_j(z_s)\, dz_s},
+
+        or :math:`w_{ij} = m_p / (\Omega_{\rm pix} D_A(z_i)^2 \Sigma_{\rm crit}(z_i, z_s))` for a single source plane
+        at :math:`z_s > z_i` (zero otherwise).
         """
         tracer = self.tracers[ikappa]
 
@@ -439,7 +457,7 @@ class SnapshotBornLensingBuilder(BornLensingBuilder):
     """Born-approximation lensing builder with one convergence map per shell snapshot.
 
     Each map uses a CMB-like lensing kernel sourced at the redshift edge of its
-    shell, equivalent to ``BornLensingBuilder(..., nzs='zsnapshots')``. Prefer
+    shell, equivalent to ``BornLensingBuilder(..., nzs='snapshots')``. Prefer
     constructing via :meth:`pollux.shells.ShellBuilder.snapshot_lensing_builder`.
 
     Parameters
@@ -453,7 +471,7 @@ class SnapshotBornLensingBuilder(BornLensingBuilder):
     """
 
     def __init__(self, shell_builder: ShellBuilder, tag: str | None = 'snapshots', **kwargs: Any) -> None:
-        super().__init__(shell_builder, nzs='zsnapshots', tag=tag, **kwargs)
+        super().__init__(shell_builder, nzs='snapshots', tag=tag, **kwargs)
 
     def _create_tracers(self) -> list[Tracer]:
         """Create one convergence tracer per shell, with its source plane at the shell's far edge.

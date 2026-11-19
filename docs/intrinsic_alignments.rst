@@ -4,17 +4,26 @@ Intrinsic alignments
 :class:`~pollux.ia.IACalculator` adds intrinsic alignments to the catalogs, from the tidal field of each galaxy's
 shell interpolated at its position. The tidal field ``t11``, ``t22``, ``t12`` of a shell
 (:meth:`~pollux.shells.ShellBuilder.compute_tidal_tensor_maps`) is that of its density contrast, transverse to the
-line of sight, and can be smoothed (see :doc:`catalogs`).
+line of sight, and can be smoothed (see :doc:`catalogs`). A shell has no line-of-sight component, so that
+:math:`t_{11} + t_{22} = \delta / 3`.
 
 Models
 ------
 
 ``model`` is one of:
 
-- ``'TA'``, tidal alignment: ``e = C1 s``, with ``s`` the traceless tidal field, ``e1 = C1 (t11 - t22)`` and
-  ``e2 = C1 t12`` (columns ``e1_ia_ta``, ``e2_ia_ta``);
-- ``'TT'``, tidal torquing: ``e = C2 (s s)``, quadratic in the tidal field (columns ``e1_ia_tt``, ``e2_ia_tt``);
+- ``'TA'``, tidal alignment, linear in the tidal field (columns ``e1_ia_ta``, ``e2_ia_ta``);
+- ``'TT'``, tidal torquing, quadratic in the tidal field (columns ``e1_ia_tt``, ``e2_ia_tt``);
 - ``'TATT'``: both.
+
+With :math:`t_{11}`, :math:`t_{22}`, :math:`t_{12}` the transverse tidal field of the galaxy's shell,
+
+.. math::
+
+    e^{\rm TA} = C_1 \left(t_{11} - t_{22},\; t_{12}\right), \qquad
+    e^{\rm TT} = C_2 \left(t_{11}^2 - t_{22}^2,\; t_{12} (t_{11} + t_{22})\right)
+
+(see :meth:`~pollux.ia.IACalculator.augment_catalog`).
 
 The coefficients ``C1`` and ``C2`` are those of CCL (``pyccl.nl_pt.translate_IA_norm``), with the amplitudes
 ``A_TA`` and ``A_TT`` of ``model_params``, so that predictions use the same amplitudes. Since the tidal field is

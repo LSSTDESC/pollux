@@ -29,8 +29,8 @@ Galaxy bias
 Clustered catalogs place galaxies with a relative density set by ``bias`` (one value, or one per bin) and
 ``bias_model``:
 
-- ``'linear'`` (default): ``1 + b delta``. With ``b > 1``, this is negative in underdense pixels, where it is
-  clipped to zero, with a warning giving the fraction of pixels affected. Clipping lowers the effective bias on large
+- ``'linear'`` (default): :math:`\max(0, 1 + b \delta)`. With :math:`b > 1`, :math:`1 + b \delta` is negative in
+  underdense pixels, where it is clipped to zero, with a warning giving the fraction of pixels affected. Clipping lowers the effective bias on large
   scales (and the mean density of Poisson catalogs), more so at high resolution where the density contrast varies
   most;
 - ``'power_law'``: ``(1 + delta)^b``, normalized over the shell. It is positive everywhere and has bias ``b`` on
@@ -47,10 +47,22 @@ interpolated:
 - ``smooth_Mpc``: one scale, one scale per shell, or a dictionary of either per field. Fields made together (the
   tidal field components, the shear components) share their scale.
 
+A field smoothed at the comoving scale :math:`s` has, at the comoving distance :math:`\chi` of its shell, the
+effective scale :math:`s_{\rm eff} = \max(s, \theta_{\rm pix} \chi)`, at least the pixel size
+(:meth:`~pollux.cosmo.Tracer.effective_smooth_Mpc`), and its predictions are those of the smoothed matter power
+spectrum
+
+.. math::
+
+    \tilde P(k, z) = P(k, z) \exp\left(-\frac{k^2}{2} \sum_t s_{{\rm eff}, t}^2\right),
+
+summed over the smoothed tracers of a pair (see :doc:`statistics`).
+
 Smoothing the density reduces clipping, so that the galaxies keep the bias they are given.
 :meth:`~pollux.cosmo.Theory.lognormal_smoothing` chooses one scale per shell: the smallest round scale, at least
-the pixel size, for which a lognormal density field predicts a large-scale bias deficit below ``max_bias_error``
-(or a clipped fraction below ``max_clip``). The lognormal model overestimates this deficit, so the scales are
+the pixel size, for which a lognormal density field of the variance of the smoothed shell predicts a large-scale
+bias deficit :math:`1 - b_{\rm eff} / b` below ``max_bias_error`` (or a clipped fraction below ``max_clip``; see
+:meth:`~pollux.cosmo.Theory.lognormal_bias_ratio` and :meth:`~pollux.cosmo.Theory.lognormal_clipping`). The lognormal model overestimates this deficit, so the scales are
 conservative. Predictions include the smoothing of each tracer (see :doc:`statistics`).
 
 Interpolated fields

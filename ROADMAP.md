@@ -5,6 +5,7 @@ Planned technical developments of pollux, with their GitHub issue when there is 
 - Simulations
   - Ingest the Gower Street simulations ([#30](https://github.com/LSSTDESC/pollux/issues/30)).
 - Galaxies
+  - Separate lens and source catalogs (e.g. maglim-like lenses and metadetect-like sources), each with its own n(z), density and interpolated fields (no shear for lenses): an option for catalogs without the shear and IA augmentors in the pipeline, and a catalog block per sample in the run scripts.
   - Sample galaxies from halos with a halo occupation distribution (HOD), as an alternative to the biased sampling of the density field (`HOD.py`, placeholder for now) ([#9](https://github.com/LSSTDESC/pollux/issues/9)).
   - Make the pixel-scale floor of the smoothing (`Tracer.effective_smooth_Mpc`) a parameter.
 - Systematics
@@ -16,8 +17,11 @@ Planned technical developments of pollux, with their GitHub issue when there is 
   - Magnification ([#14](https://github.com/LSSTDESC/pollux/issues/14)).
   - CMB lensing ([#15](https://github.com/LSSTDESC/pollux/issues/15)).
 - Statistics
+  - Measure the 2pt functions and Cls of the catalogs with [TXPipe](https://github.com/LSSTDESC/TXPipe), the DESC pipeline: export of the catalogs, tomography and n(z) to its inputs, including 3x2pt between separate lens and source catalogs. pollux's own measurements stay as a quick validation of the products.
+  - Covariance module (`pollux.covariance`): the Gaussian covariance of the Cls of maps (pollux's predictions) saved with them in `cls.fits`, and that of the catalog statistics from [TJPCov](https://github.com/LSSTDESC/TJPCov) ([#16](https://github.com/LSSTDESC/pollux/issues/16)), as a pipeline task. Prototype with TJPCov master in the benchmarks of the HACC-HOS-Y1 tests; contribute its speed-ups (binning, projection of diagonal covariances) and the fix of the assembly of the xi- blocks upstream.
+  - Covariance improvements: bin-averaged Wigner transforms and exact pair counts for the noise of the 2pt functions (TJPCov branch `real_nmt_ryo`), multipoles beyond 3 nside with the pixel window on the signal only, non-Gaussian terms (super-sample and connected, halo model), intrinsic alignments.
+  - Survey configurations (n_eff per bin, shape noise, sky fraction; e.g. LSST Y1 and Y10) to compute the covariance of a survey on the predictions of the products, and judge their deviations in units of its errors; and optionally generate catalogs matching a survey.
   - Jackknife errors of the catalog 2pt functions: TreeCorr patches (`npatch`) with `var_method='jackknife'`, and the full covariance (`treecorr.estimate_multi_cov`). Only shot-noise errors are measured for now.
-  - Theory covariances from [CosmoCov](https://github.com/CosmoLike/CosmoCov) or [TJPCov](https://github.com/LSSTDESC/TJPCov) ([#16](https://github.com/LSSTDESC/pollux/issues/16)).
 - Performance
   - Column-oriented catalog format (Parquet or HDF5), so that reading a few columns or a subsample does not read whole FITS rows.
   - Move what can be to GPUs (spherical harmonic transforms, painting particles on maps, baryonification, catalog sampling).

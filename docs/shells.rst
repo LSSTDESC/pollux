@@ -67,8 +67,10 @@ convergence map follows from its weights (see :doc:`lensing`).
 Footprint
 ---------
 
-``mask`` sets the footprint of all maps: ``None`` for the full sky, ``'octant'``, or a HEALPix mask (array or FITS
-file, NESTED ordering). Only the replicas overlapping a shell and the footprint are read. With ``padding_deg``, maps are built on
+The :class:`~pollux.footprint.Footprint` given to the shell builder is that of all maps, shared by the builders made
+from it, with the files of the root directory of the products (:class:`~pollux.io.files.PolluxIO`, see :doc:`outputs`).
+Its ``mask`` is ``None`` for the full sky, ``'octant'``, or a HEALPix mask (array or FITS file, NESTED
+ordering). Only the replicas overlapping a shell and the footprint are read. With ``padding_deg``, maps are built on
 the footprint dilated by that angle, and harmonic transforms use the padded footprint apodized over the padding
 (``apotype``), which limits the leakage at the edges. Measurements and catalogs use the footprint itself.
 

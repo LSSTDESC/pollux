@@ -16,7 +16,7 @@ import os
 import yaml
 
 from .config import CONFIG_FNAME, read_config
-from .layout import INTERMEDIATE
+from .files import INTERMEDIATE
 
 
 def product_index(root_dir: str) -> list[dict]:
@@ -43,6 +43,7 @@ def product_index(root_dir: str) -> list[dict]:
 
 
 def main() -> None:
+    """Command line: ``python -m pollux.io.index ROOT [--output FILE]`` prints the index of the products, or writes it to a YAML file."""
     parser = argparse.ArgumentParser(description="Index of the pollux products under a root directory.")
     parser.add_argument('root_dir', help="root directory to search")
     parser.add_argument('--output', help="YAML file to write the index to (otherwise, a summary is printed)")

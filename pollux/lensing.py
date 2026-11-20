@@ -16,8 +16,8 @@ import healsparse as hsp
 import numpy as np
 import pyccl
 
-from .io import layout
-from .io.layout import PolluxIO
+from .io import PolluxIO
+from .io.files import atomic_write
 from .cosmo import Tracer
 from .map_builder import MapBuilder, MapSum
 from .utils.numerics import quad
@@ -42,13 +42,12 @@ class LensingBuilder(MapBuilder):
         can be a callable ``nz(z)`` or a tuple ``(z, n(z))``.
     tag : str or None, optional
         Name of the n(z): maps go to the ``'kappa'`` product of the shell builder's files with
-        ``nz=tag`` (``kappa/{tag}/``, see :class:`pollux.io.layout.PolluxIO`), ``kappa/default/`` when None.
+        ``nz=tag`` (``kappa/{tag}/``, see :class:`pollux.io.files.PolluxIO`), ``kappa/default/`` when None.
     dtype : data-type, optional
         Output dtype for kappa and shear maps.
     **kwargs
-        Forwarded to :class:`pollux.map_builder.MapBuilder`. The footprint, padding,
-        octant replication, monopole removal and workspace directory default to
-        those of ``shell_builder``.
+        Forwarded to :class:`pollux.map_builder.MapBuilder`. The footprint is that of
+        ``shell_builder``, and monopole removal defaults to its own.
     """
 
     def __init__(self, shell_builder: ShellBuilder, nzs: str | list, tag: str | None = None, dtype: np.dtype = np.float32, **kwargs: Any) -> None:
@@ -62,15 +61,13 @@ class LensingBuilder(MapBuilder):
         self.nzs = nzs
         self.nkappas = self.shell_builder.nshells if nzs == 'snapshots' else len(nzs)
 
-        kwargs.setdefault('mask', shell_builder.footprint)
-        for k in ('padding_deg', 'apotype', 'padding_nside', 'replicate_octant', 'remove_monopole'):
-            kwargs.setdefault(k, getattr(shell_builder, k))
+        kwargs.setdefault('remove_monopole', shell_builder.remove_monopole)
         super().__init__(
-            nside=shell_builder.nside,
+            nmaps=self.nkappas,
             dtype=dtype,
+            footprint=shell_builder.footprint,
             io=shell_builder.io.with_options(nz=tag or 'default'),
             product='kappa',
-            nmaps=self.nkappas,
             sacc_type="galaxy_convergence_cl",
             **kwargs)
 
@@ -116,17 +113,12 @@ class LensingBuilder(MapBuilder):
         if not common:
             self.io.write_npy(fname, np.array(self.nzs, dtype=object))
             return
-        with layout.atomic_write(fname) as tmp:
+        with atomic_write(fname) as tmp:
             np.savetxt(tmp, np.column_stack([tables[0][0]] + [nz[1] for nz in tables]), header='z ' + ' '.join(f'nz_{i}' for i in range(len(tables))))
         logger.debug("Saved to file %s.", fname)
 
-    def _smooth_distance(self, ikappa: int) -> float:
-        """Return the comoving distance of the source plane of a per-shell convergence map, converting smoothing scales to angles."""
-        if self.nzs != 'snapshots':
-            raise ValueError(
-                "smoothing in Mpc is only meaningful for snapshot lensing (nzs='snapshots'); "
-                "for n(z) bins there is no single comoving distance to convert Mpc to an angle.")
-        return self.shell_builder.shell_edges_comoving_distance[ikappa + 1]
+    # ==================================================================================================================
+    # region Shear maps
 
     def compute_shear_maps(self,
                            ikappas: int | Iterable[int] | None = None,
@@ -155,7 +147,7 @@ class LensingBuilder(MapBuilder):
             - If ``ikappas`` is ``None`` or an iterable: returns a dict keyed by kappa index
               with list values ``[gamma1_map, gamma2_map]``. Also writes maps to disk.
         """
-        _, ipix = self.get_mask(nest=False, return_ipix=True, padded=True)
+        ipix = self.footprint.ipix(nest=False, padded=True)
         save_field_map = save_field_map and smooth_Mpc is not None
 
         gammas = {}
@@ -166,9 +158,7 @@ class LensingBuilder(MapBuilder):
             if smooth_Mpc is not None:
                 self._smooth_alms(ikappa, klm, smooth_Mpc, lmax)
                 if save_field_map:
-                    self._save_map(
-                        self._alm2hspmap(klm, ipix, lmax, mean=self._alm_field_mean(ikappa)),
-                        self.path(ikappa, what=self.smoothed_field_what, smooth_Mpc=smooth_Mpc))
+                    self._write_hspmap(self.path(ikappa, what=self.smoothed_field_what, smooth_Mpc=smooth_Mpc), self._field_from_alms(ikappa, klm))
 
             # E-mode of the shear from the convergence
             glm_E = hp.almxfl(klm, spin2_factor(lmax))
@@ -181,12 +171,41 @@ class LensingBuilder(MapBuilder):
 
             gamma1_fname = self.path(ikappa, what='gamma1', smooth_Mpc=smooth_Mpc)
             gamma2_fname = self.path(ikappa, what='gamma2', smooth_Mpc=smooth_Mpc)
-            self._save_map(gamma1, gamma1_fname)
-            self._save_map(gamma2, gamma2_fname)
+            self._write_hspmap(gamma1_fname, gamma1)
+            self._write_hspmap(gamma2_fname, gamma2)
 
             gammas[ikappa] = [gamma1, gamma2]
 
         return gammas[ikappas] if np.isscalar(ikappas) else gammas
+
+    def _smooth_distance(self, ikappa: int) -> float:
+        """Return the comoving distance of the source plane of a per-shell convergence map, converting smoothing scales to angles.
+
+        Parameters
+        ----------
+        ikappa : int
+            Index of the map (shell).
+
+        Returns
+        -------
+        float
+            Comoving distance (Mpc) of the far edge of the shell.
+
+        Raises
+        ------
+        ValueError
+            For maps of n(z) bins, which have no single source distance.
+        """
+        if self.nzs != 'snapshots':
+            raise ValueError(
+                "smoothing in Mpc is only meaningful for snapshot lensing (nzs='snapshots'); "
+                "for n(z) bins there is no single comoving distance to convert Mpc to an angle.")
+        return self.shell_builder.shell_edges_comoving_distance[ikappa + 1]
+
+    # endregion
+
+    # ==================================================================================================================
+    # region Predictions
 
     def _create_tracers(self) -> list[Tracer]:
         """Create one lensing tracer per source redshift distribution (callables tabulated on 1000 redshifts).
@@ -207,8 +226,17 @@ class LensingBuilder(MapBuilder):
         return tracers
 
     def matter_power_spectrum(self) -> pyccl.Pk2D | None:
-        """Return the matter power spectrum of the shell builder (see :meth:`MapBuilder.matter_power_spectrum`)."""
+        """Return the matter power spectrum of the shell builder, for the predictions.
+
+        Returns
+        -------
+        pyccl.Pk2D or None
+            That of the shell builder (:meth:`pollux.statistics.maps.MapStatistics.matter_power_spectrum`, with
+            baryons for :class:`pollux.baryons.BaryonifiedShellBuilder`), None for the cosmology's own.
+        """
         return self.shell_builder.matter_power_spectrum()
+
+    # endregion
 
 
 class BornLensingBuilder(LensingBuilder):
@@ -251,17 +279,26 @@ class BornLensingBuilder(LensingBuilder):
 
             zmax = self.shell_builder.shell_edges_redshift[-1]
             self.dndz_norm = [quad(lambda z: t.ccl(self.cosmo).get_dndz(z), 0., zmax) if t.kind == 'shear' else np.nan for t in self.tracers]
-            self.zlens = [self.shell_builder.mean_z_volume(ishell) for ishell in range(self.nshells)]
+            self.zlens = [self.shell_builder.mean_redshift_volume(ishell) for ishell in range(self.nshells)]
 
     def config(self) -> dict:
         """Return the configuration of the products (:meth:`LensingBuilder.config`), with the options of the builder.
 
         Options at their defaults are left out, so that the configurations of products made before
         they were recorded stay valid.
+
+        Returns
+        -------
+        dict
+            That of :meth:`LensingBuilder.config`, with ``multiple_planes`` and ``nbar_from_maps`` in its
+            parameters if True.
         """
         config = super().config()
         config['parameters'].update({k: True for k in ('multiple_planes', 'nbar_from_maps') if getattr(self, k)})
         return config
+
+    # ==================================================================================================================
+    # region Convergence
 
     def construct_maps(self, ikappas: int | Iterable[int] | None = None) -> hsp.HealSparseMap | dict[int, hsp.HealSparseMap]:
         """Construct and save convergence maps by summing weighted shells.
@@ -280,7 +317,7 @@ class BornLensingBuilder(LensingBuilder):
         """
         # Loop over shells (read once) and accumulate weighted contributions to all kappas:
         # kappa += w * density, with density = shell / nbar - 1 (or shell - nbar for multiple planes)
-        mask = self.get_mask(nest=True, padded=True)
+        mask = self.footprint.mask(nest=True, padded=True)
         kappa_sums = {ikappa: MapSum(mask, self.nside_c, self.dtype) for ikappa in self.iter(ikappas)}
 
         # only read shells contributing to at least one requested kappa
@@ -306,44 +343,9 @@ class BornLensingBuilder(LensingBuilder):
 
         kappas = {ikappa: kappa_sum.to_map() for ikappa, kappa_sum in kappa_sums.items()}
         for ikappa, kappa in kappas.items():
-            self._save_map(kappa, self.path(ikappa))
+            self._write_hspmap(self.path(ikappa), kappa)
 
         return kappas[ikappas] if np.isscalar(ikappas) else kappas
-
-    def _noise_cls(self, imap: int) -> float:
-        r"""Return the white noise of a convergence map: the particle shot noise of its shells, propagated.
-
-        The map sums the density contrast of the shells with weights ``w_i``, so its noise is
-        ``sum_i w_i^2 N_i``, with ``N_i`` the shot noise of shell ``i`` (:meth:`ShellBuilder._noise_cls`,
-        with its subsampling); with ``multiple_planes`` the weights apply to the particle counts, i.e. to the
-        density contrast times the number of particles per pixel.
-
-        Parameters
-        ----------
-        imap : int
-            Convergence map index.
-
-        Returns
-        -------
-        float
-            Noise level N_ell (constant in ell).
-
-        Notes
-        -----
-        .. math::
-
-            N_\ell^{\kappa_j} = \sum_i w_{ij}^2\, N_\ell^{\delta_i},
-
-        with :math:`w_{ij}` the weights of :meth:`compute_weight`, multiplied by :math:`\bar N_i` with ``multiple_planes``.
-        """
-        noise = 0.
-        for ishell in range(self.nshells):
-            w = self.compute_weight(ishell, imap)
-            if w != 0.:
-                if self.multiple_planes:
-                    w = w * self.shell_builder.pixel_density(ishell)
-                noise += w**2 * self.shell_builder._noise_cls(ishell)
-        return noise
 
     def compute_weight(self, ishell: int, ikappa: int) -> float:
         r"""Compute the shell weight contributing to a given convergence map.
@@ -394,7 +396,7 @@ class BornLensingBuilder(LensingBuilder):
             zlens = self.zlens[ishell]
 
             if zlens is None:
-                zlens = self.shell_builder.mean_z_volume(ishell)
+                zlens = self.shell_builder.mean_redshift_volume(ishell)
 
             d_A_lens = pyccl.angular_diameter_distance(self.cosmo, 1. / (1. + zlens))  # needed to obtain surface mass density in 1/Mpc^2
 
@@ -421,6 +423,48 @@ class BornLensingBuilder(LensingBuilder):
             chi_min, chi_max = self.shell_builder.shell_edges_comoving_distance[ishell:ishell + 2]
             tracer_ccl = tracer.ccl(self.cosmo)
             return quad(lambda chi: tracer_ccl.get_kernel(chi), chi_min, chi_max)
+
+    # endregion
+
+    # ==================================================================================================================
+    # region Predictions
+
+    def _noise_cls(self, imap: int) -> float:
+        r"""Return the white noise of a convergence map: the particle shot noise of its shells, propagated.
+
+        The map sums the density contrast of the shells with weights ``w_i``, so its noise is
+        ``sum_i w_i^2 N_i``, with ``N_i`` the shot noise of shell ``i`` (:meth:`ShellBuilder._noise_cls`,
+        with its subsampling); with ``multiple_planes`` the weights apply to the particle counts, i.e. to the
+        density contrast times the number of particles per pixel.
+
+        Parameters
+        ----------
+        imap : int
+            Convergence map index.
+
+        Returns
+        -------
+        float
+            Noise level N_ell (constant in ell).
+
+        Notes
+        -----
+        .. math::
+
+            N_\ell^{\kappa_j} = \sum_i w_{ij}^2\, N_\ell^{\delta_i},
+
+        with :math:`w_{ij}` the weights of :meth:`compute_weight`, multiplied by :math:`\bar N_i` with ``multiple_planes``.
+        """
+        noise = 0.
+        for ishell in range(self.nshells):
+            w = self.compute_weight(ishell, imap)
+            if w != 0.:
+                if self.multiple_planes:
+                    w = w * self.shell_builder.pixel_density(ishell)
+                noise += w**2 * self.shell_builder._noise_cls(ishell)
+        return noise
+
+    # endregion
 
 
 class SnapshotBornLensingBuilder(BornLensingBuilder):

@@ -12,6 +12,7 @@ from .io import PolluxIO, PolluxLoader
 __all__ = ['PolluxIO', 'PolluxLoader']
 
 try:
+    from .footprint import Footprint
     from .lensing import BornLensingBuilder, SnapshotBornLensingBuilder
     from .reader import SLICSReader, HACCReader, HACCHaloReader, DummyReader
     from .shells import SnapshotShellBuilder, SnapshotInterpShellBuilder, LightconeShellBuilder
@@ -19,7 +20,7 @@ try:
     from .ia import CatalogAugmentorIA
     from .baryons import BaryonifiedShellBuilder
     __all__ += [
-        'BornLensingBuilder', 'SnapshotBornLensingBuilder', 'SLICSReader', 'HACCReader', 'HACCHaloReader', 'DummyReader', 'SnapshotShellBuilder',
+        'Footprint', 'BornLensingBuilder', 'SnapshotBornLensingBuilder', 'SLICSReader', 'HACCReader', 'HACCHaloReader', 'DummyReader', 'SnapshotShellBuilder',
         'SnapshotInterpShellBuilder', 'LightconeShellBuilder', 'CatalogUniform', 'CatalogClusteredMultinomial', 'CatalogClusteredPoisson', 'CatalogAugmentorIA',
         'CatalogAugmentorShear', 'BaryonifiedShellBuilder'
     ]

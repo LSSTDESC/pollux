@@ -92,7 +92,17 @@ def save_code_version(out_dir: str, files: Iterable[str] = (), require_clean: bo
 
 
 def _git(*args: str) -> str | None:
-    """Return the output of a git command in the repository of this package, or None if it fails."""
+    """Return the output of a git command in the repository of this package, or None if it fails.
+
+    Parameters
+    ----------
+    *args : str
+        Arguments of ``git``.
+
+    Returns
+    -------
+    str or None
+    """
     try:
         return subprocess.run(['git', '-c', 'safe.directory=*', *args],
                               cwd=os.path.dirname(os.path.abspath(__file__)),

@@ -32,15 +32,8 @@ class MapStatistics(TwoPointStatistics):
     Subclasses implement :meth:`_create_tracers`, and :meth:`_noise_cls` for noise-aware predictions.
     """
 
-    @property
-    def tracers_ccl(self) -> list:
-        """Return the CCL tracers of the maps.
-
-        Returns
-        -------
-        list of pyccl.Tracer
-        """
-        return [t.ccl(self.cosmo) for t in self.tracers]
+    # ==================================================================================================================
+    # region Tracers
 
     @cached_property
     def tracers(self) -> list:
@@ -49,8 +42,8 @@ class MapStatistics(TwoPointStatistics):
         Returns
         -------
         list of pollux.cosmo.Tracer
-            One tracer per map, from which CCL (:attr:`tracers_ccl`) and SACC
-            (:attr:`tracers_sacc`) tracers are derived.
+            One tracer per map, from which CCL and SACC tracers are derived
+            (:meth:`pollux.cosmo.Tracer.ccl`, :meth:`pollux.cosmo.Tracer.sacc`).
         """
         return self._create_tracers()
 
@@ -64,32 +57,10 @@ class MapStatistics(TwoPointStatistics):
             One tracer per map.
         """
 
-    def _sacc_tracers(self) -> dict[str, list]:
-        """Return the SACC tracers of the maps (role ``'map'``), see :meth:`~pollux.statistics.base.TwoPointStatistics._sacc_tracers`."""
-        return {'map': self.tracers_sacc}
+    # endregion
 
-    @cached_property
-    def tracers_sacc(self) -> list:
-        """Return the SACC tracers used to store measured spectra.
-
-        Returns
-        -------
-        list of sacc.tracers.BaseTracer
-        """
-        return [t.sacc() for t in self.tracers]
-
-    def matter_power_spectrum(self) -> pyccl.Pk2D | None:
-        """Return the matter power spectrum consistent with the maps, for predictions.
-
-        Returns
-        -------
-        pyccl.Pk2D or None
-            None (CCL's nonlinear matter power spectrum) by default; overridden
-            by builders whose maps follow another one (e.g.
-            :class:`~pollux.baryons.BaryonifiedShellBuilder`, or lensing builders
-            using their shell builder's).
-        """
-        return None
+    # ==================================================================================================================
+    # region Power spectra
 
     def compute_cls(
             self,
@@ -196,21 +167,22 @@ class MapStatistics(TwoPointStatistics):
         Returns
         -------
         pymaster.NmtBin
-            Bandpower binning used for :meth:`compute_cls` and :meth:`predict_cls`.
+            Bandpower binning used for :meth:`compute_cls` and :meth:`predict_cls`: that given to the builder, or
+            20 logarithmic bands from ell = 8 to ``2 * nside``, dividing out the pixel window with ``pixel_window``.
 
         Notes
         -----
         Lazy, so that the builder stays light to pickle: the ``NmtBin`` is not
         constructed until first accessed (unless given at construction).
         """
-        return make_nmtbin_logspaced(self.nside, 8, 2 * self.nside, self.nlb, f_ell=self.f_ell)
+        return make_nmtbin_logspaced(self.nside, 8, 2 * self.nside, 20, f_ell='pixwin' if self.pixel_window else None)
 
     @cached_property
     def wsp(self) -> nmt.NmtWorkspace:
         """Return (and lazily create) the NaMaster workspace.
 
         The workspace stores the mode-coupling matrix and bandpower windows for
-        the current mask and binning, and is cached on disk with the footprint products (``io.dir('footprint')``).
+        the current mask and binning, and is cached on disk with the footprint products (:meth:`pollux.footprint.Footprint.path`).
 
         Returns
         -------
@@ -224,21 +196,43 @@ class MapStatistics(TwoPointStatistics):
         """
         return self.io.cached(self._path_wsp, self._compute_wsp, self.io.read_wsp, self._write_wsp)
 
+    @property
+    def _path_wsp(self) -> str:
+        """File of the NaMaster workspace, shared by the realizations with the same footprint and binning.
+
+        Returns
+        -------
+        str
+            ``{root_dir}/footprint/wsp_b{binning}.wsp`` (:meth:`pollux.footprint.Footprint.path`).
+        """
+        return self.footprint.path('wsp', f"b{binning_id(self.b, 'pixwin' if self.pixel_window else None)}", ext='wsp')
+
     def _compute_wsp(self) -> nmt.NmtWorkspace:
-        # workspace of the alm weights and binning (see wsp)
-        mask = self._alm_weights
+        """Compute the workspace of the alm weights and binning (see :attr:`wsp`).
+
+        Returns
+        -------
+        pymaster.NmtWorkspace
+        """
+        mask = self.footprint.alm_weights
         dummy_f = nmt.NmtField(mask, [np.zeros_like(mask)], lite=True)
         wsp = nmt.NmtWorkspace()
         wsp.compute_coupling_matrix(dummy_f, dummy_f, self.b)
         return wsp
 
-    @property
-    def _path_wsp(self) -> str:
-        """File of the NaMaster workspace, shared by the realizations with the same footprint and binning."""
-        padding = f'_pad{self.padding_deg:g}{self.apotype or ""}' if self.padding_deg is not None else ''
-        if self.replicate_octant:
-            padding = '_octrep'
-        return self.io.path('footprint', f'wsp_nside{self.nside}_{self.footprint_id}{padding}_b{binning_id(self.b, self.f_ell)}', ext='wsp')
+    @cached_property
+    def bpws(self) -> np.ndarray:
+        """Return the bandpower windows of the workspace (see :attr:`wsp`).
+
+        They are saved apart, next to the workspace, so that predictions do not load the
+        coupling matrix (several GB at high resolution), only once to save them.
+
+        Returns
+        -------
+        ndarray
+            Shape ``(n_cl, n_bands, n_cl, lmax + 1)``.
+        """
+        return self._saved_bpws(self._path_wsp, lambda: self.wsp)
 
     def _save_cls(self, ell: np.ndarray, cl: dict[tuple[int, int], np.ndarray], metadata: dict | None = None) -> str:
         """Save angular power spectra to a SACC FITS file (``cls.fits`` of the product).
@@ -259,7 +253,8 @@ class MapStatistics(TwoPointStatistics):
         str
             Path to the saved SACC FITS file.
         """
-        return self._save_sacc(self.io.path(self.product, 'cls'), {self.sacc_type: cl}, ell, {self.sacc_type: ('map', 'map')}, metadata=metadata)
+        tracers = [t.sacc() for t in self.tracers]
+        return self._save_sacc(self.io.path(self.product, 'cls'), {self.sacc_type: cl}, ell, {self.sacc_type: (tracers, tracers)}, metadata=metadata)
 
     def load_cls(self, return_dict: bool = False, return_errors: bool = False) -> sacc.Sacc | tuple:
         """Load saved angular power spectra.
@@ -290,6 +285,11 @@ class MapStatistics(TwoPointStatistics):
             return res
         ell, cl, *errors = (r.get(self.sacc_type, {}) for r in res)
         return (next(iter(ell.values())), cl, *errors)
+
+    # endregion
+
+    # ==================================================================================================================
+    # region Predictions
 
     def predict_cls(
             self,
@@ -343,7 +343,7 @@ class MapStatistics(TwoPointStatistics):
         -----
         Wraps :meth:`pollux.cosmo.Theory.predict_cls` with the builder's tracers,
         matter power spectrum, workspace bandpower windows, pixel window
-        (``f_ell``), noise model (:meth:`_noise_cls`) and sky fraction.
+        (``pixel_window``), noise model (:meth:`_noise_cls`) and sky fraction.
         """
 
         imaps, pairs = self._pairs(imaps, auto_only, pairs)
@@ -354,17 +354,10 @@ class MapStatistics(TwoPointStatistics):
             if error_bars:
                 raise ValueError("ell cannot be given with error_bars")
 
-        # bandpower windows of the workspace, and the field window (pixel window, or a given one above the first bandpower)
-        bpws, f_ell = None, None
-        if binning == 'wsp':
-            bpws = self.bpws
-        if binning != 'unbinned':
-            if self.f_ell is not None:
-                if self.f_ell == 'pixwin':
-                    f_ell = hp.pixwin(self.nside)[:self.b.lmax + 1]
-                else:
-                    f_ell = np.ones(self.b.lmax + 1)
-                    f_ell[self.b.get_ell_list(0)[0]:] = self.f_ell
+        # bandpower windows of the workspace, and the pixel window of the maps, applied to the theory before binning
+        # (the binning, its bandpower windows included, then divides it out if it was built to)
+        bpws = self.bpws if binning == 'wsp' else None
+        f_ell = hp.pixwin(self.nside)[:self.b.lmax + 1] if self.pixel_window and binning != 'unbinned' else None
 
         # map tracers, with their noise for the error bars
         tracers = self.tracers
@@ -378,24 +371,10 @@ class MapStatistics(TwoPointStatistics):
                                       noise=noise,
                                       error_bars=error_bars,
                                       stacked=stacked,
-                                      fsky=self.fsky,
+                                      fsky=self.footprint.fsky,
                                       cross_covariance=not auto_only,
                                       progress=self.tqdm)
         return res
-
-    @cached_property
-    def bpws(self) -> np.ndarray:
-        """Return the bandpower windows of the workspace (see :attr:`wsp`).
-
-        They are saved apart, next to the workspace, so that predictions do not load the
-        coupling matrix (several GB at high resolution), only once to save them.
-
-        Returns
-        -------
-        ndarray
-            Shape ``(n_cl, n_bands, n_cl, lmax + 1)``.
-        """
-        return self._saved_bpws(self._path_wsp, lambda: self.wsp)
 
     def _noise_cls(self, imap: int) -> float | np.ndarray:
         """Return the noise angular power spectrum for one map.
@@ -433,6 +412,19 @@ class MapStatistics(TwoPointStatistics):
         """
         return Theory(self.cosmo, p_of_k_a=self.matter_power_spectrum())
 
+    def matter_power_spectrum(self) -> pyccl.Pk2D | None:
+        """Return the matter power spectrum consistent with the maps, for predictions.
+
+        Returns
+        -------
+        pyccl.Pk2D or None
+            None (CCL's nonlinear matter power spectrum) by default; overridden
+            by builders whose maps follow another one (e.g.
+            :class:`~pollux.baryons.BaryonifiedShellBuilder`, or lensing builders
+            using their shell builder's).
+        """
+        return None
+
     def reference_scales(self, smooth_Mpc: float | None = None) -> dict[str, np.ndarray]:
         """Return the angular scales of the simulation box, of the map resolution, and of a smoothing, per map.
 
@@ -447,10 +439,10 @@ class MapStatistics(TwoPointStatistics):
             ``theta_box`` (arcmin) and ``ell_box``, and ``theta_smooth``, ``ell_smooth``
             with ``smooth_Mpc`` (at least the pixel size, see
             :meth:`pollux.cosmo.Tracer.effective_smooth_Mpc`), one value per map, at the redshift where its signal comes
-            from (:meth:`pollux.cosmo.Tracer.mean_z_kernel`, e.g. the lenses for lensing maps);
+            from (:meth:`pollux.cosmo.Tracer.mean_redshift_kernel`, e.g. the lenses for lensing maps);
             ``theta_res`` (arcmin) and ``ell_res``, the pixel size of ``nside``, the same for all maps.
         """
-        z_kernel = np.array([t.mean_z_kernel(self.cosmo) for t in self.tracers])
+        z_kernel = np.array([t.mean_redshift_kernel(self.cosmo) for t in self.tracers])
         d_a = pyccl.comoving_angular_distance(self.cosmo, 1. / (1. + z_kernel))
         rad2arcmin = 180. * 60. / np.pi
         ell_box = 2. * np.pi / self.reader.boxsize * d_a
@@ -460,6 +452,11 @@ class MapStatistics(TwoPointStatistics):
             theta_smooth = Tracer.effective_smooth_Mpc(smooth_Mpc, d_a, self.nside) / d_a
             scales.update(theta_smooth=rad2arcmin * theta_smooth, ell_smooth=np.pi / theta_smooth)
         return scales
+
+    # endregion
+
+    # ==================================================================================================================
+    # region Plots
 
     def plot_cls(
             self,
@@ -518,6 +515,11 @@ class MapStatistics(TwoPointStatistics):
                 title=f'{self.map_name} {{i}} {{j}}',
                 sharey=False,
                 fname=os.path.join(plot_dir, f'{self.map_name}_cls' + ('' if mode == 'values' else f'_{mode}') + '.png'))
+
+    # endregion
+
+    # ==================================================================================================================
+    # region Moments
 
     def compute_map_moments(self, theta_smooth: np.ndarray | Iterable[float], nside_small: int = 512, save: bool = True) -> tuple[np.ndarray, dict, dict, dict]:
         """Compute 2nd/3rd/4th moments of smoothed maps.
@@ -636,6 +638,11 @@ class MapStatistics(TwoPointStatistics):
         logger.debug("Found and loaded file at %s.", fname)
         return moments['theta_smooth'], moments['second_moment'], moments['third_moment'], moments['fourth_moment']
 
+    # endregion
+
+    # ==================================================================================================================
+    # region Gaussian maps
+
     def generate_gaussian_maps(self, imaps: int | Iterable[int] | None = None, *, auto_only: bool = False, seed: int = -1) -> None:
         """Generate Gaussian random maps consistent with predicted spectra.
 
@@ -659,7 +666,7 @@ class MapStatistics(TwoPointStatistics):
         # Compute theory Cl's
         _, cls = self.predict_cls(binning='unbinned', auto_only=auto_only, ell=np.arange(3 * self.nside))
 
-        _, ipix = self.get_mask(nest=False, return_ipix=True, padded=True)
+        ipix = self.footprint.ipix(nest=False, padded=True)
 
         if auto_only:
             for imap in self.tqdm(imaps, desc="[generate_gaussian_maps]"):
@@ -671,7 +678,7 @@ class MapStatistics(TwoPointStatistics):
 
                 # Save map
                 fname = self.path(imap)
-                self._save_map(hspmap, fname)
+                self._write_hspmap(fname, hspmap)
 
         else:
             # Generate full-sky Gaussian map
@@ -684,4 +691,6 @@ class MapStatistics(TwoPointStatistics):
 
                 # Save map
                 fname = self.path(imap)
-                self._save_map(hspmap, fname)
+                self._write_hspmap(fname, hspmap)
+
+    # endregion

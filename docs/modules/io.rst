@@ -3,7 +3,7 @@ I/O
 
 .. automodule:: pollux.io
 
-.. automodule:: pollux.io.layout
+.. automodule:: pollux.io.files
    :members:
    :undoc-members:
    :show-inheritance:

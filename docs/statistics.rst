@@ -11,12 +11,12 @@ Power spectra of maps
 Map builders (shells, convergence) measure angular power spectra with NaMaster:
 
 - :meth:`~pollux.map_builder.MapBuilder.compute_alms` computes the spherical harmonics of the maps, on the padded
-  and apodized footprint if any (see :doc:`shells`), and caches them;
+  and apodized footprint if any (see :doc:`shells`), and saves them (read by :meth:`~pollux.map_builder.MapBuilder.load_alms`);
 - :meth:`~pollux.statistics.maps.MapStatistics.compute_cls` computes the decoupled bandpowers of pairs of maps
-  (``pairs``, or all with ``auto_only``), with the binning ``b`` (by default ``nlb`` = 20 bandpowers log-spaced from ℓ = 8 to 2 ``nside``) and a NaMaster
-  workspace cached per footprint;
+  (``pairs``, or all with ``auto_only``), with the binning ``b`` (by default 20 bandpowers log-spaced from ℓ = 8 to 2 ``nside``) and a NaMaster
+  workspace saved with the footprint;
 - :meth:`~pollux.statistics.maps.MapStatistics.predict_cls` predicts them, convolved with the bandpower windows of the
-  workspace (``binning='wsp'``) or averaged in each bin, with the pixel window (``f_ell``), and optionally Gaussian
+  workspace (``binning='wsp'``) or averaged in each bin, with the pixel window of the maps (``pixel_window``), and optionally Gaussian
   error bars with the noise of the maps;
 - :meth:`~pollux.statistics.maps.MapStatistics.plot_cls` plots both.
 
@@ -28,8 +28,8 @@ Statistics of catalogs
 
 Catalogs measure, for all pairs of tomographic bins:
 
-- ``'clustering'``: the angular correlation of galaxies ``w(θ)``, against randoms (``nran_factor`` per galaxy,
-  shared by all bins with ``shared_randoms``);
+- ``'clustering'``: the angular correlation of galaxies ``w(θ)``, against randoms (``randoms_per_galaxy`` per galaxy,
+  shared by all bins with ``randoms_shared``);
 - ``'shear'``: the shear correlations ``ξ±(θ)``;
 - ``'shear_clustering'``: galaxy-galaxy lensing ``γt(θ)``, for all ordered pairs of lens and source bins.
 

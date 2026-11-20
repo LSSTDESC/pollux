@@ -93,7 +93,7 @@ def failures(db: sqlite3.Connection, runs: list[str]) -> collections.Counter:
 
 
 def main() -> None:
-    """Print the report of a run."""
+    """Command line: ``python -m pollux.pipeline.report DATABASE [--run NAME] [--min-seconds S]`` prints the report of a run."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('database', help='monitoring database of the run')
     parser.add_argument('--run', default='%', help='workflow name (SQL pattern); default: all runs in the database')
@@ -116,10 +116,20 @@ def main() -> None:
             print(f"{count:7d}  {name}: {error}")
 
 
+def _timestamp(value: str | None) -> float | None:
+    """Return the time in seconds of a database date, if any.
+
+    Parameters
+    ----------
+    value : str or None
+        Date of the monitoring database (ISO format).
+
+    Returns
+    -------
+    float or None
+    """
+    return datetime.datetime.fromisoformat(value).timestamp() if value else None
+
+
 if __name__ == '__main__':
     main()
-
-
-def _timestamp(value: str | None) -> float | None:
-    """Return the time in seconds of a database date, if any."""
-    return datetime.datetime.fromisoformat(value).timestamp() if value else None

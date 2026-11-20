@@ -7,6 +7,7 @@ The Pollux package is organized into the following core modules:
    :maxdepth: 2
 
    modules/reader
+   modules/footprint
    modules/map_builder
    modules/shells
    modules/lensing
@@ -24,6 +25,9 @@ Module Descriptions
 
 **Reader** (:mod:`pollux.reader`)
    Interfaces with N-body simulation snapshots (HACC, SLICS) and provides particle data for lightcone construction.
+
+**Footprint** (:mod:`pollux.footprint`)
+   Footprint of the maps: mask, padded mask and weights of the harmonic transforms, shared by the builders.
 
 **Map Builder** (:mod:`pollux.map_builder`)
    Abstract base classes for building HealSparse maps from simulation data, with I/O and spherical harmonic transform support.
@@ -54,7 +58,7 @@ Module Descriptions
    Fixed cosmologies, tracers of observable fields and their theory predictions.
 
 **I/O** (:mod:`pollux.io`)
-   Products on disk, without the dependencies of the builders (NaMaster, TreeCorr, BaryonForge, Parsl): their files (:class:`pollux.io.PolluxIO <pollux.io.layout.PolluxIO>`, :mod:`pollux.io.layout`) and ``config.yaml`` (:mod:`pollux.io.config`), the code
+   Products on disk, without the dependencies of the builders (NaMaster, TreeCorr, BaryonForge, Parsl): their files (:class:`pollux.io.PolluxIO <pollux.io.files.PolluxIO>`, :mod:`pollux.io.files`: paths, configurations and files by format) and ``config.yaml`` (:mod:`pollux.io.config`), the code
    version of runs (:mod:`pollux.io.code_version`), their index (``python -m pollux.io.index ROOT``) and loader
    (:class:`pollux.io.PolluxLoader <pollux.io.loader.PolluxLoader>`).
 

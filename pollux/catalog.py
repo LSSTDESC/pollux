@@ -46,7 +46,7 @@ class CatalogGenerator(CatalogStatistics, ABC):
         Lensing map builder used to define tomographic bins and provide maps to
         interpolate.
     tag : str or None, optional
-        Tag of the catalogs: they go to ``catalogs/{nz}/{tag}/`` next to the maps (see :class:`pollux.io.layout.PolluxIO`), ``default`` if None.
+        Tag of the catalogs: they go to ``catalogs/{nz}/{tag}/`` next to the maps (see :class:`pollux.io.files.PolluxIO`), ``default`` if None.
     nbar_input : float or array-like
         Galaxy surface density in gal/arcmin^2 (required, keyword only). If a float, the same surface
         density is used for all tomographic bins; if an array-like, it must
@@ -135,7 +135,7 @@ class CatalogGenerator(CatalogStatistics, ABC):
         self.ia_augmentor = by_kind.get('ia')
 
         # catalogs by n(z) and tag, next to the maps they come from
-        self.io = lensing.io.with_options(tag=tag)
+        self.io = lensing.io.with_options(tag=tag or 'default')
 
         # Compute derived attributes
         self.cosmo = self.lensing.cosmo
@@ -164,7 +164,7 @@ class CatalogGenerator(CatalogStatistics, ABC):
         self.nbar = nbar_arr
 
         # galaxy counts over the footprint, and per pixel
-        area_arcmin = 4. * np.pi * self.lensing.fsky * (180. * 60 / np.pi)**2
+        area_arcmin = 4. * np.pi * self.lensing.footprint.fsky * (180. * 60 / np.pi)**2
         self.Ngal = (self.nbar * area_arcmin).astype(int)
         self.area_pix = hp.nside2pixarea(self.nside, degrees=False) * (180. * 60. / np.pi)**2
         self.nbar_per_pix = self.nbar * self.area_pix
@@ -204,8 +204,31 @@ class CatalogGenerator(CatalogStatistics, ABC):
             smoothing=self.smoothing,
             augmentors=augmentors,
         )
-        inputs = [self.lensing.save_dir, self.snap_lensing.save_dir, shell_builder.save_dir, shell_builder.io.dir('smoothed')]
+        inputs = [self.lensing.save_dir, self.snap_lensing.save_dir, shell_builder.save_dir]
         return dict(product='catalogs', parameters=parameters, inputs=inputs)
+
+    def path(self, ibin: int, ext: str = 'fits', ishell: int | None = None) -> str:
+        """Return the path for the saved catalog of one tomographic bin.
+
+        Parameters
+        ----------
+        ibin : int
+            Tomographic-bin index.
+        ext : str, optional
+            File extension without the leading dot. Default is ``'fits'``.
+        ishell : int or None, optional
+            If given, path of the catalog of shell ``ishell`` (:meth:`generate` with ``ishell``).
+
+        Returns
+        -------
+        str
+            ``{catalog_dir}/cat_bin{ibin}.{ext}``, with ``catalog_dir`` the
+            ``catalogs/{nz}/{tag}`` directory of the maps' products (see :mod:`pollux.io.files`), or
+            ``{intermediate}/shells/cat_bin{ibin}_{ishell:03d}.{ext}`` for the catalog of one shell.
+        """
+        if ishell is None:
+            return self.io.path('catalogs', 'cat', self.io.BIN_INDEX.format(ibin), ext=ext)
+        return self.io.path('catalogs', 'cat', self.io.BIN_INDEX.format(ibin), self.io.SHELL_INDEX.format(ishell), ext=ext, intermediate=True, folder='shells')
 
     @classmethod
     def smoothing_scales(cls, smooth_fields: tuple[str, ...], smooth_Mpc: float | np.ndarray | dict | None, nshells: int) -> dict[str, tuple]:
@@ -249,6 +272,9 @@ class CatalogGenerator(CatalogStatistics, ABC):
                 raise ValueError(f"Fields {group} are made together and must share their smoothing scale")
         return scales
 
+    # ==================================================================================================================
+    # region Galaxies
+
     def generate(self, ibins: int | Iterable[int] | None = None, ishell: int | None = None) -> None:
         """Generate mock catalogs and interpolate requested map quantities.
 
@@ -258,8 +284,8 @@ class CatalogGenerator(CatalogStatistics, ABC):
             Tomographic-bin indices to generate. If None, generate for all bins.
         ishell : int or None, optional
             If given, only generate the galaxies of shell ``ishell`` and save them
-            as partial catalogs (one per bin), to be combined with
-            :meth:`combine_shells`. Only supported by subclasses drawing galaxies
+            as the catalogs of the shell (one per bin), to be merged with
+            :meth:`merge_shell_catalogs`. Only supported by subclasses drawing galaxies
             shell by shell (:class:`CatalogClusteredPoisson`).
 
         Notes
@@ -300,6 +326,64 @@ class CatalogGenerator(CatalogStatistics, ABC):
         ishells : list of int or None, optional
             Shells whose galaxies are generated. If None, all shells.
         """
+
+    def _generate_z(self, catalog: dict[int, dict[str, np.ndarray]], ibin: int) -> None:
+        """Draw redshifts from the tracer n(z) via inverse-CDF sampling.
+
+        Parameters
+        ----------
+        catalog : dict
+            Per-bin output container.
+        ibin : int
+            Tomographic-bin index.
+
+        Notes
+        -----
+        Shell membership is set by digitizing redshifts onto the shell edges
+        returned by ``shell_builder.shell_edges_redshift``.
+        """
+        builder = self.lensing.shell_builder
+        z_edges = builder.shell_edges_redshift
+
+        rng = self._rng(self._STREAM_Z, ibin)
+
+        # Generate redshifts according to lensing object redshift distributions (using cdf sampling)
+        t = self.lensing.tracers[ibin].ccl(self.lensing.cosmo)
+        zz = np.linspace(0, z_edges[-1], 1000)
+        nz = t.get_dndz(zz)
+
+        z = sample_pdf(zz, nz, self.Ngal[ibin], rng)
+        chi = builder.cosmo.comoving_radial_distance(1. / (1. + z))
+
+        catalog[ibin]['z'] = z
+        catalog[ibin]['chi'] = chi
+        catalog[ibin]['idx_shell'] = np.digitize(z, z_edges) - 1
+
+    def _rng(self, stream: int, ibin: int, ishell: int = -1) -> np.random.Generator:
+        """Return the random generator of a stream (redshifts, positions, counts) of one bin and shell.
+
+        Seeded by ``[seed of the realization, stream, ibin, ishell + 1]``: independent between
+        realizations, streams, bins and shells (``ishell=-1`` for draws over all shells).
+
+        Parameters
+        ----------
+        stream : int
+            Stream (``_STREAM_Z``, ``_STREAM_POS``, ``_STREAM_COUNTS``).
+        ibin : int
+            Tomographic bin.
+        ishell : int, optional
+            Shell, -1 (default) for draws over all shells.
+
+        Returns
+        -------
+        numpy.random.Generator
+        """
+        return np.random.default_rng([self.lensing.shell_builder.seed, stream, ibin, ishell + 1])
+
+    # endregion
+
+    # ==================================================================================================================
+    # region Interpolation
 
     def _interpolate_maps(self, catalog: dict[int, dict[str, np.ndarray]], ibins: int | Iterable[int] | None = None, ishells: list[int] | None = None) -> None:
         r"""Interpolate map quantities at galaxy positions.
@@ -435,6 +519,11 @@ class CatalogGenerator(CatalogStatistics, ABC):
                         else:
                             catalog[ibin][k][w] = map_low[idx] + dchi * (map_high[idx] - map_low[idx]) / (chi_high - chi_low)
 
+    # endregion
+
+    # ==================================================================================================================
+    # region Catalogs
+
     def _save_catalogs(self, catalog: dict[int, dict[str, np.ndarray]], ibins: int | Iterable[int] | None = None, ishell: int | None = None) -> None:
         """Write per-bin catalogs to FITS files.
 
@@ -446,7 +535,7 @@ class CatalogGenerator(CatalogStatistics, ABC):
         ibins : int or array_like of int or None, optional
             Tomographic-bin indices to save.
         ishell : int or None, optional
-            If given, save as the partial catalogs of shell ``ishell``.
+            If given, save as the catalogs of shell ``ishell`` (one per bin).
         """
         columns = list(self.interp_fields)
         for augmentor in self.augmentors:
@@ -471,8 +560,8 @@ class CatalogGenerator(CatalogStatistics, ABC):
 
             self.io.write_table(self.path(ibin, ext='fits', ishell=ishell), hdul)
 
-    def combine_shells(self, ibins: int | Iterable[int] | None = None) -> None:
-        """Concatenate the per-shell partial catalogs into one catalog per bin.
+    def merge_shell_catalogs(self, ibins: int | Iterable[int] | None = None) -> None:
+        """Merge the catalogs of the shells (:meth:`generate` with ``ishell``, saved in ``shells/``) into one catalog per bin.
 
         Parameters
         ----------
@@ -485,76 +574,13 @@ class CatalogGenerator(CatalogStatistics, ABC):
         concatenated in shell order, which gives the same catalog as generating
         all shells at once.
         """
-        for ibin in self.lensing.tqdm(ibins, desc="[combine_shells]", leave=False):
-            parts = [fits.getdata(self.path(ibin, ishell=ishell), 1) for ishell in range(self.nshells)]
+        for ibin in self.lensing.tqdm(ibins, desc="[merge_shell_catalogs]", leave=False):
+            shells = [fits.getdata(self.path(ibin, ishell=ishell), 1) for ishell in range(self.nshells)]
             header = fits.Header()
             for k, v in self.header_dict.items():
                 header[k] = v
-            hdul = [fits.PrimaryHDU(), fits.BinTableHDU(data=np.concatenate(parts), header=header)]
+            hdul = [fits.PrimaryHDU(), fits.BinTableHDU(data=np.concatenate(shells), header=header)]
             self.io.write_table(self.path(ibin), hdul)
-
-    def _generate_z(self, catalog: dict[int, dict[str, np.ndarray]], ibin: int) -> None:
-        """Draw redshifts from the tracer n(z) via inverse-CDF sampling.
-
-        Parameters
-        ----------
-        catalog : dict
-            Per-bin output container.
-        ibin : int
-            Tomographic-bin index.
-
-        Notes
-        -----
-        Shell membership is set by digitizing redshifts onto the shell edges
-        returned by ``shell_builder.shell_edges_redshift``.
-        """
-        builder = self.lensing.shell_builder
-        z_edges = builder.shell_edges_redshift
-
-        rng = self._rng(self._STREAM_Z, ibin)
-
-        # Generate redshifts according to lensing object redshift distributions (using cdf sampling)
-        t = self.lensing.tracers_ccl[ibin]
-        zz = np.linspace(0, z_edges[-1], 1000)
-        nz = t.get_dndz(zz)
-
-        z = sample_pdf(zz, nz, self.Ngal[ibin], rng)
-        chi = builder.cosmo.comoving_radial_distance(1. / (1. + z))
-
-        catalog[ibin]['z'] = z
-        catalog[ibin]['chi'] = chi
-        catalog[ibin]['idx_shell'] = np.digitize(z, z_edges) - 1
-
-    def _rng(self, stream: int, ibin: int, ishell: int = -1) -> np.random.Generator:
-        """Return the random generator of a stream (redshifts, positions, counts) of one bin and shell.
-
-        Seeded by ``[seed of the realization, stream, ibin, ishell + 1]``: independent between
-        realizations, streams, bins and shells (``ishell=-1`` for draws over all shells).
-        """
-        return np.random.default_rng([self.lensing.shell_builder.seed, stream, ibin, ishell + 1])
-
-    def path(self, ibin: int, ext: str = 'fits', ishell: int | None = None) -> str:
-        """Return the path for the saved catalog of one tomographic bin.
-
-        Parameters
-        ----------
-        ibin : int
-            Tomographic-bin index.
-        ext : str, optional
-            File extension without the leading dot. Default is ``'fits'``.
-        ishell : int or None, optional
-            If given, path of the partial catalog of shell ``ishell``.
-
-        Returns
-        -------
-        str
-            ``{catalog_dir}/cat_bin{ibin}.{ext}``, with ``catalog_dir`` the
-            ``catalogs/{nz}/{tag}`` directory of the maps' products (see :mod:`pollux.io.layout`), or
-            ``{intermediate}/parts/cat_bin{ibin}_{ishell:03d}.{ext}`` for a partial catalog.
-        """
-        if ishell is None:
-            return self.io.path('catalogs', 'cat', f'bin{ibin}', ext=ext)
-        return self.io.path('catalogs', 'cat', f'bin{ibin}', f'{ishell:03d}', ext=ext, intermediate=True, folder='parts')
 
     def load_catalogs(
             self,
@@ -637,6 +663,12 @@ class CatalogGenerator(CatalogStatistics, ABC):
         else:
             return table
 
+    # endregion
+
+
+# ======================================================================================================================
+# region Generators
+
 
 class CatalogUniform(CatalogGenerator):
     """Generate source galaxies uniformly over the footprint.
@@ -649,7 +681,7 @@ class CatalogUniform(CatalogGenerator):
     lensing : LensingBuilder
         Lensing map builder.
     tag : str or None, optional
-        Tag of the catalogs: they go to ``catalogs/{nz}/{tag}/`` next to the maps (see :class:`pollux.io.layout.PolluxIO`), ``default`` if None.
+        Tag of the catalogs: they go to ``catalogs/{nz}/{tag}/`` next to the maps (see :class:`pollux.io.files.PolluxIO`), ``default`` if None.
     nbar_input : float or array-like
         Galaxy surface density in gal/arcmin^2, per bin or for all (required, keyword only).
     interp_fields, interp_method, smooth_fields, smooth_Mpc
@@ -694,7 +726,7 @@ class CatalogUniform(CatalogGenerator):
         rng = self._rng(self._STREAM_POS, ibin)
 
         # uniform over the footprint: equal-area pixels drawn at random, then a position within each
-        _, ipix = self.lensing.shell_builder.get_mask(return_ipix=True)
+        ipix = self.lensing.shell_builder.footprint.ipix()
         ra, dec = generate_radec_in_pix(self.nside, rng.choice(ipix, size=self.Ngal[ibin]), rng)
         catalog[ibin]['ra'] = ra
         catalog[ibin]['dec'] = dec
@@ -711,7 +743,7 @@ class CatalogClustered(CatalogGenerator):
     lensing : LensingBuilder
         Lensing map builder.
     tag : str or None, optional
-        Tag of the catalogs: they go to ``catalogs/{nz}/{tag}/`` next to the maps (see :class:`pollux.io.layout.PolluxIO`), ``default`` if None.
+        Tag of the catalogs: they go to ``catalogs/{nz}/{tag}/`` next to the maps (see :class:`pollux.io.files.PolluxIO`), ``default`` if None.
     nbar_input : float or array-like
         Galaxy surface density in gal/arcmin^2, per bin or for all (required, keyword only).
     bias : float or array-like, optional
@@ -852,7 +884,7 @@ class CatalogClusteredMultinomial(CatalogClustered):
     lensing : LensingBuilder
         Lensing map builder.
     tag : str or None, optional
-        Tag of the catalogs: they go to ``catalogs/{nz}/{tag}/`` next to the maps (see :class:`pollux.io.layout.PolluxIO`), ``default`` if None.
+        Tag of the catalogs: they go to ``catalogs/{nz}/{tag}/`` next to the maps (see :class:`pollux.io.files.PolluxIO`), ``default`` if None.
     nbar_input : float or array-like
         Galaxy surface density in gal/arcmin^2, per bin or for all (required, keyword only).
     bias, bias_model : optional
@@ -902,7 +934,7 @@ class CatalogClusteredMultinomial(CatalogClustered):
             Tomographic-bin indices to process.
         """
         # density contrast used to place galaxies ('positions' smoothing)
-        _, ipix_mask = self.snap_lensing.shell_builder.get_mask(return_ipix=True)
+        ipix_mask = self.snap_lensing.shell_builder.footprint.ipix()
         density_masked = self.lensing.shell_builder.field_hspmap(ishell, self.smoothing['positions'][ishell]).get_values_pix(ipix_mask)
 
         # Loop over tomographic bins
@@ -939,7 +971,7 @@ class CatalogClusteredPoisson(CatalogClustered):
     lensing : LensingBuilder
         Lensing map builder.
     tag : str or None, optional
-        Tag of the catalogs: they go to ``catalogs/{nz}/{tag}/`` next to the maps (see :class:`pollux.io.layout.PolluxIO`), ``default`` if None.
+        Tag of the catalogs: they go to ``catalogs/{nz}/{tag}/`` next to the maps (see :class:`pollux.io.files.PolluxIO`), ``default`` if None.
     nbar_input : float or array-like
         Galaxy surface density in gal/arcmin^2, per bin or for all (required, keyword only).
     bias, bias_model : optional
@@ -988,7 +1020,7 @@ class CatalogClusteredPoisson(CatalogClustered):
 
         # First compute mean density per shell for each tracer's n(z) (all bins needed for nbar)
         nbar_per_pix_per_bin = []
-        for ibin, t in enumerate(self.lensing.tracers_ccl):
+        for ibin, t in enumerate(tr.ccl(self.lensing.cosmo) for tr in self.lensing.tracers):
             nz_int = np.array([quad(lambda z: t.get_dndz(z), z_edges[ishell], z_edges[ishell + 1]) for ishell in range(self.snap_lensing.nmaps)])
             nbar_per_pix_per_bin.append(nz_int / np.sum(nz_int) * self.nbar_per_pix[ibin])
         self.nbar_per_pix_per_bin = np.array(nbar_per_pix_per_bin)
@@ -1031,7 +1063,7 @@ class CatalogClusteredPoisson(CatalogClustered):
             Tomographic-bin indices to process.
         """
         # density contrast used to place galaxies ('positions' smoothing)
-        _, ipix_mask = self.snap_lensing.shell_builder.get_mask(return_ipix=True)
+        ipix_mask = self.snap_lensing.shell_builder.footprint.ipix()
         density_masked = self.lensing.shell_builder.field_hspmap(ishell, self.smoothing['positions'][ishell]).get_values_pix(ipix_mask)
 
         # Loop over tomographic bins
@@ -1077,7 +1109,7 @@ class CatalogClusteredPoisson(CatalogClustered):
         builder = self.lensing.shell_builder
         z_edges = builder.shell_edges_redshift
 
-        t = self.lensing.tracers_ccl[ibin]
+        t = self.lensing.tracers[ibin].ccl(self.lensing.cosmo)
         for i, ishell in enumerate(ishells):
             rng = self._rng(self._STREAM_Z, ibin, ishell)
 
@@ -1087,6 +1119,12 @@ class CatalogClusteredPoisson(CatalogClustered):
 
             catalog[ibin]['z'].append(sample_pdf(zz, nz, ngal, rng))
             catalog[ibin]['idx_shell'].append(np.full(ngal, ishell))
+
+
+# endregion
+
+# ======================================================================================================================
+# region Augmentors
 
 
 class CatalogAugmentor(ABC):
@@ -1101,7 +1139,13 @@ class CatalogAugmentor(ABC):
     kind: str | None = None
 
     def config(self) -> dict:
-        """Return the type and parameters of the augmentor, for the ``config.yaml`` of the catalogs."""
+        """Return the type and parameters of the augmentor, for the ``config.yaml`` of the catalogs.
+
+        Returns
+        -------
+        dict
+            ``type`` (the class of the augmentor), extended by subclasses with their parameters.
+        """
         return {'type': type(self).__name__}
 
     @abstractmethod
@@ -1194,6 +1238,11 @@ class CatalogAugmentorShear(CatalogAugmentor):
         The parameters setting the values of the shapes (``sigma_e``, ``include_ia``, ``seed``) are
         recorded when they differ from their defaults, so that the configurations of catalogs made
         before they were recorded stay valid.
+
+        Returns
+        -------
+        dict
+            ``type`` and the parameters that differ from their defaults.
         """
         defaults = inspect.signature(type(self)).parameters
         return {'type': type(self).__name__, **{k: getattr(self, k) for k in ('sigma_e', 'include_ia', 'seed') if getattr(self, k) != defaults[k].default}}
@@ -1256,3 +1305,6 @@ class CatalogAugmentorShear(CatalogAugmentor):
             e_obs = (g + e_int) / (1. + np.conj(g) * e_int)
             catalog['e1_obs'] = e_obs.real
             catalog['e2_obs'] = e_obs.imag
+
+
+# endregion

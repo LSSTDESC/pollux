@@ -28,7 +28,8 @@ from tqdm.auto import tqdm, trange
 from parallel_sort import argsort as pargsort
 from collections.abc import Iterable
 
-from .io.layout import PolluxIO
+from .footprint import Footprint
+from .io import PolluxIO
 from .cosmo import Tracer
 from .map_builder import MapBuilder, MapSum
 from .utils.numerics import arange_endpoint, quad, split_bins
@@ -60,24 +61,17 @@ class ShellBuilder(MapBuilder):
         Number of shells to build.
     reader : pollux.reader.Reader
         Simulation reader returning particle positions for each snapshot/sub-volume.
-    nside : int
-        Healpix nside of the shell maps.
-    io : pollux.io.layout.PolluxIO or None, optional
-        Files of the realization: the shells go to its ``'shells'`` product (``'halos'`` for a halo
-        reader). Mutually exclusive with ``root_dir``.
-    root_dir : str or None, optional
-        Root directory of the products of the simulation, for the realization
-        ``{root_dir}/nside{nside}/seed{seed}[/pad{padding_deg}]`` (:meth:`pollux.io.layout.PolluxIO.from_root`).
-        Mutually exclusive with ``io``.
+    footprint : pollux.footprint.Footprint
+        Footprint of the shell maps (resolution, mask, padding), shared with the builders made from
+        this one, with the files of the root directory (``footprint.io``): the shells go to the
+        ``'shells'`` product (``'halos'`` for a halo reader) of its realization ``seed{seed}/``. For the
+        ``'octant'`` footprint, particles outside x>0, y>0, z>0 are discarded during map construction.
     seed : int, optional
-        Random seed used to draw isometries/rotflips and for subsampling.
+        Seed of the realization: its directory (``seed{seed}/``), and the random isometries, rotation/flips
+        and subsampling.
     dtype : data-type, optional
         dtype used to store shell map values (particle counts, and the maps derived from them).
         Default is float32.
-    mask : ndarray or 'octant' or None, optional
-        Footprint specification forwarded to :class:`~pollux.map_builder.MapBuilder`.
-        Default is ``'octant'``. For ``'octant'``, particles outside
-        x>0, y>0, z>0 are discarded during map construction.
     apply_grid_isometry : bool or sequence, optional
         If True, apply one random affine isometry per shell to the underlying
         particle distribution: ``xyz' = A(xyz + b)`` with random orthogonal-ish
@@ -101,6 +95,9 @@ class ShellBuilder(MapBuilder):
           per-pixel S/N comparable to the shell at that redshift.
         - If dict with key ``'clmax_r'``: choose ratios per shell so that shot
           noise is below theory C_ell at lmax by the requested factor.
+    io : pollux.io.files.PolluxIO or None, optional
+        Files of the shells, if not those of the footprint with the seed (e.g. with the options of a
+        baryon model).
     **kwargs
         Forwarded to :class:`pollux.map_builder.MapBuilder`.
 
@@ -111,35 +108,25 @@ class ShellBuilder(MapBuilder):
 
     Attributes
     ----------
-    kind : {'snapshot', 'lightcone'}
-        Shell construction mode. 'snapshot' builds shells out of snapshot boxes;
-        'lightcone' uses reader-provided shell edges (typically already binned).
-    add_orphans : bool
-        Whether orphan particles should be added in :meth:`combine_maps_subs`.
-        ``False`` here; overridden to ``True`` in :class:`SnapshotInterpShellBuilder`.
     smoothed_field_what : str
         ``what`` of the smoothed density maps (``'density'``), see
         :meth:`~pollux.map_builder.MapBuilder.compute_maps_from_alms`.
     """
 
-    add_orphans = False
-    kind = 'snapshot'
     smoothed_field_what = 'density'
 
     def __init__(
             self,
             nshells: int,
             reader: Reader,
-            nside: int,
-            io: PolluxIO | None = None,
-            root_dir: str | None = None,
+            footprint: Footprint,
             seed: int = 12345,
             dtype: np.dtype = np.float32,
-            mask: np.ndarray | str | None = 'octant',
             apply_grid_isometry: bool | list = False,
             group_isometries: bool | float | None = None,
             apply_replicate_rotflip: bool | dict = False,
             subsample_box: dict | None = None,
+            io: PolluxIO | None = None,
             **kwargs: Any) -> None:
         self.nshells = nshells
         self.reader = reader
@@ -155,19 +142,17 @@ class ShellBuilder(MapBuilder):
 
         # files of the realization: halo catalogs apart, shared by all baryon models
         halos = reader.kind.endswith('halo')
-        if (io is None) == (root_dir is None):
-            raise ValueError('Provide either io or root_dir.')
-        if io is None:
-            io = PolluxIO.from_root(root_dir, nside, seed, kwargs.get('padding_deg') if mask is not None else None)
+        io = footprint.io.with_options(seed=seed) if io is None else io
         self.group_isometries = group_isometries
 
         if dtype == np.int32:
             warnings.warn(f"The max value for {dtype} might not be enough : {np.iinfo(dtype)}")
 
         super().__init__(
-            nside=nside, dtype=dtype, io=io, product='halos' if halos else 'shells', nmaps=self.nshells, sacc_type="galaxy_density_cl", mask=mask, **kwargs)
+            nmaps=self.nshells, dtype=dtype, footprint=footprint, io=io, product='halos' if halos else 'shells', sacc_type="galaxy_density_cl", **kwargs)
 
         # Healpix geometry passed to the pixelization kernels: nside, order, ncap, npix (see _loc2pix)
+        nside = self.nside
         self._healpix_geometry = (nside, hp.nside2order(nside), (nside * nside - nside) << 1, self.npix)
 
         # Particle subsampling
@@ -225,22 +210,15 @@ class ShellBuilder(MapBuilder):
             self.replicate_rotflip = {}
             self.apply_replicate_rotflip = False
 
-        # Try getting shell information from reader, if not dummy.
-        try:
-            # make sure snapshots are larger than the shells
-            z_edges = self.shell_edges_redshift
-            boxsize = self.reader.boxsize
-            diff = np.diff(self.shell_edges_comoving_distance)
-            logger.info("  - Box size = %.2f Mpc.", boxsize)
-            if not np.all(diff < boxsize):
-                message = "Some shells are deeper than the simulation box!\n"
-                for ishell in range(self.nshells):
-                    if diff[ishell] > boxsize:
-                        message += f"Shell {ishell} ({z_edges[ishell]:.2f}<z<{z_edges[ishell+1]:.2f}) has width {diff[ishell]:.2f} Mpc\n"
-                warnings.warn(message)
-        except NotImplementedError:
-            warnings.warn("Reader does not implement `shell_edges_redshift` or `shell_edges_comoving_distance` or `boxsize.")
-            assert isinstance(reader, DummyReader)
+        # shells deeper than the simulation box (none for a reader without a box, e.g. a DummyReader)
+        boxsize = self.reader.boxsize
+        logger.info("  - Box size = %.2f Mpc.", boxsize)
+        z_edges, depths = self.shell_edges_redshift, np.diff(self.shell_edges_comoving_distance)
+        deep = np.flatnonzero(depths > boxsize)
+        if len(deep):
+            warnings.warn(
+                "Some shells are deeper than the simulation box!\n" +
+                ''.join(f"Shell {ishell} ({z_edges[ishell]:.2f}<z<{z_edges[ishell + 1]:.2f}) has width {depths[ishell]:.2f} Mpc\n" for ishell in deep))
 
         # configuration of the products (checked against an existing one), then the table of the shells
         # (a DummyReader has no shell edges)
@@ -255,8 +233,8 @@ class ShellBuilder(MapBuilder):
         -------
         dict
             ``product`` (``'halos'`` or ``'shells'``), ``parameters`` (simulation: path, kind, box, particles,
-            snapshots; cosmology: CCL parameters; resolution, footprint and isometries of the shells) and
-            ``inputs`` (none).
+            snapshots; cosmology: CCL parameters; seed and isometries of the shells) and ``inputs`` (the
+            footprint, with the resolution and mask).
         """
         reader = self.reader
         simulation = dict(
@@ -279,12 +257,8 @@ class ShellBuilder(MapBuilder):
             reader=type(reader).__name__,
             simulation=simulation,
             cosmology=cosmology,
-            nside=self.nside,
             nshells=self.nshells,
             seed=self.seed,
-            mask=self.footprint if isinstance(self.footprint, str) or self.footprint is None else f'array {self.footprint_id}',
-            padding_deg=self.padding_deg,
-            apotype=self.apotype if self.padding_deg is not None else None,
             apply_grid_isometry=self.apply_grid_isometry,
             group_isometries=self.group_isometries,
             apply_replicate_rotflip=self.apply_replicate_rotflip,
@@ -292,44 +266,40 @@ class ShellBuilder(MapBuilder):
             dtype=self.dtype,
             shell_edges_match=getattr(self, 'shell_edges_match', None),  # None for SnapshotInterpShellBuilder
         )
-        return dict(product='halos' if self.reader.kind.endswith('halo') else 'shells', parameters=parameters, inputs=[])
+        return dict(product=self.product, parameters=parameters, inputs=[self.footprint.io.dir('footprint')])
+
+    # ==================================================================================================================
+    # region Shells
 
     @cached_property
     def shell_edges_redshift(self) -> np.ndarray:
-        """Redshifts of shell edges.
+        """Redshifts of the shell edges: one shell around each snapshot, its edges placed by ``shell_edges_match``.
 
+        Returns
+        -------
         ndarray
-            Redshifts of all shell edges. Length is ``nshells + 1`` for
-            ``kind='snapshot'`` and depends on the reader for ``kind='lightcone'``.
+            Length ``nshells + 1``.
 
         Raises
         ------
         ValueError
-            If ``self.kind`` is not recognized, or if ``shell_edges_match`` is invalid.
+            If ``shell_edges_match`` is invalid.
         """
-        if self.kind == 'snapshot':
-            if self.shell_edges_match == 'center_redshift':
-                func = lambda z: z
-                ifunc = func
-            elif self.shell_edges_match == 'center_scale_factor':
-                func = lambda z: 1. / (1. + z)
-                ifunc = lambda a: 1. / a - 1.
-            elif self.shell_edges_match == 'center_comoving_distance':
-                func = lambda z: 1e-3 * pyccl.comoving_radial_distance(self.cosmo, 1. / (1. + z))
-                ifunc = None
-            elif self.shell_edges_match == 'center_comoving_volume':
-                func = lambda z: (1e-3 * pyccl.comoving_radial_distance(self.cosmo, 1. / (1. + z)))**3
-                ifunc = None
-            else:
-                raise ValueError
-
-            return split_bins(self.reader.zsnapshots, func=func, ifunc=ifunc, zmax=self.reader.zmax)
-
-        elif self.kind == 'lightcone':
-            return self.reader.zsnapshots
-
+        if self.shell_edges_match == 'center_redshift':
+            func = lambda z: z
+            ifunc = func
+        elif self.shell_edges_match == 'center_scale_factor':
+            func = lambda z: 1. / (1. + z)
+            ifunc = lambda a: 1. / a - 1.
+        elif self.shell_edges_match == 'center_comoving_distance':
+            func = lambda z: 1e-3 * pyccl.comoving_radial_distance(self.cosmo, 1. / (1. + z))
+            ifunc = None
+        elif self.shell_edges_match == 'center_comoving_volume':
+            func = lambda z: (1e-3 * pyccl.comoving_radial_distance(self.cosmo, 1. / (1. + z)))**3
+            ifunc = None
         else:
-            raise ValueError
+            raise ValueError(f"Unknown shell_edges_match {self.shell_edges_match!r}.")
+        return split_bins(self.reader.zsnapshots, func=func, ifunc=ifunc, zmax=self.reader.zmax)
 
     @cached_property
     def shell_edges_comoving_distance(self) -> np.ndarray:
@@ -340,6 +310,145 @@ class ShellBuilder(MapBuilder):
             Length is ``nshells + 1``.
         """
         return pyccl.comoving_radial_distance(self.cosmo, 1. / (1 + self.shell_edges_redshift))
+
+    def mean_redshift_volume(self, ishell: int) -> float:
+        """Compute the volume-weighted mean redshift of a shell.
+
+        Parameters
+        ----------
+        ishell : int
+            Shell index.
+
+        Returns
+        -------
+        float
+            Mean redshift in the shell, weighted by the comoving volume element.
+        """
+        z_edges = self.shell_edges_redshift
+        zmin = z_edges[ishell]
+        zmax = z_edges[ishell + 1]
+
+        dVdz = lambda z: pyccl.comoving_angular_distance(self.cosmo, 1. / (1. + z))**2 / pyccl.background.h_over_h0(self.cosmo, 1. / (1. + z))
+
+        return quad(lambda z: z * dVdz(z), zmin, zmax) / quad(dVdz, zmin, zmax)
+
+    def info_table(self) -> np.ndarray:
+        """Return the table of the shells.
+
+        Returns
+        -------
+        ndarray
+            Structured array, one row per shell: ``ishell``, redshift and comoving distance (Mpc) edges
+            (``zmin``, ``zmax``, ``chimin``, ``chimax``), and for snapshot shells the snapshot (``zsnapshot``,
+            ``chisnapshot``, ``snapshot_id``), then the mean number of particles per pixel (``pixel_density``)
+            and per steradian (``sky_density``), which turn counts into density contrasts.
+        """
+        z_edges = self.shell_edges_redshift
+        chi = lambda z: self.cosmo.comoving_radial_distance(1. / (1. + np.asarray(z)))
+        columns = dict(ishell=np.arange(self.nshells))
+        if len(self.reader.zsnapshots) == self.nshells:
+            # one snapshot per shell (not for shells between snapshots)
+            columns.update(zsnapshot=self.reader.zsnapshots, chisnapshot=chi(self.reader.zsnapshots), snapshot_id=self.reader.snapshots)
+        columns.update(
+            zmin=z_edges[:-1],
+            zmax=z_edges[1:],
+            chimin=chi(z_edges[:-1]),
+            chimax=chi(z_edges[1:]),
+            pixel_density=[self.pixel_density(ishell) for ishell in range(self.nshells)],
+            sky_density=[self.sky_density(ishell) for ishell in range(self.nshells)])
+        return np.rec.fromarrays([np.asarray(v) for v in columns.values()], names=list(columns))
+
+    def save_info(self) -> None:
+        """Save the table of the shells (:meth:`info_table`) to ``shells.fits``, unless it exists.
+
+        The table follows from the configuration of the products, which :func:`pollux.io.config.write_config`
+        checks against the existing one, so an existing table is the same.
+        """
+        fname = self.io.path(self.product, 'shells')
+        if not os.path.exists(fname):
+            self.io.write_table(fname, [fits.BinTableHDU(self.info_table(), name='SHELLS')])
+
+    # endregion
+
+    # ==================================================================================================================
+    # region Replicas
+
+    def random_isometries(self, group_isometries: bool | float | None = None, get_shell_identifier: bool = False) -> list:
+        r"""Generate random affine isometries for shells.
+
+        Parameters
+        ----------
+        group_isometries : bool or float or None, optional
+            If provided, reuse a given isometry across multiple shells until the
+            cumulative shell width exceeds ``dchi_iso_max`` (see class docstring).
+        get_shell_identifier : bool, optional
+            If True, also return a mapping from shell index to isometry id.
+
+        Returns
+        -------
+        list
+            List of length ``nshells`` of ``(A, b)`` pairs where:
+            - ``A`` is a (3,3) matrix (rotation/permutation/flip),
+            - ``b`` is a (3,) translation vector.
+        dict, optional
+            Only if ``get_shell_identifier=True``. Maps ``ishell -> iso_id``.
+
+        Notes
+        -----
+        Each isometry moves the particles of a box (and all its replicas) as
+
+        .. math::
+
+            \mathbf{x}' = (\mathbf{x} + \mathbf{b})\, A, \qquad A = R\, \mathrm{diag}(s_1, s_2, s_3),
+
+        with :math:`R` a uniformly random rotation, :math:`s_k = \pm 1` random flips and :math:`\mathbf{b}` a uniformly
+        random translation in :math:`[0, L)^3`; the replica :math:`\mathbf{n} \in \mathbb{Z}^3` is shifted by
+        :math:`L\, \mathbf{n} A`. With ``group_isometries``, consecutive shells share an isometry until their cumulative
+        radial width would exceed ``group_isometries`` times the box size :math:`L`, so that structures are not cut at
+        each shell.
+        """
+        rng = np.random.default_rng(self.seed)
+        boxsize = self.reader.boxsize
+        chi_edges = self.shell_edges_comoving_distance
+
+        # maximum width a given isometry can be applied to
+        if group_isometries is not None:
+            # if grouped, fix as function of box size
+            if group_isometries is True:
+                dchi_iso_max = boxsize
+            elif isinstance(group_isometries, numbers.Real) and not isinstance(group_isometries, bool):
+                dchi_iso_max = boxsize * group_isometries
+            else:
+                raise ValueError(f"group_isometries must be None, True or a float, not {group_isometries!r}")
+        else:
+            # if not grouped, set to 0 to force drawing one isometry per shell
+            dchi_iso_max = 0.
+
+        Abs = []
+        n_isometries = 0
+        dchi_iso = np.inf
+        shell_identifier = {}
+
+        for ishell in range(self.nshells):
+            dchi_shell = chi_edges[ishell + 1] - chi_edges[ishell]
+            if dchi_iso + dchi_shell > dchi_iso_max:
+                # if grouped shell width is larger than maximum width for isometry, draw a new one
+                A, b = _random_isometry(rng, boxsize)
+                n_isometries += 1
+                dchi_iso = 0.
+            dchi_iso += dchi_shell
+            Abs.append([A.astype(self.reader.dtype), b.astype(self.reader.dtype)])
+            shell_identifier[ishell] = n_isometries
+
+        if group_isometries is not None:
+            logger.info("  - Using %d isometries grouped within %.2f Mpc.", n_isometries, dchi_iso_max)
+        else:
+            logger.info("  - Using %d isometries.", n_isometries)
+
+        if get_shell_identifier:
+            return Abs, shell_identifier
+        else:
+            return Abs
 
     @cached_property
     def valid_replicas(self) -> list:
@@ -426,7 +535,7 @@ class ShellBuilder(MapBuilder):
         # dense footprint mask for the overlap test (cached on self; vectorized
         # boolean indexing below is both faster and far lighter than building a
         # Python set of tens of millions of pixel indices)
-        mask_dense = self.get_mask(nest=True, padded=True) if self.footprint is not None else None
+        mask_dense = self.footprint.mask(nest=True, padded=True) if not self.footprint.fullsky else None
 
         valid = []
         # replicate the box
@@ -446,7 +555,7 @@ class ShellBuilder(MapBuilder):
 
             # check if box intersects octant, otherwise skip
             # (to do so, we check if the box is fully contained in the x<0 or y<0 or z<0 half spaces)
-            if self.octant_only and np.any(np.all(box_edges_shifted <= 0., axis=0)):
+            if self.footprint.octant and np.any(np.all(box_edges_shifted <= 0., axis=0)):
                 continue
 
             # check if box intersects with shell, otherwise skip
@@ -476,141 +585,6 @@ class ShellBuilder(MapBuilder):
 
         return valid
 
-    def mean_z_volume(self, ishell: int) -> float:
-        """Compute the volume-weighted mean redshift of a shell.
-
-        Parameters
-        ----------
-        ishell : int
-            Shell index.
-
-        Returns
-        -------
-        float
-            Mean redshift in the shell, weighted by the comoving volume element.
-        """
-        z_edges = self.shell_edges_redshift
-        zmin = z_edges[ishell]
-        zmax = z_edges[ishell + 1]
-
-        dVdz = lambda z: pyccl.comoving_angular_distance(self.cosmo, 1. / (1. + z))**2 / pyccl.background.h_over_h0(self.cosmo, 1. / (1. + z))
-
-        return quad(lambda z: z * dVdz(z), zmin, zmax) / quad(dVdz, zmin, zmax)
-
-    def info_table(self) -> np.ndarray:
-        """Return the table of the shells.
-
-        Returns
-        -------
-        ndarray
-            Structured array, one row per shell: ``ishell``, redshift and comoving distance (Mpc) edges
-            (``zmin``, ``zmax``, ``chimin``, ``chimax``), and for snapshot shells the snapshot (``zsnapshot``,
-            ``chisnapshot``, ``snapshot_id``), then the mean number of particles per pixel (``pixel_density``)
-            and per steradian (``sky_density``), which turn counts into density contrasts.
-        """
-        z_edges = self.shell_edges_redshift
-        chi = lambda z: self.cosmo.comoving_radial_distance(1. / (1. + np.asarray(z)))
-        columns = dict(ishell=np.arange(self.nshells))
-        if self.kind == 'snapshot':
-            columns.update(zsnapshot=self.reader.zsnapshots, chisnapshot=chi(self.reader.zsnapshots), snapshot_id=self.reader.snapshots)
-        elif self.kind != 'lightcone':
-            raise ValueError(f"Unknown kind of shells {self.kind!r}.")
-        columns.update(
-            zmin=z_edges[:-1],
-            zmax=z_edges[1:],
-            chimin=chi(z_edges[:-1]),
-            chimax=chi(z_edges[1:]),
-            pixel_density=[self.pixel_density(ishell) for ishell in range(self.nshells)],
-            sky_density=[self.sky_density(ishell) for ishell in range(self.nshells)])
-        return np.rec.fromarrays([np.asarray(v) for v in columns.values()], names=list(columns))
-
-    def save_info(self) -> None:
-        """Save the table of the shells (:meth:`info_table`) to ``shells.fits``, unless it exists.
-
-        The table follows from the configuration of the products, which :func:`pollux.io.config.write_config`
-        checks against the existing one, so an existing table is the same.
-        """
-        fname = self.io.path(self.product, 'shells')
-        if not os.path.exists(fname):
-            self.io.write_table(fname, [fits.BinTableHDU(self.info_table(), name='SHELLS')])
-
-    def random_isometries(self, group_isometries: bool | float | None = None, get_shell_identifier: bool = False) -> list:
-        r"""Generate random affine isometries for shells.
-
-        Parameters
-        ----------
-        group_isometries : bool or float or None, optional
-            If provided, reuse a given isometry across multiple shells until the
-            cumulative shell width exceeds ``dchi_iso_max`` (see class docstring).
-        get_shell_identifier : bool, optional
-            If True, also return a mapping from shell index to isometry id.
-
-        Returns
-        -------
-        list
-            List of length ``nshells`` of ``(A, b)`` pairs where:
-            - ``A`` is a (3,3) matrix (rotation/permutation/flip),
-            - ``b`` is a (3,) translation vector.
-        dict, optional
-            Only if ``get_shell_identifier=True``. Maps ``ishell -> iso_id``.
-
-        Notes
-        -----
-        Each isometry moves the particles of a box (and all its replicas) as
-
-        .. math::
-
-            \mathbf{x}' = (\mathbf{x} + \mathbf{b})\, A, \qquad A = R\, \mathrm{diag}(s_1, s_2, s_3),
-
-        with :math:`R` a uniformly random rotation, :math:`s_k = \pm 1` random flips and :math:`\mathbf{b}` a uniformly
-        random translation in :math:`[0, L)^3`; the replica :math:`\mathbf{n} \in \mathbb{Z}^3` is shifted by
-        :math:`L\, \mathbf{n} A`. With ``group_isometries``, consecutive shells share an isometry until their cumulative
-        radial width would exceed ``group_isometries`` times the box size :math:`L`, so that structures are not cut at
-        each shell.
-        """
-        rng = np.random.default_rng(self.seed)
-        boxsize = self.reader.boxsize
-        chi_edges = self.shell_edges_comoving_distance
-
-        # maximum width a given isometry can be applied to
-        if group_isometries is not None:
-            # if grouped, fix as function of box size
-            if group_isometries is True:
-                dchi_iso_max = boxsize
-            elif isinstance(group_isometries, numbers.Real) and not isinstance(group_isometries, bool):
-                dchi_iso_max = boxsize * group_isometries
-            else:
-                raise ValueError(f"group_isometries must be None, True or a float, not {group_isometries!r}")
-        else:
-            # if not grouped, set to 0 to force drawing one isometry per shell
-            dchi_iso_max = 0.
-
-        Abs = []
-        n_isometries = 0
-        dchi_iso = np.inf
-        shell_identifier = {}
-
-        for ishell in range(self.nshells):
-            dchi_shell = chi_edges[ishell + 1] - chi_edges[ishell]
-            if dchi_iso + dchi_shell > dchi_iso_max:
-                # if grouped shell width is larger than maximum width for isometry, draw a new one
-                A, b = _random_isometry(rng, boxsize)
-                n_isometries += 1
-                dchi_iso = 0.
-            dchi_iso += dchi_shell
-            Abs.append([A.astype(self.reader.dtype), b.astype(self.reader.dtype)])
-            shell_identifier[ishell] = n_isometries
-
-        if group_isometries is not None:
-            logger.info("  - Using %d isometries grouped within %.2f Mpc.", n_isometries, dchi_iso_max)
-        else:
-            logger.info("  - Using %d isometries.", n_isometries)
-
-        if get_shell_identifier:
-            return Abs, shell_identifier
-        else:
-            return Abs
-
     def estimate_replicates(self, ishell: int) -> float:
         """Estimate how many periodic-box replicates are needed (volume ratio).
 
@@ -628,9 +602,14 @@ class ShellBuilder(MapBuilder):
         chi_edges = self.shell_edges_comoving_distance
         box_volume = self.reader.boxsize**3
 
-        shell_volume = 4. / 3. * np.pi * (chi_edges[ishell + 1]**3 - chi_edges[ishell]**3) * self.fsky
+        shell_volume = 4. / 3. * np.pi * (chi_edges[ishell + 1]**3 - chi_edges[ishell]**3) * self.footprint.fsky
 
         return shell_volume / box_volume
+
+    # endregion
+
+    # ==================================================================================================================
+    # region Densities
 
     def subsample_ratio(self, ishell: int) -> float:
         r"""Return the particle subsampling ratio applied for a given shell.
@@ -667,15 +646,15 @@ class ShellBuilder(MapBuilder):
         """
         if isinstance(self.subsample_box, dict):
             if not hasattr(self, 'subsample_ratios'):
-                # particles per full-sky pixel: fsky in estimate_replicates cancels fsky in
-                # the per-footprint-pixel denominator, leaving pure geometry with no mask needed
+                # particles per full-sky pixel: the sky fraction of the footprint cancels in the number of particles
+                # per pixel, leaving pure geometry with no mask needed
                 chi_edges = self.shell_edges_comoving_distance
                 shell_volumes = 4. / 3. * np.pi * (chi_edges[1:]**3 - chi_edges[:-1]**3)
                 ngal_pix = shell_volumes * self.reader.nparticles / (self.reader.boxsize**3 * self.npix)
                 if 'densitymax_z' in self.subsample_box.keys():
                     snr_pix = 1. / np.sqrt(ngal_pix)  # S/N per pixel
                     # S/N at redshift subsample_box_auto_z
-                    snr_pix_cut = np.interp(self.subsample_box['densitymax_z'], [self.mean_z_volume(ishell) for ishell in range(self.nshells)], snr_pix)
+                    snr_pix_cut = np.interp(self.subsample_box['densitymax_z'], [self.mean_redshift_volume(ishell) for ishell in range(self.nshells)], snr_pix)
                     # fraction of particles to maintain S/N of z>subsample_box_auto_z
                     self.subsample_ratios = np.minimum(1., (snr_pix / snr_pix_cut)**2)
                 elif 'clmax_r' in self.subsample_box.keys():
@@ -774,6 +753,11 @@ class ShellBuilder(MapBuilder):
         area = hp.nside2pixarea(self.nside, degrees=degrees)
         return self.pixel_density(ishell) / area
 
+    # endregion
+
+    # ==================================================================================================================
+    # region Maps
+
     def construct_maps(self, imaps: int | Iterable[int] | None = None, **kwargs: Any) -> hsp.HealSparseMap | dict[int, hsp.HealSparseMap]:
         """Construct all requested shell maps.
 
@@ -828,29 +812,38 @@ class ShellBuilder(MapBuilder):
 
         Notes
         -----
-        Orphan particles are added when ``self.add_orphans`` is True
-        (set on :class:`SnapshotInterpShellBuilder`; False everywhere else): their map is built here
-        (``construct_maps_sub(None, None, do_orphan_ishell=ishell)``), from the orphan particles saved by the
-        sub-volumes of the shell, so all of them must be built first.
+        The maps summed are those of :meth:`_subs` (with the orphan particles for
+        :class:`SnapshotInterpShellBuilder`).
         """
         shells = {}
 
-        mask = self.get_mask(nest=True, padded=True)
+        mask = self.footprint.mask(nest=True, padded=True)
         for ishell in self.tqdm(ishells, desc="[combine_maps_subs]"):
-            isubs = list(self.reader.isubs_for_snapshot(ishell))
-            if self.add_orphans:
-                isubs.append('orphan')
-                self.construct_maps_sub(None, None, do_orphan_ishell=ishell)
             shell_sum = MapSum(mask, self.nside_c, self.dtype)
-            for _, sub_map in self.iter_maps(ishell, isubs=isubs, allow_missing=allow_missing_subs, desc=f"[combine_maps_subs: shell {ishell}]"):
+            for _, sub_map in self.iter_maps(ishell, isubs=self._subs(ishell), allow_missing=allow_missing_subs, desc=f"[combine_maps_subs: shell {ishell}]"):
                 shell_sum.add(sub_map)
             shell = shell_sum.to_map()
 
-            self._save_map(shell, self.path(ishell))
+            self._write_hspmap(self.path(ishell), shell)
 
             shells[ishell] = shell
 
         return shells[ishells] if np.isscalar(ishells) else shells
+
+    def _subs(self, ishell: int) -> list:
+        """Return the sub-volumes whose maps make a shell (:meth:`combine_maps_subs`).
+
+        Parameters
+        ----------
+        ishell : int
+            Shell index.
+
+        Returns
+        -------
+        list
+            Sub-volumes of the snapshot of the shell.
+        """
+        return list(self.reader.isubs_for_snapshot(ishell))
 
     def _count_to_shell(self, count: np.ndarray) -> hsp.HealSparseMap:
         """Convert dense per-pixel particle counts into a HealSparse shell map.
@@ -874,8 +867,8 @@ class ShellBuilder(MapBuilder):
         """
         uipix = np.flatnonzero(count)
         # drop out-of-footprint pixels (equivalent to filtering every particle)
-        if self.footprint is not None:
-            uipix = uipix[self.get_mask(nest=False, padded=True)[uipix]]
+        if not self.footprint.fullsky:
+            uipix = uipix[self.footprint.mask(nest=False, padded=True)[uipix]]
         c = count[uipix]
         logger.debug("Found %d particles in the shell.", int(c.sum(dtype=np.int64)))
         return self._make_hspmap(hp.ring2nest(self.nside, uipix), c, nest=True)
@@ -899,18 +892,19 @@ class ShellBuilder(MapBuilder):
             -1 on empty pixels.
         """
         if smooth_Mpc is not None:
-            return self.load_maps(ishell, what=self.smoothed_field_what, smooth_Mpc=smooth_Mpc)
+            return super().field_hspmap(ishell, smooth_Mpc)
         shell = self.load_maps(ishell)
-        _, ipix = self.get_mask(nest=True, return_ipix=True, padded=True)
+        ipix = self.footprint.ipix(nest=True, padded=True)
         # -1 (no particle) on the padded footprint, then the density contrast where there are particles
         density = self._make_hspmap(ipix, np.full(len(ipix), -1.), nest=True)
         spix = shell.valid_pixels
         density.update_values_pix(spix, (shell[spix] / self.pixel_density(ishell) - 1.).astype(self.dtype), nest=True)
         return density
 
-    def _smooth_distance(self, ishell: int) -> float:
-        """Return the comoving distance of the far edge of a shell, converting smoothing scales to angles."""
-        return self.shell_edges_comoving_distance[ishell + 1]
+    # endregion
+
+    # ==================================================================================================================
+    # region Smoothed maps
 
     def compute_tidal_tensor_maps(self,
                                   ishells: int | Iterable[int] | None = None,
@@ -962,7 +956,7 @@ class ShellBuilder(MapBuilder):
         the transverse part of the traceless tidal tensor :math:`s_{ij} = (\partial_i \partial_j / \nabla^2 - \delta_{ij} / 3)\,
         \delta`, for a shell with no line-of-sight component: :math:`t_{11} + t_{22} = \delta / 3`.
         """
-        _, ipix = self.get_mask(nest=False, return_ipix=True, padded=True)
+        ipix = self.footprint.ipix(nest=False, padded=True)
         whats = ['t11', 't22', 't12']
         save_field_map = save_field_map and smooth_Mpc is not None
 
@@ -974,12 +968,12 @@ class ShellBuilder(MapBuilder):
             if smooth_Mpc is not None:
                 # smoothed density, from the a_lm smoothed in place (reused for the tidal field below)
                 self._smooth_alms(ishell, alm, smooth_Mpc, lmax)
-                density_hspmap = self._alm2hspmap(alm, ipix, lmax, mean=self._alm_field_mean(ishell))
+                density_hspmap = self._field_from_alms(ishell, alm)
                 if save_field_map:
-                    self._save_map(density_hspmap, self.path(ishell, what=self.smoothed_field_what, smooth_Mpc=smooth_Mpc))
+                    self._write_hspmap(self.path(ishell, what=self.smoothed_field_what, smooth_Mpc=smooth_Mpc), density_hspmap)
                 density = density_hspmap.get_values_pix(ipix, nest=False)
             else:
-                density = self.field_map(ishell, nest=False)[ipix]
+                density = self.field_hspmap(ishell).generate_healpix_map(nest=False)[ipix]
 
             # traceless tidal field (d_i d_j / laplacian) delta: E-mode a_lm with the factor of the shear from the
             # convergence (same sign convention as the shear maps)
@@ -1004,10 +998,19 @@ class ShellBuilder(MapBuilder):
             for what, val in zip(whats, vals, strict=True):
                 hspmap = self._make_hspmap(ipix, val)
                 tensor_fname = self.path(ishell, what=what, smooth_Mpc=smooth_Mpc)
-                self._save_map(hspmap, tensor_fname)
+                self._write_hspmap(tensor_fname, hspmap)
                 ts[ishell].append(hspmap)
 
         return ts[ishells] if np.isscalar(ishells) else ts
+
+    def _smooth_distance(self, ishell: int) -> float:
+        """Return the comoving distance of the far edge of a shell, converting smoothing scales to angles."""
+        return self.shell_edges_comoving_distance[ishell + 1]
+
+    # endregion
+
+    # ==================================================================================================================
+    # region Predictions
 
     def _create_tracers(self) -> list[Tracer]:
         """Create one density tracer per shell, with a volume-weighted top-hat redshift distribution (1000 redshifts per shell).
@@ -1053,6 +1056,11 @@ class ShellBuilder(MapBuilder):
         """
         return 1. / self.sky_density(ishell)
 
+    # endregion
+
+    # ==================================================================================================================
+    # region Lensing
+
     def snapshot_lensing_builder(self, tag: str | None = 'snapshots') -> SnapshotBornLensingBuilder:
         """Return a lensing builder with one convergence map per shell snapshot.
 
@@ -1067,6 +1075,8 @@ class ShellBuilder(MapBuilder):
         """
         return SnapshotBornLensingBuilder(self, tag=tag)
 
+    # endregion
+
 
 class SnapshotShellBuilder(ShellBuilder):
     """ShellBuilder specialized for snapshot-based shells.
@@ -1079,27 +1089,23 @@ class SnapshotShellBuilder(ShellBuilder):
     ----------
     reader : pollux.reader.Reader
         Simulation snapshot reader.
-    nside : int
-        Healpix nside of the shell maps.
-    io, root_dir : optional
-        Files of the realization, or root directory of the products (see :class:`ShellBuilder`).
+    footprint : pollux.footprint.Footprint
+        Footprint of the shell maps.
+    io : optional
+        See :class:`ShellBuilder`.
     shell_edges_match : {'center_redshift','center_scale_factor','center_comoving_distance','center_comoving_volume'}, optional
         Defines how shell edges are placed relative to snapshot centers.
     **kwargs
         Forwarded to :class:`ShellBuilder`.
     """
 
-    def __init__(
-            self,
-            reader: Reader,
-            nside: int,
-            io: PolluxIO | None = None,
-            root_dir: str | None = None,
-            shell_edges_match: str = 'center_scale_factor',
-            **kwargs: Any) -> None:
+    def __init__(self, reader: Reader, footprint: Footprint, io: PolluxIO | None = None, shell_edges_match: str = 'center_scale_factor', **kwargs: Any) -> None:
         self.shell_edges_match = shell_edges_match
 
-        super().__init__(reader.nsnapshots, reader, nside, io=io, root_dir=root_dir, **kwargs)
+        super().__init__(reader.nsnapshots, reader, footprint, io=io, **kwargs)
+
+    # ==================================================================================================================
+    # region Maps
 
     def construct_maps_sub(self, ishell: int, isub: int, ijob: int | None = None) -> hsp.HealSparseMap:
         """Construct a single shell map for one snapshot/sub-volume.
@@ -1165,7 +1171,7 @@ class SnapshotShellBuilder(ShellBuilder):
                 # bin particles into healpix pixels
                 _vec2pix(
                     ipix, *self._healpix_geometry, xyz_work[:, 0], xyz_work[:, 1], xyz_work[:, 2], shift[0, 0], shift[0, 1], shift[0, 2], rmin2, rmax2,
-                    self.octant_only)
+                    self.footprint.octant)
 
                 # scatter-add (out-of-shell particles have ipix = -1 and are skipped)
                 _count_pix(count, ipix, buf)
@@ -1176,9 +1182,84 @@ class SnapshotShellBuilder(ShellBuilder):
             logger.debug("No valid replica — skipping particle load.")
             shell = self._make_hspmap()
 
-        self._save_map(shell, fname)
+        self._write_hspmap(fname, shell)
 
         return shell
+
+    # endregion
+
+    # ==================================================================================================================
+    # region Halo catalogs
+
+    def construct_catalogs(self,
+                           ishells: int | Iterable[int] | None = None,
+                           extra_columns: list[str] | None = None,
+                           **kwargs: Any) -> fits.HDUList | dict[int, fits.HDUList]:
+        """Construct and save a per-shell (halo/particle) FITS catalog.
+
+        Parameters
+        ----------
+        ishells : int or array_like of int or None, optional
+            Shell indices to construct. If None, constructs all shells.
+        extra_columns : list of str, optional
+            Extra properties to load using ``reader.read_props`` and store as
+            additional FITS columns.
+        **kwargs
+            Forwarded to :meth:`construct_catalog_sub` / ``reader.read_sub``.
+
+        Returns
+        -------
+        astropy.io.fits.HDUList or dict
+            - If ``ishells`` is a single int: returns a FITS HDU list
+              (primary HDU + one table HDU per sub-volume).
+            - If ``ishells`` is ``None`` or an iterable: returns a dict keyed
+              by shell index with FITS HDU list values.
+
+        Notes
+        -----
+        Output filename is ``what='catalog'`` under :meth:`path`.
+        """
+        extra_columns = extra_columns or []
+        if extra_columns:
+            self._check_props_reader()
+        out = {}
+
+        for ishell in self.tqdm(ishells, desc="[construct_catalogs]"):
+            isubs = self.reader.isubs_for_snapshot(ishell)
+
+            fname = self.path(ishell, what='catalog')
+            hdul = [fits.PrimaryHDU()]
+
+            for isub in self.tqdm(isubs, desc=f"[construct_catalogs: shell {ishell}]"):
+                # Construct catalog for simulation sub-volume/snapshot
+                res = self.construct_catalogs_sub(ishell, isub, **kwargs)
+
+                # Build columns for output files
+                idx = fits.Column(name='ihaloes', format='J', array=res[0])
+                ra = fits.Column(name='ra', format='E', array=res[1])
+                dec = fits.Column(name='dec', format='E', array=res[2])
+                r = fits.Column(name='chi', format='E', array=res[3])
+                a = pyccl.scale_factor_of_chi(self.cosmo, res[3])
+                z = fits.Column(name='z', format='E', array=1. / a - 1.)
+                cols = [idx, ra, dec, r, z]
+
+                # Add extra columns
+                if len(extra_columns) > 0:
+                    tmp = self.reader.read_props(ishell, isub, extra_columns, ihaloes=res[0])
+                    for name, array in tmp.items():
+                        cols.append(fits.Column(name=name, format='E', array=array))
+
+                header = fits.Header()
+                header['ISUB'] = isub
+                header['ZSNAP'] = self.reader.zsnapshots[ishell]
+
+                hdul.append(fits.BinTableHDU.from_columns(cols, header))
+
+            self.io.write_table(fname, hdul)
+
+            out[ishell] = hdul
+
+        return out[ishells] if np.isscalar(ishells) else out
 
     def construct_catalogs_sub(self, ishell: int, isub: int, **kwargs: Any) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Construct a particle catalog for a given shell/sub-volume.
@@ -1237,7 +1318,7 @@ class SnapshotShellBuilder(ShellBuilder):
                 xyz_work = _rotflip(self.replicate_rotflip[ix, iy, iz], xyz, boxsize).astype(dtype)
 
             tmpidx, tmpra, tmpdec, tmpr = _vec2radec(
-                xyz_work[:, 0], xyz_work[:, 1], xyz_work[:, 2], shift[0, 0], shift[0, 1], shift[0, 2], rmin2, rmax2, self.octant_only)
+                xyz_work[:, 0], xyz_work[:, 1], xyz_work[:, 2], shift[0, 0], shift[0, 1], shift[0, 2], rmin2, rmax2, self.footprint.octant)
             w = tmpidx >= 0
             if np.any(w):
                 idx_list.append(tmpidx[w])
@@ -1255,81 +1336,13 @@ class SnapshotShellBuilder(ShellBuilder):
             ra = dec = r = np.array([])
 
         # post-filter: drop particles whose sky position falls outside the mask
-        if self.footprint is not None and len(idx) > 0:
+        if not self.footprint.fullsky and len(idx) > 0:
             ipix = hp.ang2pix(self.nside, ra, dec, nest=False, lonlat=True)
-            _, mask_ipix_ring = self.get_mask(nest=False, return_ipix=True, padded=True)
+            mask_ipix_ring = self.footprint.ipix(nest=False, padded=True)
             keep = np.isin(ipix, mask_ipix_ring)
             idx, ra, dec, r = idx[keep], ra[keep], dec[keep], r[keep]
 
         return idx, ra, dec, r
-
-    def construct_catalogs(self,
-                           ishells: int | Iterable[int] | None = None,
-                           extra_columns: list[str] | None = None,
-                           **kwargs: Any) -> fits.HDUList | dict[int, fits.HDUList]:
-        """Construct and save a per-shell (halo/particle) FITS catalog.
-
-        Parameters
-        ----------
-        ishells : int or array_like of int or None, optional
-            Shell indices to construct. If None, constructs all shells.
-        extra_columns : list of str, optional
-            Extra properties to load using ``reader.read_props`` and store as
-            additional FITS columns.
-        **kwargs
-            Forwarded to :meth:`construct_catalog_sub` / ``reader.read_sub``.
-
-        Returns
-        -------
-        astropy.io.fits.HDUList or dict
-            - If ``ishells`` is a single int: returns a FITS HDU list
-              (primary HDU + one table HDU per sub-volume).
-            - If ``ishells`` is ``None`` or an iterable: returns a dict keyed
-              by shell index with FITS HDU list values.
-
-        Notes
-        -----
-        Output filename is ``what='catalog'`` under :meth:`path`.
-        """
-        extra_columns = extra_columns or []
-        out = {}
-
-        for ishell in self.tqdm(ishells, desc="[construct_catalogs]"):
-            isubs = self.reader.isubs_for_snapshot(ishell)
-
-            fname = self.path(ishell, what='catalog')
-            hdul = [fits.PrimaryHDU()]
-
-            for isub in self.tqdm(isubs, desc=f"[construct_catalogs: shell {ishell}]"):
-                # Construct catalog for simulation sub-volume/snapshot
-                res = self.construct_catalogs_sub(ishell, isub, **kwargs)
-
-                # Build columns for output files
-                idx = fits.Column(name='ihaloes', format='J', array=res[0])
-                ra = fits.Column(name='ra', format='E', array=res[1])
-                dec = fits.Column(name='dec', format='E', array=res[2])
-                r = fits.Column(name='chi', format='E', array=res[3])
-                a = pyccl.scale_factor_of_chi(self.cosmo, res[3])
-                z = fits.Column(name='z', format='E', array=1. / a - 1.)
-                cols = [idx, ra, dec, r, z]
-
-                # Add extra columns
-                if len(extra_columns) > 0:
-                    tmp = self.reader.read_props(ishell, isub, extra_columns, ihaloes=res[0])
-                    for name, array in tmp.items():
-                        cols.append(fits.Column(name=name, format='E', array=array))
-
-                header = fits.Header()
-                header['ISUB'] = isub
-                header['ZSNAP'] = self.reader.zsnapshots[ishell]
-
-                hdul.append(fits.BinTableHDU.from_columns(cols, header))
-
-            self.io.write_table(fname, hdul)
-
-            out[ishell] = hdul
-
-        return out[ishells] if np.isscalar(ishells) else out
 
     def load_catalogs(self, ishells: int | Iterable[int] | None = None, variables: list[str] | None = None) -> dict:
         """Load previously constructed per-shell catalogs as concatenated arrays.
@@ -1388,7 +1401,8 @@ class SnapshotShellBuilder(ShellBuilder):
         ishells : int or array_like of int or None
             Shell indices to read. If None, reads all shells.
         variables : list of str
-            Variable names to load via :meth:`reader.read_props`.
+            Variable names to load via the ``read_props`` of the reader (e.g.
+            :meth:`pollux.reader.HACCHaloReader.read_props`).
         save : bool, optional
             If True, checks for and reuses a cached ``what='catalog_props'``
             FITS file (per shell) instead of re-reading the original
@@ -1418,6 +1432,7 @@ class SnapshotShellBuilder(ShellBuilder):
             # fetch the others from the reader, one sub-volume (catalog HDU) at a time
             missing = [v for v in variables if v not in cached]
             if missing:
+                self._check_props_reader()
                 fname = self.path(ishell, what='catalog')
                 fetched = {k: [] for k in missing}
                 with self.io.read_table(fname) as hdul:
@@ -1440,6 +1455,19 @@ class SnapshotShellBuilder(ShellBuilder):
 
         return out[ishells] if np.isscalar(ishells) else out
 
+    def _check_props_reader(self) -> None:
+        """Check that the reader reads properties per object (e.g. halo masses), for :meth:`_read_props` and ``extra_columns``.
+
+        Raises
+        ------
+        TypeError
+            If the reader has no properties per object (e.g. a particle reader).
+        """
+        if not hasattr(self.reader, 'read_props'):
+            raise TypeError(f"{type(self.reader).__name__} reads no properties per object: use a halo reader (e.g. HACCHaloReader).")
+
+    # endregion
+
 
 class LightconeShellBuilder(ShellBuilder):
     """ShellBuilder that slices a lightcone by stacking multiple snapshots.
@@ -1453,27 +1481,20 @@ class LightconeShellBuilder(ShellBuilder):
     reader : pollux.reader.Reader
         Lightcone-capable reader providing ``zsnapshots_fulllist`` and
         ``read_sub(isnapshot, isub)`` for lightcone snapshots.
-    nside : int
-        Healpix nside of the shell maps.
-    io, root_dir : optional
-        Files of the realization, or root directory of the products (see :class:`ShellBuilder`).
+    footprint : pollux.footprint.Footprint
+        Footprint of the shell maps.
+    io : optional
+        See :class:`ShellBuilder`.
     shell_edges_match : str, optional
         Shell-edge placement strategy (same meaning as for SnapshotShellBuilder).
     **kwargs
         Forwarded to :class:`ShellBuilder`.
     """
 
-    def __init__(
-            self,
-            reader: Reader,
-            nside: int,
-            io: PolluxIO | None = None,
-            root_dir: str | None = None,
-            shell_edges_match: str = 'center_scale_factor',
-            **kwargs: Any) -> None:
+    def __init__(self, reader: Reader, footprint: Footprint, io: PolluxIO | None = None, shell_edges_match: str = 'center_scale_factor', **kwargs: Any) -> None:
         self.shell_edges_match = shell_edges_match
 
-        super().__init__(reader.nsnapshots, reader, nside, io=io, root_dir=root_dir, **kwargs)
+        super().__init__(reader.nsnapshots, reader, footprint, io=io, **kwargs)
 
     def construct_maps_sub(self, ishell: int, isub: int, ijob: int | None = None) -> hsp.HealSparseMap:
         """Construct a single shell map for one lightcone sub-volume.
@@ -1536,7 +1557,7 @@ class LightconeShellBuilder(ShellBuilder):
         buf = np.empty_like(ipix)
         _vec2pix(
             ipix, *self._healpix_geometry, xyz_work[:, 0], xyz_work[:, 1], xyz_work[:, 2], shift[0, 0], shift[0, 1], shift[0, 2], rmin2, rmax2,
-            self.octant_only)
+            self.footprint.octant)
 
         count = np.zeros(self.npix, dtype=np.int32)  # per-pixel counts: int32 is enough
         # scatter-add (out-of-shell particles have ipix = -1 and are skipped)
@@ -1544,7 +1565,7 @@ class LightconeShellBuilder(ShellBuilder):
         shell = self._count_to_shell(count)
         del count, ipix, buf
 
-        self._save_map(shell, fname)
+        self._write_hspmap(fname, shell)
 
         return shell
 
@@ -1561,23 +1582,50 @@ class SnapshotInterpShellBuilder(ShellBuilder):
     ----------
     reader : pollux.reader.Reader
         Reader providing at least consecutive snapshots and particle ids.
-    nside : int
-        Healpix nside of the shell maps.
-    io, root_dir : optional
-        Files of the realization, or root directory of the products (see :class:`ShellBuilder`).
+    footprint : pollux.footprint.Footprint
+        Footprint of the shell maps.
+    io : optional
+        See :class:`ShellBuilder`.
     **kwargs
         Forwarded to :class:`ShellBuilder`.
 
     Notes
     -----
-    This builder uses ``kind='lightcone'`` with ``nshells = nsnapshots - 1``.
+    The shells lie between consecutive snapshots: ``nshells = nsnapshots - 1``.
     """
 
-    add_orphans = True
-    kind = 'lightcone'
+    def __init__(self, reader: Reader, footprint: Footprint, io: PolluxIO | None = None, **kwargs: Any) -> None:
+        super().__init__(reader.nsnapshots - 1, reader, footprint, io=io, **kwargs)
 
-    def __init__(self, reader: Reader, nside: int, io: PolluxIO | None = None, root_dir: str | None = None, **kwargs: Any) -> None:
-        super().__init__(reader.nsnapshots - 1, reader, nside, io=io, root_dir=root_dir, **kwargs)
+    @cached_property
+    def shell_edges_redshift(self) -> np.ndarray:
+        """Redshifts of the shell edges: the snapshots, the shells lying between consecutive ones.
+
+        Returns
+        -------
+        ndarray
+            Length ``nshells + 1``.
+        """
+        return self.reader.zsnapshots
+
+    def _subs(self, ishell: int) -> list:
+        """Return the sub-volumes whose maps make a shell, and its orphan particles (:meth:`ShellBuilder._subs`).
+
+        The map of the orphan particles is built here (``construct_maps_sub(None, None, do_orphan_ishell=ishell)``),
+        from those saved by the sub-volumes of the shell, which must all be built first.
+
+        Parameters
+        ----------
+        ishell : int
+            Shell index.
+
+        Returns
+        -------
+        list
+            Sub-volumes of the snapshot of the shell, then ``'orphan'``.
+        """
+        self.construct_maps_sub(None, None, do_orphan_ishell=ishell)
+        return [*super()._subs(ishell), 'orphan']
 
     def construct_maps_sub(self, ishell: int, isub: int, ijob: int | None = None, do_orphan_ishell: int | None = None) -> hsp.HealSparseMap:
         """Construct one interpolated lightcone shell map for a sub-volume.
@@ -1626,7 +1674,7 @@ class SnapshotInterpShellBuilder(ShellBuilder):
             valid_replicas = np.array(self._valid_replicas_sub(ishell, isub), dtype=np.int64).reshape(-1, 3)
             if len(valid_replicas) == 0:
                 shell = self._make_hspmap()
-                self._save_map(shell, fname)
+                self._write_hspmap(fname, shell)
                 return shell
 
         # read particles
@@ -1716,7 +1764,7 @@ class SnapshotInterpShellBuilder(ShellBuilder):
             # bin particles into healpix pixels
             _worldline2pix(
                 ipix, *self._healpix_geometry, a_lc, chi2_lc, xyz_i_work[:, 0], xyz_i_work[:, 1], xyz_i_work[:, 2], xyz_f_work[:, 0], xyz_f_work[:, 1],
-                xyz_f_work[:, 2], shift[0, 0], shift[0, 1], shift[0, 2], rmin2, rmax2, self.octant_only)
+                xyz_f_work[:, 2], shift[0, 0], shift[0, 1], shift[0, 2], rmin2, rmax2, self.footprint.octant)
 
             # scatter-add (out-of-shell particles have ipix = -1 and are skipped)
             _count_pix(count, ipix, buf)
@@ -1724,9 +1772,13 @@ class SnapshotInterpShellBuilder(ShellBuilder):
         shell = self._count_to_shell(count)
         del count, ipix, buf
 
-        self._save_map(shell, fname)
+        self._write_hspmap(fname, shell)
 
         return shell
+
+
+# ======================================================================================================================
+# region Kernels
 
 
 @numba.njit(parallel=True)
@@ -2045,7 +2097,7 @@ def _loc2pix(nside: int, order: int, ncap: int, npix: int, z: float, phi: float,
 @numba.njit
 def _vec2pix_kernel(
         nside: int, order: int, ncap: int, npix: int, x: float, y: float, z: float, shiftx: float, shifty: float, shiftz: float, rmin2: float, rmax2: float,
-        octant_only: bool) -> int:
+        octant: bool) -> int:
     """Convert one shifted Cartesian position to a Healpix pixel index with cuts.
 
     Parameters
@@ -2058,7 +2110,7 @@ def _vec2pix_kernel(
         Replicate translation applied before binning.
     rmin2, rmax2 : float
         Shell radial cuts (squared).
-    octant_only : bool
+    octant : bool
         If True, require x>=0, y>=0, z>=0 after shifting.
 
     Returns
@@ -2076,8 +2128,8 @@ def _vec2pix_kernel(
     if r2 < rmin2 or r2 >= rmax2:
         return -1
 
-    # remove particles out of octant if octant_only
-    if octant_only:  # check if particle out of octant
+    # remove particles out of octant if octant
+    if octant:  # check if particle out of octant
         if (tmpx < 0.) or (tmpy < 0.) or (tmpz < 0.):
             return -1
 
@@ -2093,7 +2145,7 @@ def _vec2pix_kernel(
 @numba.njit(parallel=True)
 def _vec2pix(
         ipix: np.ndarray, nside: int, order: int, ncap: int, npix: int, x: np.ndarray, y: np.ndarray, z: np.ndarray, shiftx: float, shifty: float,
-        shiftz: float, rmin2: float, rmax2: float, octant_only: bool) -> None:
+        shiftz: float, rmin2: float, rmax2: float, octant: bool) -> None:
     """Vectorized/parallel version of :func:`_vec2pix_kernel`, filling ``ipix`` in place.
 
     Parameters
@@ -2108,16 +2160,16 @@ def _vec2pix(
         Replicate translation applied before binning.
     rmin2, rmax2 : float
         Shell radial cuts (squared).
-    octant_only : bool
+    octant : bool
         If True, require x>=0, y>=0, z>=0 after shifting.
     """
     for i in numba.prange(len(x)):
-        ipix[i] = _vec2pix_kernel(nside, order, ncap, npix, x[i], y[i], z[i], shiftx, shifty, shiftz, rmin2, rmax2, octant_only)
+        ipix[i] = _vec2pix_kernel(nside, order, ncap, npix, x[i], y[i], z[i], shiftx, shifty, shiftz, rmin2, rmax2, octant)
 
 
 @numba.njit
 def _vec2radec_kernel(x: float, y: float, z: float, shiftx: float, shifty: float, shiftz: float, rmin2: float, rmax2: float,
-                      octant_only: bool) -> tuple[bool, float, float, float]:
+                      octant: bool) -> tuple[bool, float, float, float]:
     """Convert one shifted Cartesian position to (ra, dec, r) with cuts.
 
     Parameters
@@ -2128,7 +2180,7 @@ def _vec2radec_kernel(x: float, y: float, z: float, shiftx: float, shifty: float
         Replicate translation applied first.
     rmin2, rmax2 : float
         Shell radial cuts (squared).
-    octant_only : bool
+    octant : bool
         If True, require x>=0, y>=0, z>=0 after shifting.
 
     Returns
@@ -2146,8 +2198,8 @@ def _vec2radec_kernel(x: float, y: float, z: float, shiftx: float, shifty: float
     if r2 < rmin2 or r2 >= rmax2:
         return (False, 0., 0., 0.)
 
-    # remove particles out of octant if octant_only
-    if octant_only:  # check if particle out of octant
+    # remove particles out of octant if octant
+    if octant:  # check if particle out of octant
         if (tmpx < 0.) or (tmpy < 0.) or (tmpz < 0.):
             return (False, 0., 0, 0.)
 
@@ -2163,7 +2215,7 @@ def _vec2radec_kernel(x: float, y: float, z: float, shiftx: float, shifty: float
 
 @numba.njit(parallel=True)
 def _vec2radec(x: np.ndarray, y: np.ndarray, z: np.ndarray, shiftx: float, shifty: float, shiftz: float, rmin2: float, rmax2: float,
-               octant_only: bool) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+               octant: bool) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Vectorized/parallel version of :func:`_vec2radec_kernel`.
 
     Parameters
@@ -2174,7 +2226,7 @@ def _vec2radec(x: np.ndarray, y: np.ndarray, z: np.ndarray, shiftx: float, shift
         Replicate translation applied first.
     rmin2, rmax2 : float
         Shell radial cuts (squared).
-    octant_only : bool
+    octant : bool
         If True, require x>=0, y>=0, z>=0 after shifting.
 
     Returns
@@ -2194,7 +2246,7 @@ def _vec2radec(x: np.ndarray, y: np.ndarray, z: np.ndarray, shiftx: float, shift
     r = np.zeros(n, dtype=x.dtype)
     idx = np.zeros(n, dtype=np.int_)
     for i in numba.prange(n):
-        good, tmpra, tmpdec, tmpr = _vec2radec_kernel(x[i], y[i], z[i], shiftx, shifty, shiftz, rmin2, rmax2, octant_only)
+        good, tmpra, tmpdec, tmpr = _vec2radec_kernel(x[i], y[i], z[i], shiftx, shifty, shiftz, rmin2, rmax2, octant)
         if good:
             idx[i] = i
             ra[i] = tmpra
@@ -2247,7 +2299,7 @@ def _intersect_lightcone(chi2_i: float, chi2_f: float, a: np.ndarray, chi2: np.n
 @numba.njit
 def _worldline2pix_kernel(
         nside: int, order: int, ncap: int, npix: int, a_lc: np.ndarray, chi2_lc: np.ndarray, x_i: float, y_i: float, z_i: float, x_f: float, y_f: float,
-        z_f: float, shiftx: float, shifty: float, shiftz: float, rmin2: float, rmax2: float, octant_only: bool) -> int:
+        z_f: float, shiftx: float, shifty: float, shiftz: float, rmin2: float, rmax2: float, octant: bool) -> int:
     """Compute the Healpix pixel of a particle/lightcone intersection (single).
 
     Parameters
@@ -2264,7 +2316,7 @@ def _worldline2pix_kernel(
         Replicate translation.
     rmin2, rmax2 : float
         Shell radial cuts (squared).
-    octant_only : bool
+    octant : bool
         If True, require x>=0, y>=0, z>=0 after shifting.
 
     Returns
@@ -2287,8 +2339,8 @@ def _worldline2pix_kernel(
     if r2_f < rmin2 or r2_i >= rmax2:  # it is enough to test initial/final radii as it cannot evolve faster than light
         return -1
 
-    # remove particles out of octant if octant_only
-    if octant_only:  # check if particle out of octant
+    # remove particles out of octant if octant
+    if octant:  # check if particle out of octant
         if (tmpx_i < 0. and tmpx_f < 0.) or (tmpy_i < 0. and tmpy_f < 0.) or (tmpz_i < 0. and tmpz_f < 0.):
             return -1
 
@@ -2310,8 +2362,8 @@ def _worldline2pix_kernel(
     if r2 < rmin2 or r2 >= rmax2:
         return -1
 
-    # remove particles out of octant if octant_only
-    if octant_only:  # check if particle out of octant
+    # remove particles out of octant if octant
+    if octant:  # check if particle out of octant
         if (tmpx < 0.) or (tmpy < 0.) or (tmpz < 0.):
             return -1
 
@@ -2328,7 +2380,7 @@ def _worldline2pix_kernel(
 def _worldline2pix(
         ipix: np.ndarray, nside: int, order: int, ncap: int, npix: int, a_lc: np.ndarray, chi2_lc: np.ndarray, x_i: np.ndarray, y_i: np.ndarray,
         z_i: np.ndarray, x_f: np.ndarray, y_f: np.ndarray, z_f: np.ndarray, shiftx: float, shifty: float, shiftz: float, rmin2: float, rmax2: float,
-        octant_only: bool) -> None:
+        octant: bool) -> None:
     """Parallel version of :func:`_worldline2pix_kernel`, filling ``ipix`` in place.
 
     Parameters
@@ -2345,12 +2397,12 @@ def _worldline2pix(
         Replicate translation.
     rmin2, rmax2 : float
         Shell radial cuts (squared).
-    octant_only : bool
+    octant : bool
         If True, require x>=0, y>=0, z>=0 after shifting.
     """
     for i in numba.prange(len(x_i)):
         ipix[i] = _worldline2pix_kernel(
-            nside, order, ncap, npix, a_lc, chi2_lc, x_i[i], y_i[i], z_i[i], x_f[i], y_f[i], z_f[i], shiftx, shifty, shiftz, rmin2, rmax2, octant_only)
+            nside, order, ncap, npix, a_lc, chi2_lc, x_i[i], y_i[i], z_i[i], x_f[i], y_f[i], z_f[i], shiftx, shifty, shiftz, rmin2, rmax2, octant)
 
 
 @numba.njit(parallel=True)
@@ -2537,3 +2589,6 @@ def _part_boundary_fix(xyzi: np.ndarray, xyzf: np.ndarray, boxsize: float, fixed
     for i in numba.prange(n):
         for k in range(3):
             xyzi[i, k], xyzf[i, k] = _part_boundary_fix_kernel(xyzi[i, k], xyzf[i, k], boxsize=boxsize, fixed=fixed)
+
+
+# endregion

@@ -50,12 +50,14 @@ functions to theory. At low resolution it fits on one node; :doc:`pipeline` dist
     # simulation: one snapshot out of two (each one makes a shell)
     reader = pollux.reader.HACCReader(path='/path/to/simulation', run_params='run/indat.params', snap_sub_every_n=2)
 
-    # shells: replicated boxes with random isometries, full sky at nside 512
-    shells = pollux.shells.SnapshotShellBuilder(
-        reader, nside=512, root_dir='/path/to/outputs/simulation', seed=0, mask=None,
-        apply_grid_isometry=True, group_isometries=True)
+    # products of the simulation on the full sky at nside 512 (one root directory per footprint, see the outputs)
+    footprint = pollux.Footprint(512, pollux.PolluxIO('/path/to/outputs/simulation/nside512'))
+
+    # shells of the realization seed 0: replicated boxes with random isometries
+    shells = pollux.shells.SnapshotShellBuilder(reader, footprint, seed=0, apply_grid_isometry=True, group_isometries=True)
     shells.construct_maps()
-    shells.compute_tidal_tensor_maps()  # tidal field of each shell, for intrinsic alignments
+    shells.compute_alms()
+    shells.compute_tidal_tensor_maps()  # tidal field of each shell, from its a_lm, for intrinsic alignments
 
     # convergence and shear maps of tomographic bins, from their redshift distributions
     z, *nzs = np.loadtxt('nz.txt', unpack=True)

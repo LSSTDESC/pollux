@@ -30,8 +30,9 @@ class BaryonifiedShellBuilder(ShellBuilder):
 
     Parameters
     ----------
-    shell_builder : ShellBuilder
-        Builder providing shell count maps. All shell construction parameters
+    shell_builder : SnapshotShellBuilder
+        Builder providing shell count maps, of the same kind as ``halo_builder`` (the only one with halo
+        catalogs), so that the halos and the particles of a shell match. All shell construction parameters
         and methods are inherited from this builder.
     halo_builder : SnapshotShellBuilder
         Builder providing halo catalogs per shell.
@@ -39,6 +40,11 @@ class BaryonifiedShellBuilder(ShellBuilder):
         Dark-matter-only and baryonified profiles (e.g. :func:`s19_profiles` or :func:`mead20_profiles`),
         used both to baryonify the shells and to correct the matter power
         spectrum of the predictions (:meth:`matter_power_spectrum`).
+    profile_parameters : dict or None, optional
+        Parameters of the profiles (e.g. the ``bfg_params`` of :func:`s19_profiles`), recorded in
+        the ``config.yaml`` of the shells, so that shells of other parameters are not mixed with them.
+        Its ``epsilon_max`` (default 20) is the radius, in units of the halo radius, within which each halo
+        displaces the shell's mass (``epsilon_max`` of BaryonForge's ``BaryonifyShell``).
     mass_def : tuple
         Halo mass definition, passed to ``pyccl.halos.massdef.MassDef(*mass_def)``
         (e.g. ``('200', 'critical')``).
@@ -49,14 +55,9 @@ class BaryonifiedShellBuilder(ShellBuilder):
     M_min : float or None, optional
         Minimum halo mass (Msun) of the baryonified halos, in the shells and in
         :meth:`matter_power_spectrum`. Default is ``10 * reader.mass_particles``.
-    profile_parameters : dict or None, optional
-        Parameters of the profiles (e.g. the ``bfg_params`` of :func:`s19_profiles`), recorded in
-        the ``config.yaml`` of the shells, so that shells of other parameters are not mixed with them.
-        Its ``epsilon_max`` (default 20) is the radius, in units of the halo radius, within which each halo
-        displaces the shell's mass (``epsilon_max`` of BaryonForge's ``BaryonifyShell``).
     tag : str or None, optional
         Tag of the baryon model: the shells go to ``{realization}/dmb/{tag}/shells`` (see
-        :mod:`pollux.io.layout`), ``dmb/default`` if None.
+        :mod:`pollux.io.files`), ``dmb/default`` if None.
     **interpolator_kwargs
         Forwarded to ``model.setup_interpolator`` for every shell. ``z_min``,
         ``z_max`` and ``N_samples_z`` are computed per shell (see
@@ -65,27 +66,29 @@ class BaryonifiedShellBuilder(ShellBuilder):
 
     def __init__(
         self,
-        shell_builder: ShellBuilder,
+        shell_builder: SnapshotShellBuilder,
         halo_builder: SnapshotShellBuilder,
         dmo: bfg.Profiles.Base.BaseBFGProfiles,
         dmb: bfg.Profiles.Base.BaseBFGProfiles,
+        profile_parameters: dict | None,
         mass_def: tuple,
         mass_name: str,
         mass_unit: str,
         M_min: float | None = None,
-        profile_parameters: dict | None = None,
         tag: str | None = None,
         **interpolator_kwargs: Any,
     ) -> None:
+        if not isinstance(shell_builder, SnapshotShellBuilder):
+            raise TypeError(f"shell_builder must be a SnapshotShellBuilder, like the halo builder, not {type(shell_builder).__name__}.")
         if mass_unit not in ('Msun', 'Msun_over_h'):
             raise ValueError(f"mass_unit must be 'Msun' or 'Msun_over_h', got {mass_unit!r}")
         self.shell_builder_ref = shell_builder
         self.halo_builder = halo_builder
         self.dmo = dmo  # unconvolved, also used for the matter power spectrum prediction
+        self.dmb = dmb
         self.profile_parameters = profile_parameters
         # radius of the baryonification around each halo, in units of R200c (the BaryonForge runner's epsilon_max)
         self.epsilon_max = float((profile_parameters or {}).get('epsilon_max', 20.))
-        self.dmb = dmb
         self.mass_def = mass_def
         self.mass_name = mass_name
         self.mass_unit = mass_unit
@@ -94,12 +97,11 @@ class BaryonifiedShellBuilder(ShellBuilder):
         self._interpolator_kwargs = {**interpolator_kwargs, 'M_min': self.M_min}
 
         # Initialize parent ShellBuilder with the same configuration
-        if self.shell_builder_ref.kind == 'snapshot':
-            self.shell_edges_match = self.shell_builder_ref.shell_edges_match
+        self.shell_edges_match = shell_builder.shell_edges_match
         super().__init__(
             reader=shell_builder.reader,
             nshells=shell_builder.nshells,
-            nside=shell_builder.nside,
+            footprint=shell_builder.footprint,
             # products of the baryon model, next to the dark-matter-only ones (dmb/{tag})
             io=shell_builder.io.with_options(baryon_tag=tag or 'default'),
             seed=shell_builder.seed,
@@ -108,17 +110,11 @@ class BaryonifiedShellBuilder(ShellBuilder):
             apply_replicate_rotflip=(shell_builder.replicate_rotflip if shell_builder.apply_replicate_rotflip else False),
             subsample_box=shell_builder.subsample_box,
             nside_c=shell_builder.nside_c,
-            mask=shell_builder.footprint,
             save_format=shell_builder.save_format,
             b=shell_builder.b,
-            nlb=shell_builder.nlb,
             remove_monopole=shell_builder.remove_monopole,
-            padding_deg=shell_builder.padding_deg,
-            apotype=shell_builder.apotype,
-            padding_nside=shell_builder.padding_nside,
-            replicate_octant=shell_builder.replicate_octant,
             nocompress=shell_builder.nocompress,
-            f_ell=shell_builder.f_ell)
+            pixel_window=shell_builder.pixel_window)
 
         # Set up baryonification model
         self.cosmo_dict = self.cosmo.to_dict()
@@ -156,6 +152,9 @@ class BaryonifiedShellBuilder(ShellBuilder):
             parameters['profile_parameters'] = self.profile_parameters
         return dict(config, product='shells', inputs=[self.shell_builder_ref.save_dir, self.halo_builder.save_dir])
 
+    # ==================================================================================================================
+    # region Maps
+
     def construct_maps(
         self,
         ishells: int | Iterable[int] | None = None,
@@ -181,7 +180,7 @@ class BaryonifiedShellBuilder(ShellBuilder):
         """
         shells = {}
 
-        _, ipix = self.get_mask(nest=False, return_ipix=True, padded=True)
+        ipix = self.footprint.ipix(nest=False, padded=True)
         for ishell in self.tqdm(ishells, desc="[construct_maps]"):
             self._setup_interpolator(ishell)
 
@@ -206,7 +205,7 @@ class BaryonifiedShellBuilder(ShellBuilder):
 
             # Save the baryonified map
             shell = self._make_hspmap(ipix, baryonified_count[ipix])
-            self._save_map(shell, self.path(ishell))
+            self._write_hspmap(self.path(ishell), shell)
 
             shells[ishell] = shell
 
@@ -242,6 +241,11 @@ class BaryonifiedShellBuilder(ShellBuilder):
         interpolator_kwargs.setdefault('z_max', max(z_edges[ishell + 1], z_edges[ishell] + 1e-3))
         self.model.setup_interpolator(**interpolator_kwargs)
         self._interpolator_ishell = ishell
+
+    # endregion
+
+    # ==================================================================================================================
+    # region Predictions
 
     def matter_power_spectrum(self, nk: int = 128, na: int = 32) -> pyccl.Pk2D:
         """Return the baryon-corrected matter power spectrum consistent with the baryonified shells.
@@ -308,6 +312,12 @@ class BaryonifiedShellBuilder(ShellBuilder):
         pk = np.array([cosmo.nonlin_matter_power(k_arr, a) for a in a_arr]) * boost
         self._pk2d = pyccl.Pk2D(a_arr=a_arr, lk_arr=np.log(k_arr), pk_arr=np.log(pk), is_logp=True)
         return self._pk2d
+
+    # endregion
+
+
+# ======================================================================================================================
+# region Profiles
 
 
 def s19_profiles(
@@ -387,7 +397,17 @@ def mead20_profiles(
 
 
 def _profile_name(profile: bfg.Profiles.Base.BaseBFGProfiles) -> str:
-    # model and class of a profile (e.g. 'Schneider19.DarkMatterOnly'), for the config.yaml of the shells
+    """Return the model and class of a profile, for the ``config.yaml`` of the shells.
+
+    Parameters
+    ----------
+    profile : BaryonForge profile
+
+    Returns
+    -------
+    str
+        E.g. ``'Schneider19.DarkMatterOnly'``.
+    """
     return f'{type(profile).__module__.rsplit(".", 1)[-1]}.{type(profile).__name__}'
 
 
@@ -402,6 +422,24 @@ class _MassThreshold(bfg.Profiles.Base.BaseBFGProfiles):
         super().__init__(**kwargs)
 
     def _real(self, cosmo: pyccl.Cosmology, r: float | np.ndarray, M: float | np.ndarray, a: float) -> np.ndarray:
+        """Return the profile in real space: 1 for the halos heavier than ``M_threshold``, 0 otherwise.
+
+        Parameters
+        ----------
+        cosmo : pyccl.Cosmology
+            Cosmology (unused).
+        r : float or ndarray
+            Radii.
+        M : float or ndarray
+            Halo masses.
+        a : float
+            Scale factor (unused).
+
+        Returns
+        -------
+        ndarray
+            Shape ``(len(M), len(r))``, without the dimensions of scalar inputs.
+        """
         r_use = np.atleast_1d(r)
         M_use = np.atleast_1d(M)
         prof = np.broadcast_to((M_use > self.M_threshold)[:, None], (len(M_use), len(r_use))).astype(float)
@@ -411,3 +449,6 @@ class _MassThreshold(bfg.Profiles.Base.BaseBFGProfiles):
         if np.ndim(M) == 0:
             prof = np.squeeze(prof, axis=0)
         return prof
+
+
+# endregion

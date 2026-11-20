@@ -82,6 +82,20 @@ class GuardedHighThroughputExecutor(HighThroughputExecutor):
     """
 
     def scale_in(self, blocks, max_idletime=None):
+        """Scale in by ``blocks`` blocks, as :class:`HighThroughputExecutor`, but do nothing for zero blocks.
+
+        Parameters
+        ----------
+        blocks : int
+            Number of blocks to stop.
+        max_idletime : float or None, optional
+            Minimum idle time of the blocks to stop.
+
+        Returns
+        -------
+        list
+            Identifiers of the blocks stopped.
+        """
         if blocks == 0:
             return []
         return super().scale_in(blocks, max_idletime=max_idletime)
@@ -102,11 +116,19 @@ class GracePeriodSlurmProvider(SlurmProvider):
     grace_period_s = 180
 
     def submit(self, *args, **kwargs):
+        """Submit a job, as :class:`SlurmProvider`, recording its submission time.
+
+        Returns
+        -------
+        str
+            Identifier of the job.
+        """
         job_id = super().submit(*args, **kwargs)
         self.resources[job_id]['submit_time'] = time.time()
         return job_id
 
     def _status(self):
+        """Update the status of the jobs, as :class:`SlurmProvider`, but keep those missing from ``sacct`` pending during the grace period."""
         active_jobs = {jid: job for jid, job in self.resources.items() if not job['status'].terminal}
         super()._status()
         now = time.time()
@@ -117,7 +139,22 @@ class GracePeriodSlurmProvider(SlurmProvider):
 
 
 def load_run_config(path):
-    """Read the YAML configuration of a run, expanding environment variables (e.g. ``$PSCRATCH``) in its top-level paths."""
+    """Read the YAML configuration of a run, expanding environment variables (e.g. ``$PSCRATCH``) in its top-level paths.
+
+    Parameters
+    ----------
+    path : str
+        YAML file of the run.
+
+    Returns
+    -------
+    dict
+
+    Raises
+    ------
+    ValueError
+        If a top-level path uses an undefined environment variable.
+    """
     with open(path) as f:
         config = yaml.safe_load(f)
     for key, value in config.items():
@@ -141,6 +178,10 @@ def get_config(run_dir, debug, workflow_name, monitoring_db):
         Name of the workflow in the monitoring database.
     monitoring_db : str
         Path of the monitoring database, in the user's output directory.
+
+    Returns
+    -------
+    parsl.config.Config
 
     Notes
     -----
@@ -201,5 +242,15 @@ def get_config(run_dir, debug, workflow_name, monitoring_db):
 
 
 def _seconds(walltime):
+    """Return the seconds of a Slurm walltime ``'HH:MM:SS'``.
+
+    Parameters
+    ----------
+    walltime : str
+
+    Returns
+    -------
+    int
+    """
     h, m, sec = (int(x) for x in walltime.split(':'))
     return 3600 * h + 60 * m + sec

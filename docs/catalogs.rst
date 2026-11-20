@@ -17,7 +17,7 @@ then drawn by one of:
   number of galaxies per bin;
 - :class:`~pollux.catalog.CatalogClusteredPoisson`: a Poisson number of galaxies per pixel and shell, of mean
   set by the density, so that the total number fluctuates. This one can be generated shell by shell
-  (``generate(ishell=...)``), then merged (``combine_shells``), to split the work.
+  (``generate(ishell=...)``), then merged (``merge_shell_catalogs``), to split the work.
 
 ``nbar_input`` is the number of galaxies per arcmin² (one value, or one per bin). Within a pixel, positions are
 uniform. Random numbers come from separate streams per realization seed, bin and shell, so that a catalog does not

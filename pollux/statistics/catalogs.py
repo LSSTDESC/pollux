@@ -21,7 +21,6 @@ import sacc
 import treecorr
 from astropy.io import fits
 
-from ..io.layout import PolluxIO
 from ..cosmo import Tracer, TracerSum
 from ..utils.binning import binning_id
 from ..utils.sky import generate_radec_in_pix
@@ -34,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 
 class Shapes(NamedTuple):
-    """Shapes of the shear legs of the statistics of a catalog (see :meth:`CatalogStatistics._shapes`)."""
+    """Shapes of the shear legs of the statistics of a catalog: what they measure and predict (:meth:`of`)."""
 
     name: str  # 'shear', 'ia', 'shear_plus_ia' or 'observed'
     terms: tuple[str, ...]  # fields summed: lensing shear ('shear') and intrinsic alignments ('ia')
@@ -42,10 +41,65 @@ class Shapes(NamedTuple):
     tracers: list  # tracer of each bin (a TracerSum for several fields)
     shape_noise: bool  # whether the shapes have the shape noise of the galaxies
 
+    # fields summed by each kind of shapes ('observed' includes the intrinsic alignments if the shear augmentor does)
+    TERMS = {'shear': ('shear',), 'ia': ('ia',), 'shear_plus_ia': ('shear', 'ia'), 'observed': ('shear', 'ia')}
+
     @property
     def column_key(self) -> tuple[str, str]:
-        """The columns of each component joined by ``'+'`` (e.g. ``('gamma1+e1_ia_ta', ...)``), as in file names and options."""
+        """The columns of each component joined by ``'+'``, as in file names and options.
+
+        Returns
+        -------
+        tuple of str
+            E.g. ``('gamma1+e1_ia_ta', 'gamma2+e2_ia_ta')``.
+        """
         return tuple('+'.join(cols) for cols in self.columns)
+
+    @classmethod
+    def of(cls, catalog: CatalogStatistics, shapes: str = 'shear', shear_cols: tuple[str, str] = ('gamma1', 'gamma2')) -> Shapes:
+        """Return what the shapes ``shapes`` of the shear legs measure and predict.
+
+        Parameters
+        ----------
+        catalog : CatalogStatistics
+            Catalog (its augmentors and tracers).
+        shapes : {'shear', 'ia', 'shear_plus_ia', 'observed'}, optional
+            Shapes: the lensing shear (``shear_cols``), the intrinsic alignments (``e1_ia_*``,
+            ``e2_ia_*`` of the :class:`~pollux.ia.CatalogAugmentorIA`), their sum without shape noise,
+            or the observed ellipticities (``e1_obs``, ``e2_obs`` of the
+            :class:`~pollux.catalog.CatalogAugmentorShear`), with shape noise, predicted as the sum of the
+            lensing shear and of the intrinsic alignments they include.
+        shear_cols : tuple of str, optional
+            Columns of the lensing shear.
+
+        Returns
+        -------
+        Shapes
+            Fields summed, catalog columns summed into each component, tracers (sums of tracers
+            for several fields, :class:`~pollux.cosmo.TracerSum`) and shape noise.
+        """
+        if shapes not in cls.TERMS:
+            raise ValueError(f"shapes must be one of {sorted(cls.TERMS)}, got {shapes!r}")
+        if shapes == 'observed':
+            if catalog.shear_augmentor is None or not catalog.shear_augmentor.compute_observed:
+                raise ValueError("shapes='observed' needs a CatalogAugmentorShear with compute_observed=True")
+            terms = ('shear', 'ia') if catalog.shear_augmentor.include_ia and catalog.ia_augmentor is not None else ('shear',)
+            columns = (('e1_obs',), ('e2_obs',))
+        else:
+            terms = cls.TERMS[shapes]
+            if 'ia' in terms and catalog.ia_augmentor is None:
+                raise ValueError(f"shapes={shapes!r} needs an intrinsic-alignment augmentor")
+            # e1_ia_*, e2_ia_* of each IA model (TA, TT)
+            ia_cols = catalog.ia_augmentor.new_columns if 'ia' in terms else []
+            columns = tuple(tuple(([shear_cols[k]] if 'shear' in terms else []) + ia_cols[k::2]) for k in (0, 1))
+
+        # tracers of each bin: that of the field, or the sum of those of the fields
+        tracers = {'shear': catalog.lensing_tracers, 'ia': catalog.ia_tracers if 'ia' in terms else None}
+        if len(terms) == 1:
+            bin_tracers = tracers[terms[0]]
+        else:
+            bin_tracers = [TracerSum(f'{shapes}_{i}', [tracers[term][i] for term in terms]) for i in range(catalog.ncats)]
+        return cls(shapes, terms, columns, bin_tracers, shape_noise=shapes == 'observed')
 
 
 class CatalogStatistics(TwoPointStatistics):
@@ -105,11 +159,25 @@ class CatalogStatistics(TwoPointStatistics):
     }
 
     # shape fields of the shear legs of the predictions: lensing shear (G) and intrinsic alignments (I)
-    _SHAPES = {'shear': ('shear',), 'ia': ('ia',), 'shear_plus_ia': ('shear', 'ia'), 'observed': ('shear', 'ia')}
 
-    def _sacc_tracers(self) -> dict[str, list]:
-        """Return the SACC tracers of the shear and density legs, see :meth:`~pollux.statistics.base.TwoPointStatistics._sacc_tracers`."""
-        return {'shear': self.lensing.tracers_sacc, 'density': [t.sacc() for t in self.density_tracers]}
+    def _path_stat(self, stat: str, shapes: str = 'shear') -> str:
+        """Return the file of the statistics measured with the shapes ``shapes``, ``cat_{stat}[_{shapes}].fits``.
+
+        Parameters
+        ----------
+        stat : {'cls', '2pt'}
+            Statistics.
+        shapes : str, optional
+            Shapes of the shear legs. Default is ``'shear'``.
+
+        Returns
+        -------
+        str
+        """
+        return self.io.path('catalogs', *self.io.catalog_stat_name(stat, shapes))
+
+    # ==================================================================================================================
+    # region Tracers
 
     @property
     def density_tracers(self) -> list[Tracer]:
@@ -142,6 +210,47 @@ class CatalogStatistics(TwoPointStatistics):
             Shear tracers (one per bin) with the n(z) of the catalog's galaxies.
         """
         return self.lensing.tracers
+
+    @property
+    def ia_tracers(self) -> list[Tracer] | None:
+        """Intrinsic-alignment tracers of the catalog, from its :class:`~pollux.ia.CatalogAugmentorIA` augmentor.
+
+        Returns
+        -------
+        list of pollux.cosmo.Tracer or None
+            ``'ia'`` tracers named ``ia_{i}``, with the n(z) of the lensing tracers, the amplitudes
+            of the augmentor (:meth:`~pollux.ia.CatalogAugmentorIA.tracer_amplitudes`, with the bias of
+            each bin) and the smoothing of the tidal field; None without intrinsic alignments.
+        """
+        calculator = self.ia_augmentor
+        if calculator is None:
+            return None
+        # bias placing the galaxies, none for uniform catalogs (as in the augmentor's density weighting)
+        bias = getattr(self, 'bias', np.zeros(self.ncats))
+        # smoothing of the tidal field, one scale per shell
+        scales = self.smoothing['t11']
+        smooth_Mpc = None if scales[0] is None else (tuple(self.lensing.shell_builder.shell_edges_comoving_distance), scales)
+        tracers = []
+        for i, t in enumerate(self.lensing_tracers):
+            amplitudes = calculator.tracer_amplitudes(float(bias[i]))
+            tracers.append(Tracer(f"ia_{i}", 'ia', z=t.z, nz=t.nz, smooth_Mpc=smooth_Mpc, smooth_nside=self.lensing.nside, ia=amplitudes))
+        return tracers
+
+    def _sacc_legs(self, legs: dict[str, tuple[str, str]]) -> dict[str, tuple[list, list]]:
+        """Return the SACC tracers of the legs of each data type, from their roles (for :meth:`_save_sacc`).
+
+        Parameters
+        ----------
+        legs : dict
+            Roles (``'shear'``, ``'density'``) of the two legs of each data type (e.g. ``_SACC_TYPE_LEGS_CLS``).
+
+        Returns
+        -------
+        dict
+            ``{data_type: (tracers_i, tracers_j)}``, lists of SACC tracers by bin.
+        """
+        tracers = {'shear': [t.sacc() for t in self.lensing.tracers], 'density': [t.sacc() for t in self.density_tracers]}
+        return {data_type: (tracers[role_i], tracers[role_j]) for data_type, (role_i, role_j) in legs.items()}
 
     def reference_scales(self, roles: tuple[str, str], shapes: str = 'shear') -> dict:
         """Return the reference scales of a statistic: of the lensing maps, and the smoothing of the fields of its legs.
@@ -176,7 +285,7 @@ class CatalogStatistics(TwoPointStatistics):
         for role in smoothed:
             angles = []
             for t in leg_tracers[role]:
-                chi = pyccl.comoving_radial_distance(self.lensing.cosmo, 1. / (1. + t.mean_z_nz()))
+                chi = pyccl.comoving_radial_distance(self.lensing.cosmo, 1. / (1. + t.mean_redshift_nz()))
                 angles.append(float(Tracer.effective_smooth_Mpc(t.smooth_Mpc, chi, t.smooth_nside)) / chi)
             theta[role] = np.array(angles)
 
@@ -192,30 +301,10 @@ class CatalogStatistics(TwoPointStatistics):
         scales['ell_smooth'] = {ij: np.pi / t for ij, t in theta_pair.items()}
         return scales
 
-    @property
-    def ia_tracers(self) -> list[Tracer] | None:
-        """Intrinsic-alignment tracers of the catalog, from its :class:`~pollux.ia.CatalogAugmentorIA` augmentor.
+    # endregion
 
-        Returns
-        -------
-        list of pollux.cosmo.Tracer or None
-            ``'ia'`` tracers named ``ia_{i}``, with the n(z) of the lensing tracers, the amplitudes
-            of the augmentor (:meth:`~pollux.ia.CatalogAugmentorIA.tracer_amplitudes`, with the bias of
-            each bin) and the smoothing of the tidal field; None without intrinsic alignments.
-        """
-        calculator = self.ia_augmentor
-        if calculator is None:
-            return None
-        # bias placing the galaxies, none for uniform catalogs (as in the augmentor's density weighting)
-        bias = getattr(self, 'bias', np.zeros(self.ncats))
-        # smoothing of the tidal field, one scale per shell
-        scales = self.smoothing['t11']
-        smooth_Mpc = None if scales[0] is None else (tuple(self.lensing.shell_builder.shell_edges_comoving_distance), scales)
-        tracers = []
-        for i, t in enumerate(self.lensing_tracers):
-            amplitudes = calculator.tracer_amplitudes(float(bias[i]))
-            tracers.append(Tracer(f"ia_{i}", 'ia', z=t.z, nz=t.nz, smooth_Mpc=smooth_Mpc, smooth_nside=self.lensing.nside, ia=amplitudes))
-        return tracers
+    # ==================================================================================================================
+    # region Fields
 
     def compute_alms(
             self,
@@ -227,15 +316,16 @@ class CatalogStatistics(TwoPointStatistics):
             subsample: float | None = None,
             remove_mean: bool = True,
             randoms: bool = False,
-            nran_factor: int = 5,
-            shared_randoms: bool = True,
+            randoms_per_galaxy: int = 5,
+            randoms_shared: bool = True,
             seed: int | None = None,
             save: bool = True) -> tuple[dict[int, nmt.NmtFieldCatalogClustering], dict[int, nmt.NmtFieldCatalog]]:
         """Compute the NaMaster catalog fields of tomographic bins, used by :meth:`compute_cls`.
 
         Each field (its a_lm and those of its mask) is the costly part of the catalog Cls: it is
-        computed once per bin and saved as an intermediate file (:meth:`_path_cls_field`), read by
-        later calls instead of loading the catalog again.
+        computed once per bin and saved as an intermediate file, in a folder named by an identifier of what
+        the field depends on (the multipoles of the field and mask, and the options that apply to its kind),
+        read by later calls instead of loading the catalog again.
 
         Parameters
         ----------
@@ -245,7 +335,7 @@ class CatalogStatistics(TwoPointStatistics):
             Statistics to compute (see :meth:`compute_cls`), which set the fields needed: density
             fields for ``'clustering'`` and ``'shear_clustering'``, shear fields for ``'shear'`` and
             ``'shear_clustering'``.
-        shapes, shear_cols, subsample, remove_mean, randoms, nran_factor, shared_randoms, seed : optional
+        shapes, shear_cols, subsample, remove_mean, randoms, randoms_per_galaxy, randoms_shared, seed : optional
             See :meth:`compute_cls`.
         save : bool, optional
             If True (default), read the fields saved, and save those computed. If False, compute
@@ -257,7 +347,7 @@ class CatalogStatistics(TwoPointStatistics):
             Density (``NmtFieldCatalogClustering``) and spin-2 shear
             (``NmtFieldCatalog``) fields keyed by bin, if needed by ``what``.
             Each field has a ``mask_amplitude`` attribute, the ratio of its mask
-            to :attr:`footprint` (its weighted number of galaxies or randoms per
+            to footprint of the maps (:meth:`pollux.footprint.Footprint.mask`) (its weighted number of galaxies or randoms per
             steradian of footprint, or 1 for density fields with the footprint mask).
             Fields read from disk have their a_lm, not their catalog values or mask map.
         """
@@ -269,19 +359,26 @@ class CatalogStatistics(TwoPointStatistics):
         kinds = [kind for kind, stats in (('density', ('clustering', 'shear_clustering')), ('shear', ('shear', 'shear_clustering'))) if set(stats) & set(what)]
         # columns of the shear fields, summed ('+') for shapes of several fields
         if 'shear' in kinds:
-            shear_cols = self._shapes(shapes, shear_cols).column_key
+            shear_cols = Shapes.of(self, shapes, shear_cols).column_key
         options = dict(
             shear_cols=tuple(shear_cols),
             subsample=subsample,
             remove_mean=remove_mean,
             randoms=randoms,
-            nran_factor=nran_factor,
-            shared_randoms=shared_randoms,
+            randoms_per_galaxy=randoms_per_galaxy,
+            randoms_shared=randoms_shared,
             seed=seed)
+
+        # folder of the fields of each kind, named by an identifier of what they depend on
+        folders = {}
+        for kind in kinds:
+            keys = ('subsample', 'seed') + (('randoms', 'randoms_per_galaxy', 'randoms_shared') if kind == 'density' else ('shear_cols', 'remove_mean'))
+            params = dict(lmax=self.b.lmax, lmax_mask=self.lmax_mask, **{k: options[k] for k in keys})
+            folders[kind] = 'cls_fields_' + hashlib.sha1(json.dumps(params, sort_keys=True, default=str).encode()).hexdigest()[:8]
 
         fields = {'density': {}, 'shear': {}}
         for ibin in self.lensing.tqdm(ibins, desc="[compute_alms]"):
-            fnames = {kind: self._path_cls_field(kind, ibin, options) for kind in kinds}
+            fnames = {kind: self.io.path('catalogs', kind, self.io.BIN_INDEX.format(ibin), ext='pkl', intermediate=True, folder=folders[kind]) for kind in kinds}
             missing = [kind for kind in kinds if not (save and os.path.exists(fnames[kind]))]
             if missing:
                 built = self._compute_cls_fields(ibin, missing, **options)
@@ -289,65 +386,110 @@ class CatalogStatistics(TwoPointStatistics):
                 if kind in missing:
                     fields[kind][ibin] = built[kind]
                     if save:
-                        self._save_cls_field(built[kind], fnames[kind])
+                        # without its catalog values and mask map (the largest arrays), which pseudo-Cls and workspaces
+                        # don't use once the a_lm of the field and of its mask are computed
+                        field = built[kind]
+                        if field.alm_mask is None:
+                            field.alm_mask = field.get_mask_alms()  # not kept by "lite" fields
+                        for attr in ('field', 'mask', 'maps'):
+                            if hasattr(field, attr):
+                                setattr(field, attr, None)
+                        self.io.write_pickle(fnames[kind], field)
                 else:
                     fields[kind][ibin] = self.io.read_pickle(fnames[kind])
                     logger.debug("Found and loaded field at %s.", fnames[kind])
         return fields['density'], fields['shear']
 
-    def _shapes(self, shapes: str = 'shear', shear_cols: tuple[str, str] = ('gamma1', 'gamma2')) -> Shapes:
-        """Return what the shapes ``shapes`` of the shear legs measure and predict.
+    def _compute_cls_fields(
+            self, ibin: int, kinds: list[str], shear_cols: tuple[str, str], subsample: float | None, remove_mean: bool, randoms: bool, randoms_per_galaxy: int,
+            randoms_shared: bool, seed: int) -> dict[str, nmt.NmtField]:
+        """Build the catalog fields ``kinds`` of one bin (see :meth:`compute_alms`).
 
         Parameters
         ----------
-        shapes : {'shear', 'ia', 'shear_plus_ia', 'observed'}, optional
-            Shapes: the lensing shear (``shear_cols``), the intrinsic alignments (``e1_ia_*``,
-            ``e2_ia_*`` of the :class:`~pollux.ia.CatalogAugmentorIA`), their sum without shape noise,
-            or the observed ellipticities (``e1_obs``, ``e2_obs`` of the
-            :class:`~pollux.catalog.CatalogAugmentorShear`), with shape noise, predicted as the sum of the
-            lensing shear and of the intrinsic alignments they include.
-        shear_cols : tuple of str, optional
-            Columns of the lensing shear.
+        ibin : int
+            Tomographic bin.
+        kinds : list of str
+            ``'density'`` and/or ``'shear'``.
+        shear_cols, subsample, remove_mean, randoms, randoms_per_galaxy, randoms_shared, seed
+            See :meth:`compute_cls`.
 
         Returns
         -------
-        Shapes
-            Fields summed, catalog columns summed into each component, tracers (sums of tracers
-            for several fields, :class:`~pollux.cosmo.TracerSum`) and shape noise.
+        dict
+            ``{kind: field}``, each field with its ``mask_amplitude``.
         """
-        if shapes not in self._SHAPES:
-            raise ValueError(f"shapes must be one of {sorted(self._SHAPES)}, got {shapes!r}")
-        if shapes == 'observed':
-            if self.shear_augmentor is None or not self.shear_augmentor.compute_observed:
-                raise ValueError("shapes='observed' needs a CatalogAugmentorShear with compute_observed=True")
-            terms = ('shear', 'ia') if self.shear_augmentor.include_ia and self.ia_augmentor is not None else ('shear',)
-            columns = (('e1_obs',), ('e2_obs',))
-        else:
-            terms = self._SHAPES[shapes]
-            if 'ia' in terms and self.ia_augmentor is None:
-                raise ValueError(f"shapes={shapes!r} needs an intrinsic-alignment augmentor")
-            # e1_ia_*, e2_ia_* of each IA model (TA, TT)
-            ia_cols = self.ia_augmentor.new_columns if 'ia' in terms else []
-            columns = tuple(tuple(([shear_cols[k]] if 'shear' in terms else []) + ia_cols[k::2]) for k in (0, 1))
+        builder = self.lensing.shell_builder
+        lmax, lmax_mask = self.b.lmax, self.lmax_mask
+        # footprint pixels (to draw randoms) and area (to normalize the mask amplitudes)
+        ipix_mask = builder.footprint.ipix(nest=True)
+        area = ipix_mask.size * hp.nside2pixarea(builder.nside)
+        # columns of the two shear components, each a sum of columns ('+', see compute_alms)
+        cols1, cols2 = (c.split('+') for c in shear_cols)
+        cat = self.load_catalogs(
+            ibin, subsample=subsample, seed=seed, columns=['ra', 'dec', *cols1, *cols2], remove_mean=cols1 + cols2 if remove_mean else None)
+        positions = [cat['ra'], cat['dec']]
+        weights_gal = np.ones(cat['ra'].size)
+        fields = {}
 
-        # tracers of each bin: that of the field, or the sum of those of the fields
-        tracers = {'shear': self.lensing_tracers, 'ia': self.ia_tracers if 'ia' in terms else None}
-        if len(terms) == 1:
-            bin_tracers = tracers[terms[0]]
-        else:
-            bin_tracers = [TracerSum(f'{shapes}_{i}', [tracers[term][i] for term in terms]) for i in range(self.ncats)]
-        return Shapes(shapes, terms, columns, bin_tracers, shape_noise=shapes == 'observed')
+        if 'density' in kinds:
+            # density: footprint mask, or randoms drawn over the footprint
+            if not randoms:
+                f = nmt.NmtFieldCatalogClustering(
+                    positions,
+                    weights_gal,
+                    None,
+                    None,
+                    lmax=lmax,
+                    lmax_mask=lmax_mask,
+                    lonlat=True,
+                    mask=self.lensing.footprint.mask(nest=False, dtype=np.float64))
+                f.mask_amplitude = 1.
+            else:
+                # one set of randoms for all bins (sized from the first bin, the same whatever the bins computed),
+                # or one per bin
+                if randoms_shared:
+                    rng = np.random.default_rng(seed)
+                    nran = int(randoms_per_galaxy * self._ngal_used(0, subsample))
+                else:
+                    rng = np.random.default_rng(seed + ibin)
+                    nran = int(randoms_per_galaxy * cat['ra'].size)
+                ra_rand, dec_rand = generate_radec_in_pix(self.nside, rng.choice(ipix_mask, size=nran), rng)
+                f = nmt.NmtFieldCatalogClustering(
+                    positions, weights_gal, [ra_rand, dec_rand], np.ones(len(ra_rand)), lmax=lmax, lmax_mask=lmax_mask, lonlat=True)
+                # randoms per steradian of footprint
+                f.mask_amplitude = len(ra_rand) / area
+            fields['density'] = f
 
-    def _path_cls_field(self, kind: str, ibin: int, options: dict) -> str:
-        """Return the intermediate file of the catalog field ``kind`` (density or shear) of a bin.
+        if 'shear' in kinds:
+            # shear: spin-2 field of the galaxies, whose mask amplitude is their number per steradian
+            shear = [sum(cat[col] for col in cols) for cols in (cols1, cols2)]
+            f = nmt.NmtFieldCatalog(positions, weights_gal, shear, spin=2, lmax=lmax, lmax_mask=lmax_mask, lonlat=True)
+            f.mask_amplitude = weights_gal.sum() / area
+            fields['shear'] = f
+        return fields
 
-        The folder is named by an identifier of what the field depends on: the multipoles of the
-        field and mask, and the options of :meth:`compute_alms` that apply to this kind of field.
+    def _ngal_used(self, ibin: int, subsample: float | None) -> int:
+        """Return the number of galaxies of a bin used by the statistics (all, or the subsample read by :meth:`load_catalogs`).
+
+        Parameters
+        ----------
+        ibin : int
+            Tomographic bin.
+        subsample : float or None
+            Fraction of the galaxies read.
+
+        Returns
+        -------
+        int
         """
-        keys = ('subsample', 'seed') + (('randoms', 'nran_factor', 'shared_randoms') if kind == 'density' else ('shear_cols', 'remove_mean'))
-        params = dict(lmax=self.b.lmax, lmax_mask=self.lmax_mask, **{k: options[k] for k in keys})
-        params_id = hashlib.sha1(json.dumps(params, sort_keys=True, default=str).encode()).hexdigest()[:8]
-        return self.io.path('catalogs', kind, f'bin{ibin}', ext='pkl', intermediate=True, folder=f'cls_fields_{params_id}')
+        nrows = fits.getheader(self.path(ibin, ext='fits'), ext=1)['NAXIS2']
+        return nrows if subsample is None else int(subsample * nrows)
+
+    # endregion
+
+    # ==================================================================================================================
+    # region Workspaces
 
     @cached_property
     def b(self) -> nmt.NmtBin:
@@ -371,78 +513,16 @@ class CatalogStatistics(TwoPointStatistics):
 
     @property
     def lmax_mask(self) -> int:
-        """Maximum multipole of the masks of the catalog fields and of the footprint (``cls_lmax_mask``)."""
+        """Maximum multipole of the masks of the catalog fields and of the footprint (``cls_lmax_mask``, at least that of the binning).
+
+        Returns
+        -------
+        int
+        """
         lmax_mask = self.cls_lmax_mask if self.cls_lmax_mask is not None else self.b.lmax
         if lmax_mask < self.b.lmax:
             raise ValueError(f"cls_lmax_mask={lmax_mask} is below the fields' lmax={self.b.lmax}")
         return lmax_mask
-
-    def _compute_cls_fields(
-            self, ibin: int, kinds: list[str], shear_cols: tuple[str, str], subsample: float | None, remove_mean: bool, randoms: bool, nran_factor: int,
-            shared_randoms: bool, seed: int) -> dict[str, nmt.NmtField]:
-        """Build the catalog fields ``kinds`` (``'density'``, ``'shear'``) of one bin (see :meth:`compute_alms`)."""
-        builder = self.lensing.shell_builder
-        lmax, lmax_mask = self.b.lmax, self.lmax_mask
-        # footprint pixels (to draw randoms) and area (to normalize the mask amplitudes)
-        _, ipix_mask = builder.get_mask(nest=True, return_ipix=True)
-        area = ipix_mask.size * hp.nside2pixarea(builder.nside)
-        # columns of the two shear components, each a sum of columns ('+', see compute_alms)
-        cols1, cols2 = (c.split('+') for c in shear_cols)
-        cat = self.load_catalogs(
-            ibin, subsample=subsample, seed=seed, columns=['ra', 'dec', *cols1, *cols2], remove_mean=cols1 + cols2 if remove_mean else None)
-        positions = [cat['ra'], cat['dec']]
-        weights_gal = np.ones(cat['ra'].size)
-        fields = {}
-
-        if 'density' in kinds:
-            # density: footprint mask, or randoms drawn over the footprint
-            if not randoms:
-                f = nmt.NmtFieldCatalogClustering(positions, weights_gal, None, None, lmax=lmax, lmax_mask=lmax_mask, lonlat=True, mask=self.footprint)
-                f.mask_amplitude = 1.
-            else:
-                # one set of randoms for all bins (sized from the first bin, the same whatever the bins computed),
-                # or one per bin
-                if shared_randoms:
-                    rng = np.random.default_rng(seed)
-                    nran = int(nran_factor * self._ngal_used(0, subsample))
-                else:
-                    rng = np.random.default_rng(seed + ibin)
-                    nran = int(nran_factor * cat['ra'].size)
-                ra_rand, dec_rand = generate_radec_in_pix(self.nside, rng.choice(ipix_mask, size=nran), rng)
-                f = nmt.NmtFieldCatalogClustering(
-                    positions, weights_gal, [ra_rand, dec_rand], np.ones(len(ra_rand)), lmax=lmax, lmax_mask=lmax_mask, lonlat=True)
-                # randoms per steradian of footprint
-                f.mask_amplitude = len(ra_rand) / area
-            fields['density'] = f
-
-        if 'shear' in kinds:
-            # shear: spin-2 field of the galaxies, whose mask amplitude is their number per steradian
-            shear = [sum(cat[col] for col in cols) for cols in (cols1, cols2)]
-            f = nmt.NmtFieldCatalog(positions, weights_gal, shear, spin=2, lmax=lmax, lmax_mask=lmax_mask, lonlat=True)
-            f.mask_amplitude = weights_gal.sum() / area
-            fields['shear'] = f
-        return fields
-
-    @cached_property
-    def footprint(self) -> np.ndarray:
-        """Footprint mask (RING, float, at the shell builder's ``nside``), the mask of map-based fields."""
-        return self.lensing.shell_builder.get_mask(nest=False).astype(np.float64)
-
-    def _ngal_used(self, ibin: int, subsample: float | None) -> int:
-        """Number of galaxies of a bin used by the statistics (all, or the subsample read by :meth:`load_catalogs`)."""
-        nrows = fits.getheader(self.path(ibin, ext='fits'), ext=1)['NAXIS2']
-        return nrows if subsample is None else int(subsample * nrows)
-
-    @staticmethod
-    def _save_cls_field(field: nmt.NmtField, fname: str) -> None:
-        # a field without its catalog values and mask map (the largest arrays), which pseudo-Cls and workspaces
-        # don't use once the a_lm of the field and of its mask are computed
-        if field.alm_mask is None:
-            field.alm_mask = field.get_mask_alms()  # not kept by "lite" fields
-        for attr in ('field', 'mask', 'maps'):
-            if hasattr(field, attr):
-                setattr(field, attr, None)
-        PolluxIO.write_pickle(fname, field)
 
     def wsp(
             self,
@@ -457,7 +537,7 @@ class CatalogStatistics(TwoPointStatistics):
         either specific to a bin pair, computed from the masks of the pair's catalog
         fields (the weighted galaxy positions, and the footprint or randoms for
         density), or shared by all bin pairs (``pair=None``), computed from
-        :attr:`footprint`. The shared workspace is exact in expectation for galaxies
+        footprint of the maps (:meth:`pollux.footprint.Footprint.mask`). The shared workspace is exact in expectation for galaxies
         uniformly distributed over the footprint once pseudo-spectra are divided by
         the fields' ``mask_amplitude`` (see :meth:`compute_cls`); with clustered
         sources, it misses the coupling from the clustering of galaxy positions.
@@ -479,8 +559,8 @@ class CatalogStatistics(TwoPointStatistics):
             needed for bandpower windows but not to decouple spectra, and large
             (~77 GB for spin-2 fields at lmax 24575). Default is True.
         **field_kwargs
-            Field options for a bin pair (``shapes``, ``shear_cols``, ``randoms``, ``nran_factor``,
-            ``seed``, ``subsample``, ``shared_randoms``, ``remove_mean``), see :meth:`compute_cls`.
+            Field options for a bin pair (``shapes``, ``shear_cols``, ``randoms``, ``randoms_per_galaxy``,
+            ``seed``, ``subsample``, ``randoms_shared``, ``remove_mean``), see :meth:`compute_cls`.
 
         Returns
         -------
@@ -498,23 +578,6 @@ class CatalogStatistics(TwoPointStatistics):
         # keep the shared workspace in memory
         if pair is None:
             self._wsp[stat] = (wsp, read_unbinned_MCM)
-        return wsp
-
-    def _compute_wsp(self, stat: str, pair: tuple[int, int] | None, fields: tuple | None, **field_kwargs: Any) -> nmt.NmtWorkspace:
-        # workspace of one statistic: shared (pair None), from the footprint, or of a bin pair, from its fields (see wsp)
-        if pair is None:
-            # shared: fields of the footprint mask, with the spins of the statistic
-            spins = {'clustering': (0, 0), 'shear': (2, 2), 'shear_clustering': (0, 2)}[stat]
-            f_spin = {spin: nmt.NmtField(self.footprint, None, spin=spin, lmax=self.b.lmax, lmax_mask=self.lmax_mask) for spin in set(spins)}
-            fields = (f_spin[spins[0]], f_spin[spins[1]])
-        elif fields is None:
-            # per pair: the catalog fields of the two bins
-            i, j = pair
-            f_dens, f_shear = self.compute_alms(sorted({i, j}), [stat], **field_kwargs)
-            f1, f2 = {'clustering': (f_dens, f_dens), 'shear': (f_shear, f_shear), 'shear_clustering': (f_dens, f_shear)}[stat]
-            fields = (f1[i], f2[j])
-        wsp = nmt.NmtWorkspace()
-        wsp.compute_coupling_matrix(*fields, self.b)
         return wsp
 
     def _path_wsp(self, stat: str, pair: tuple[int, int] | None = None, randoms: bool = False) -> str:
@@ -548,6 +611,42 @@ class CatalogStatistics(TwoPointStatistics):
         # binning of the bandpowers and of the masks
         return self.io.path('catalogs', f'wsp_{name}_lmax{self.b.lmax}_b{binning_id(self.b, extra=(self.lmax_mask,))}', ext='wsp', intermediate=True)
 
+    def _compute_wsp(self, stat: str, pair: tuple[int, int] | None, fields: tuple | None, **field_kwargs: Any) -> nmt.NmtWorkspace:
+        """Compute the workspace of one statistic: shared (``pair`` None), from the footprint, or of a bin pair, from its fields (see :meth:`wsp`).
+
+        Parameters
+        ----------
+        stat : str
+            Statistics of the catalog (e.g. ``'shear'``).
+        pair : tuple of int or None
+            Bin pair.
+        fields : tuple or None
+            The two fields of the pair (default: computed).
+        **field_kwargs
+            Options of the fields of the pair (see :meth:`compute_cls`).
+
+        Returns
+        -------
+        pymaster.NmtWorkspace
+        """
+        if pair is None:
+            # shared: fields of the footprint mask, with the spins of the statistic
+            spins = {'clustering': (0, 0), 'shear': (2, 2), 'shear_clustering': (0, 2)}[stat]
+            f_spin = {
+                spin: nmt.NmtField(self.lensing.footprint.mask(nest=False, dtype=np.float64), None, spin=spin, lmax=self.b.lmax, lmax_mask=self.lmax_mask)
+                for spin in set(spins)
+            }
+            fields = (f_spin[spins[0]], f_spin[spins[1]])
+        elif fields is None:
+            # per pair: the catalog fields of the two bins
+            i, j = pair
+            f_dens, f_shear = self.compute_alms(sorted({i, j}), [stat], **field_kwargs)
+            f1, f2 = {'clustering': (f_dens, f_dens), 'shear': (f_shear, f_shear), 'shear_clustering': (f_dens, f_shear)}[stat]
+            fields = (f1[i], f2[j])
+        wsp = nmt.NmtWorkspace()
+        wsp.compute_coupling_matrix(*fields, self.b)
+        return wsp
+
     def bpws(self, stat: str, pair: tuple[int, int] | None = None, randoms: bool = False) -> np.ndarray:
         """Return the bandpower windows of a workspace (see :meth:`wsp`).
 
@@ -578,6 +677,11 @@ class CatalogStatistics(TwoPointStatistics):
             raise FileNotFoundError(f"No workspace at {fname}, compute it with compute_cls or wsp.")
         return self._saved_bpws(fname, lambda: self.wsp(stat, pair, randoms=randoms))
 
+    # endregion
+
+    # ==================================================================================================================
+    # region Power spectra
+
     def compute_cls(
             self,
             ibins: int | Iterable[int] | None = None,
@@ -591,8 +695,8 @@ class CatalogStatistics(TwoPointStatistics):
             shear_cols: tuple[str, str] = ('gamma1', 'gamma2'),
             subsample: float | None = None,
             remove_mean: bool = True,
-            nran_factor: int = 5,
-            shared_randoms: bool = True,
+            randoms_per_galaxy: int = 5,
+            randoms_shared: bool = True,
             seed: int | None = None,
             save: bool = True,
             use_precomputed_alms: bool = True) -> tuple[np.ndarray, dict]:
@@ -638,13 +742,13 @@ class CatalogStatistics(TwoPointStatistics):
             and reused by later calls and by :meth:`predict_cls`; delete them if the
             catalogs or settings change.
         randoms : bool, optional
-            If False (default), the mask of density fields is the :attr:`footprint`.
-            If True, it is a random catalog (see ``nran_factor`` and ``shared_randoms``).
+            If False (default), the mask of density fields is the footprint of the maps (:meth:`pollux.footprint.Footprint.mask`).
+            If True, it is a random catalog (see ``randoms_per_galaxy`` and ``randoms_shared``).
         shapes : {'shear', 'ia', 'shear_plus_ia', 'observed'}, optional
             Shapes of the shear legs, as in :meth:`compute_2pt`: the lensing shear (``shear_cols``,
             default), the intrinsic alignments, their sum without shape noise, or the observed
             ellipticities, with shape noise. The fields sum the columns of the shapes
-            (:meth:`_shapes`).
+            (:meth:`Shapes.of`).
         shear_cols : tuple of str, optional
             Names of the two catalog columns of the lensing shear in the shapes,
             e.g. ``('gamma1', 'gamma2')`` (default) or ``('g1', 'g2')`` (reduced shear).
@@ -661,10 +765,10 @@ class CatalogStatistics(TwoPointStatistics):
         remove_mean : bool, optional
             If True (default), subtract the mean of the shear columns over each bin
             before the measurement.
-        nran_factor : int, optional
+        randoms_per_galaxy : int, optional
             With ``randoms``, ratio of random points to galaxies for each bin's
             clustering random catalog. Default is 5.
-        shared_randoms : bool, optional
+        randoms_shared : bool, optional
             With ``randoms``, if True (default), draw a single random-point realization (sized
             from the galaxies of the first bin, whatever the bins computed) and reuse it for every bin's
             density field, rather than drawing independent randoms per bin.
@@ -708,8 +812,8 @@ class CatalogStatistics(TwoPointStatistics):
             subsample=subsample,
             remove_mean=remove_mean,
             randoms=randoms,
-            nran_factor=nran_factor,
-            shared_randoms=shared_randoms,
+            randoms_per_galaxy=randoms_per_galaxy,
+            randoms_shared=randoms_shared,
             seed=seed,
             save=use_precomputed_alms)
 
@@ -775,7 +879,7 @@ class CatalogStatistics(TwoPointStatistics):
         str
             Path to the saved SACC FITS file.
         """
-        return self._save_sacc(self._path_stat('cls', shapes), cl, ell, self._SACC_TYPE_LEGS_CLS, metadata=metadata)
+        return self._save_sacc(self._path_stat('cls', shapes), cl, ell, self._sacc_legs(self._SACC_TYPE_LEGS_CLS), metadata=metadata)
 
     def load_cls(self, return_dict: bool = False, return_errors: bool = False, shapes: str = 'shear') -> sacc.Sacc | tuple:
         """Load catalog-based angular power spectra previously saved by :meth:`_save_cls`.
@@ -855,7 +959,7 @@ class CatalogStatistics(TwoPointStatistics):
             With per-pair workspaces, as in :meth:`compute_cls`.
         shapes : {'shear', 'ia', 'shear_plus_ia', 'observed'}, optional
             Shapes of the shear legs (see :meth:`compute_cls`): their tracers are sums of those of
-            their terms (:meth:`_shapes`), e.g. GG + GI + IG + II for ``'shear_plus_ia'``, so
+            their terms (:meth:`Shapes.of`), e.g. GG + GI + IG + II for ``'shear_plus_ia'``, so
             that the error bars are those of the summed field.
         shear_cols, subsample : optional
             As in :meth:`compute_cls`, setting the noise (see :meth:`_noise_cls`).
@@ -893,7 +997,7 @@ class CatalogStatistics(TwoPointStatistics):
         if isinstance(what, str):
             what = list(self._STAT_TYPES_CLS) if what == 'all' else [what]
         # tracers of the legs of each statistic
-        shape = self._shapes(shapes, shear_cols)
+        shape = Shapes.of(self, shapes, shear_cols)
         tracers = {'density': self.density_tracers, 'shear': shape.tracers}
         # bins, and symmetric pairs (i >= j) for same-type correlations
         ibins, sym_pairs = self.lensing._pairs(ibins, auto_only, pairs)
@@ -931,7 +1035,7 @@ class CatalogStatistics(TwoPointStatistics):
             noise=noise,
             error_bars=error_bars,
             stacked=stacked,
-            fsky=self.lensing.fsky,
+            fsky=self.lensing.footprint.fsky,
             all_components=True)
 
         # split the coupled components into SACC data types, as in compute_cls
@@ -958,9 +1062,9 @@ class CatalogStatistics(TwoPointStatistics):
         Parameters
         ----------
         tracer : pollux.cosmo.Tracer or pollux.cosmo.TracerSum
-            Density (``density_{i}``) or shape tracer of bin ``i`` (see :meth:`_shapes`).
+            Density (``density_{i}``) or shape tracer of bin ``i`` (see :meth:`Shapes.of`).
         shape_noise : bool, optional
-            Whether the shapes have shape noise (``shape_noise`` of :meth:`_shapes`): only the observed
+            Whether the shapes have shape noise (``shape_noise`` of :meth:`Shapes.of`): only the observed
             ellipticities, not the lensing shear or the intrinsic alignments.
         subsample : float or None, optional
             Fraction of galaxies used for the measurement.
@@ -1050,6 +1154,11 @@ class CatalogStatistics(TwoPointStatistics):
                     sharey=False,
                     fname=os.path.join(plot_dir, name + ('' if mode == 'values' else f'_{mode}') + '.png'))
 
+    # endregion
+
+    # ==================================================================================================================
+    # region Correlations
+
     def compute_2pt(
             self,
             ibins: int | Iterable[int] | None = None,
@@ -1066,8 +1175,8 @@ class CatalogStatistics(TwoPointStatistics):
             shapes: str = 'shear',
             subsample: float | None = None,
             remove_mean: bool = True,
-            nran_factor: int = 5,
-            shared_randoms: bool = True,
+            randoms_per_galaxy: int = 5,
+            randoms_shared: bool = True,
             seed: int | None = None,
             error_bars: bool = False,
             theta_per_pair: bool = False,
@@ -1080,7 +1189,7 @@ class CatalogStatistics(TwoPointStatistics):
         shear-density cross-correlation), binned in angular separation between
         ``theta_min`` and ``theta_max``. This is the real-space analog of
         :meth:`compute_cls`; ``ibins``, ``what``, ``auto_only``,
-        ``shear_cols``, ``nran_factor``, ``seed`` and ``subsample`` have the
+        ``shear_cols``, ``randoms_per_galaxy``, ``seed`` and ``subsample`` have the
         same meaning there.
 
         Parameters
@@ -1133,11 +1242,11 @@ class CatalogStatistics(TwoPointStatistics):
         remove_mean : bool, optional
             If True (default), subtract the mean of the shear columns over each bin
             before the measurement.
-        nran_factor : int, optional
+        randoms_per_galaxy : int, optional
             Ratio of random points to galaxies for each bin's random catalog,
             used for the Landy-Szalay ``w(theta)`` estimator and for
             subtracting additive bias in ``gamma_t/x(theta)``. Default is 5.
-        shared_randoms : bool, optional
+        randoms_shared : bool, optional
             If True (default), draw a single random-point realization (sized
             from the galaxies of the first bin, whatever the bins computed) and reuse it for every bin's
             random catalog (used both for the ``w(theta)`` estimator and for
@@ -1185,7 +1294,7 @@ class CatalogStatistics(TwoPointStatistics):
         seed = builder.seed if seed is None else seed
 
         # footprint pixels, to draw randoms
-        _, ipix_mask = builder.get_mask(nest=True, return_ipix=True)
+        ipix_mask = builder.footprint.ipix(nest=True)
 
         # bins, and symmetric pairs (i >= j) for same-type correlations
         ibins, sym_pairs = self.lensing._pairs(ibins, auto_only, pairs)
@@ -1193,7 +1302,7 @@ class CatalogStatistics(TwoPointStatistics):
         # catalogs needed by the statistics, and the angular binning
         need_density = 'clustering' in what or 'shear_clustering' in what
         need_shear = 'shear' in what or 'shear_clustering' in what
-        cols1, cols2 = (list(cols) for cols in self._shapes(shapes, shear_cols).columns)
+        cols1, cols2 = (list(cols) for cols in Shapes.of(self, shapes, shear_cols).columns)
 
         corr_kwargs = dict(min_sep=theta_min, max_sep=theta_max, nbins=ntheta, sep_units=sep_units, bin_slop=bin_slop)
 
@@ -1215,17 +1324,17 @@ class CatalogStatistics(TwoPointStatistics):
 
             if need_density:
                 # randoms over the footprint (for w(theta) and the random-lens subtraction of gamma_t): one set for all bins, or one per bin
-                if shared_randoms:
+                if randoms_shared:
                     if shared_cat_rand is None:
                         # sized from the galaxies of the first bin, the same whatever the bins of the call
                         rng = np.random.default_rng(seed)
-                        nran = int(nran_factor * self._ngal_used(0, subsample))
+                        nran = int(randoms_per_galaxy * self._ngal_used(0, subsample))
                         ra_rand, dec_rand = generate_radec_in_pix(self.nside, rng.choice(ipix_mask, size=nran), rng)
                         shared_cat_rand = treecorr.Catalog(ra=ra_rand, dec=dec_rand, ra_units='deg', dec_units='deg')
                     cat_rand[ibin] = shared_cat_rand
                 else:
                     rng = np.random.default_rng(seed + ibin)
-                    nran = int(nran_factor * cat['ra'].size)
+                    nran = int(randoms_per_galaxy * cat['ra'].size)
                     ra_rand, dec_rand = generate_radec_in_pix(self.nside, rng.choice(ipix_mask, size=nran), rng)
                     cat_rand[ibin] = treecorr.Catalog(ra=ra_rand, dec=dec_rand, ra_units='deg', dec_units='deg')
 
@@ -1334,11 +1443,8 @@ class CatalogStatistics(TwoPointStatistics):
         str
             Path to the saved SACC FITS file.
         """
-        return self._save_sacc(self._path_stat('2pt', shapes), xi, theta, self._SACC_TYPE_LEGS_2PT, coord='theta', errors=dxi, metadata=metadata)
-
-    def _path_stat(self, stat: str, shapes: str = 'shear') -> str:
-        """Return the file of the statistics ``stat`` (``'cls'`` or ``'2pt'``) measured with the shapes ``shapes``, ``cat_{stat}[_{shapes}].fits``."""
-        return self.io.path('catalogs', f'cat_{stat}', None if shapes == 'shear' else shapes)
+        return self._save_sacc(
+            self._path_stat('2pt', shapes), xi, theta, self._sacc_legs(self._SACC_TYPE_LEGS_2PT), coord='theta', errors=dxi, metadata=metadata)
 
     def load_2pt(self, return_dict: bool = False, return_errors: bool = False, shapes: str = 'shear') -> sacc.Sacc | tuple:
         """Load catalog-based two-point functions previously saved by :meth:`_save_2pt`.
@@ -1398,7 +1504,7 @@ class CatalogStatistics(TwoPointStatistics):
             Same structure as ``theta``; ``galaxy_shearDensity_xi_x`` is zero.
         """
         # shear legs of the shapes (sums of tracers, e.g. GG + GI + IG + II for shear_plus_ia)
-        tracers = {'density': self.density_tracers, 'shear': self._shapes(shapes).tracers}
+        tracers = {'density': self.density_tracers, 'shear': Shapes.of(self, shapes).tracers}
         f_ell = hp.pixwin(self.lensing.nside, lmax=self.b.lmax) if pixel_window else None
         xi = {}
         for data_type, type_pairs in theta.items():
@@ -1526,3 +1632,5 @@ class CatalogStatistics(TwoPointStatistics):
                         sharey=False,
                         figaxes=figaxes,
                         fname=os.path.join(plot_dir, fig_name + ('' if mode == 'values' else f'_{mode}') + '.png') if last else None)
+
+    # endregion

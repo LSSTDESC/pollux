@@ -33,5 +33,9 @@ Planned technical developments of pollux, with their GitHub issue when there is 
 - Tests
   - Unit tests (pytest) on small synthetic inputs (`DummyReader`, low nside), and tests on the simulations run at NERSC only.
   - Continuous integration with GitHub Actions: unit tests and a strict build of the documentation on each pull request.
+- Documentation
+  - Resolve all cross-references (a build with `sphinx -n` lists those that are not links): intersphinx for healpy,
+    NaMaster, NumPy, matplotlib and CCL; full paths for inherited methods; private helpers written as code
+    (``` ``_noise_cls`` ```) rather than links, as they are not in the API pages.
 - Data products
   - Register the products in the [DESC data registry](https://github.com/LSSTDESC/dataregistry): a script registering each product directory, with its `config.yaml` (parameters and inputs) and the code version of its run. The products are made in scratch and copied to the registry once validated ([#12](https://github.com/LSSTDESC/pollux/issues/12)).

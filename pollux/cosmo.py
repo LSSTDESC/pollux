@@ -24,6 +24,9 @@ import warnings
 if TYPE_CHECKING:
     import pymaster
 
+# ======================================================================================================================
+# region Cosmologies
+
 cosmo_slics = pyccl.Cosmology(
     Omega_c=0.2905 - 0.0447,
     Omega_b=0.0447,
@@ -50,6 +53,10 @@ cosmo_hacc = pyccl.Cosmology(
     sigma8=0.8,
     Omega_k=0.,
 )
+# endregion
+
+# ======================================================================================================================
+# region Tracers
 
 
 class Tracer:
@@ -135,7 +142,12 @@ class Tracer:
         self._ccl = None
 
     def __getstate__(self) -> dict:
-        """Return the state for pickling, without the cached CCL tracer (rebuilt on demand)."""
+        """Return the state for pickling, without the cached CCL tracer (rebuilt on demand).
+
+        Returns
+        -------
+        dict
+        """
         state = self.__dict__.copy()
         state['_ccl'] = None
         return state
@@ -149,6 +161,9 @@ class Tracer:
     def _needs_pt(self) -> bool:
         """Whether the predictions of the intrinsic alignments need perturbation theory: terms beyond NLA (``a2`` or ``a1delta``)."""
         return self.kind == 'ia' and any(self.ia.get(k) for k in ('a2', 'a1delta'))
+
+    # ==================================================================================================================
+    # region CCL tracers
 
     def ccl(self, cosmo: pyccl.Cosmology) -> pyccl.Tracer:
         """Return the CCL tracer for this field (cached for a given cosmology).
@@ -214,6 +229,11 @@ class Tracer:
         coeffs = {name: (z, c * np.ones_like(z)) for name, c in (('c1', c1), ('c2', c2), ('cdelta', c1delta)) if c is not None}
         return pyccl.nl_pt.PTIntrinsicAlignmentTracer(**coeffs)
 
+    # endregion
+
+    # ==================================================================================================================
+    # region SACC
+
     def sacc(self) -> sacc.tracers.BaseTracer:
         """Return the SACC tracer for this field.
 
@@ -226,20 +246,29 @@ class Tracer:
             return sacc.tracers.MiscTracer(self.name)
         return sacc.tracers.NZTracer(self.name, self.z, self.nz)
 
-    def mean_z_nz(self) -> float:
+    # endregion
+
+    # ==================================================================================================================
+    # region Redshifts
+
+    def mean_redshift_nz(self) -> float:
         """Mean redshift of the n(z) of the field (the source redshift for ``'convergence'``).
 
         For lensing fields this is the redshift of the sources, not of the structures
-        they probe: see :meth:`mean_z_kernel`.
+        they probe: see :meth:`mean_redshift_kernel`.
+
+        Returns
+        -------
+        float
         """
         if self.kind == 'convergence':
             return self.z_source
         return np.trapz(self.nz * self.z, self.z) / np.trapz(self.nz, self.z)
 
-    def mean_z_kernel(self, cosmo: pyccl.Cosmology, nchi: int = 1000) -> float:
+    def mean_redshift_kernel(self, cosmo: pyccl.Cosmology, nchi: int = 1000) -> float:
         """Mean redshift weighted by the radial kernel of the field, i.e. where its signal comes from.
 
-        Equal to :meth:`mean_z_nz` for density fields (whose kernel is their n(z)); for
+        Equal to :meth:`mean_redshift_nz` for density fields (whose kernel is their n(z)); for
         lensing fields, the mean redshift of the lensing efficiency, between the
         observer and the sources.
 
@@ -259,6 +288,11 @@ class Tracer:
         kernel = np.sum(self.ccl(cosmo).get_kernel(chi), axis=0)
         z = 1. / pyccl.scale_factor_of_chi(cosmo, chi) - 1.
         return np.trapz(z * kernel, chi) / np.trapz(kernel, chi)
+
+    # endregion
+
+    # ==================================================================================================================
+    # region Smoothing
 
     @staticmethod
     def effective_smooth_Mpc(smooth_Mpc: float | tuple, chi: float | np.ndarray, nside: int | None) -> float | np.ndarray:
@@ -306,6 +340,8 @@ class Tracer:
             return smooth_Mpc + 0. * chi
         return np.maximum(smooth_Mpc, hp.nside2resol(nside) * chi)
 
+    # endregion
+
 
 class TracerSum:
     """Sum of tracers of one field, e.g. the lensing shear and intrinsic alignments of a bin (G + I).
@@ -334,6 +370,12 @@ class TracerSum:
     def spin(self) -> int:
         """Spin of the terms."""
         return self.tracers[0].spin
+
+
+# endregion
+
+# ======================================================================================================================
+# region Theory
 
 
 class Theory:
@@ -369,6 +411,9 @@ class Theory:
         self._smoothed_pk = {}  # power spectra with a Gaussian smoothing, keyed by the spectrum and the tracers' smoothing
         self._pt_calculator = None
         self._pt_correction_pk = {}  # corrections of perturbation theory to NLA, keyed by the tracers' amplitudes
+
+    # ==================================================================================================================
+    # region Power spectra
 
     def angular_cl(self, t1: Tracer | TracerSum, t2: Tracer | TracerSum, ell: np.ndarray, *, bb: bool = False) -> np.ndarray:
         """Return the angular power spectrum of two tracers.
@@ -545,6 +590,11 @@ class Theory:
         except pyccl.CCLError:
             # e.g. kernels or spectra too sharp for the default (QAG) integration
             return pyccl.angular_cl(self.cosmo, kernel1, kernel2, ell, p_of_k_a=pk, limber_integration_method='spline')
+
+    # endregion
+
+    # ==================================================================================================================
+    # region Bandpowers
 
     def binned_cl(self, t1: Tracer, t2: Tracer, b: pymaster.NmtBin, bpws: np.ndarray | None = None, f_ell: np.ndarray | None = None) -> np.ndarray:
         """Return the angular power spectrum of two tracers, binned into bandpowers.
@@ -733,6 +783,11 @@ class Theory:
                     outputs.append(cov)
         return tuple(outputs)
 
+    # endregion
+
+    # ==================================================================================================================
+    # region Correlations
+
     def predict_2pt(self, pairs: dict, theta: np.ndarray | dict, lmax: int, nell: int = 500, f_ell: np.ndarray | None = None) -> dict:
         """Predict real-space correlation functions of tracer pairs.
 
@@ -805,6 +860,11 @@ class Theory:
         negligible = np.flatnonzero(abs_cl[peak:] < 1e-10 * abs_cl[peak])
         last = peak + negligible[0] if len(negligible) else len(cl)
         return pyccl.correlation(self.cosmo, ell=ell[:last], C_ell=cl[:last], theta=theta_deg, type=corr)
+
+    # endregion
+
+    # ==================================================================================================================
+    # region Lognormal
 
     def smoothed_variance(self, tracer: Tracer, chi: float, nside: int, smooth_Mpc: float | np.ndarray) -> float | np.ndarray:
         r"""Return the variance of a map of a tracer, smoothed by a Gaussian at the effective scale.
@@ -970,3 +1030,8 @@ class Theory:
                 warnings.warn(f"No smoothing up to {scales[-1]} Mpc meets the criteria for map {i}: using {scales[-1]} Mpc.")
             smooth[i] = scales[np.argmax(ok)] if ok.any() else scales[-1]
         return smooth
+
+    # endregion
+
+
+# endregion

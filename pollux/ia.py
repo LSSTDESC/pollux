@@ -80,7 +80,13 @@ class CatalogAugmentorIA(CatalogAugmentor):
         self.new_columns = new_columns
 
     def config(self) -> dict:
-        """Return the type and parameters of the augmentor, for the ``config.yaml`` of the catalogs."""
+        """Return the type and parameters of the augmentor, for the ``config.yaml`` of the catalogs.
+
+        Returns
+        -------
+        dict
+            ``type``, ``model`` and ``model_params``.
+        """
         return {'type': type(self).__name__, 'model': self.model, 'model_params': self.model_params}
 
     def augment_catalog(self, cosmo: pyccl.Cosmology, catalog: dict[str, np.ndarray], **kwargs: Any) -> None:

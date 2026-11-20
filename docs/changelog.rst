@@ -14,6 +14,11 @@ Development
 - Record of the code version and environment of runs, and commit in catalog headers.
 - Plotting module (:mod:`pollux.statistics.plotting`) shared by map builders and catalogs.
 - Type hints and docstrings throughout.
+- Products in a root directory per simulation and footprint: :class:`~pollux.footprint.Footprint` (mask, padding,
+  weights of the harmonic transforms, its ``config.yaml``) in ``footprint/``, one directory per seed;
+  :class:`~pollux.io.files.PolluxIO` holds the root and the options of the objects, and reads and writes the files
+  by format.
+- Pipeline tasks decide what to skip; builders and catalogs only compute and write, and read their inputs.
 
 Version 0.1
 -----------

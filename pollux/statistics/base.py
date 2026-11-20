@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import logging
-from abc import ABC, abstractmethod
+from abc import ABC
 from typing import Any, Callable
 
 import numpy as np
 import sacc
 
-from ..io.layout import PolluxIO
+from ..io import PolluxIO
 
 logger = logging.getLogger(__name__)
 
@@ -17,10 +17,13 @@ logger = logging.getLogger(__name__)
 class TwoPointStatistics(ABC):
     """Base of :class:`~pollux.statistics.maps.MapStatistics` and :class:`~pollux.statistics.catalogs.CatalogStatistics`.
 
-    Statistics are saved as SACC files of ``{data_type: {(i, j): values}}``, the legs ``i`` and ``j``
-    of each data type having a role (e.g. ``'density'`` or ``'shear'``) whose SACC tracers are given by
-    :meth:`_sacc_tracers`. Bandpower windows are saved apart from their NaMaster workspace.
+    Statistics are saved as SACC files of ``{data_type: {(i, j): values}}``, with the SACC tracers of the legs
+    ``i`` and ``j`` of each data type (:meth:`_save_sacc`). Bandpower windows are saved apart from their NaMaster
+    workspace.
     """
+
+    # ==================================================================================================================
+    # region SACC
 
     def _save_sacc(
             self,
@@ -43,7 +46,8 @@ class TwoPointStatistics(ABC):
         coords : ndarray or dict
             Multipoles or angles: one array for all, or keyed like ``values``.
         legs : dict
-            Roles of the legs ``(i, j)`` of each data type (keys of :meth:`_sacc_tracers`).
+            SACC tracers of the legs ``(i, j)`` of each data type: ``{data_type: (tracers_i, tracers_j)}``, lists
+            indexed by map or bin. The tracers of the data are added to the file.
         coord : {'ell', 'theta'}, optional
             Tag of the coordinates.
         errors : dict or None, optional
@@ -58,32 +62,20 @@ class TwoPointStatistics(ABC):
         """
         s = sacc.Sacc()
         s.metadata.update(metadata or {})
-        tracers = self._sacc_tracers()
-        for role_tracers in tracers.values():
-            for t in role_tracers:
-                if t.name not in s.tracers:
-                    s.add_tracer_object(t)
         for data_type, pairs in values.items():
-            role_i, role_j = legs[data_type]
+            tracers_i, tracers_j = legs[data_type]
             for (i, j), v in pairs.items():
+                for t in (tracers_i[i], tracers_j[j]):
+                    if t.name not in s.tracers:
+                        s.add_tracer_object(t)
                 x = coords[data_type][i, j] if isinstance(coords, dict) else coords
                 for x_k, v_k in zip(x, v, strict=True):
-                    s.add_data_point(data_type, [tracers[role_i][i].name, tracers[role_j][j].name], v_k, **{coord: x_k})
+                    s.add_data_point(data_type, [tracers_i[i].name, tracers_j[j].name], v_k, **{coord: x_k})
         if errors is not None:
             # same order as the data points added above
             s.add_covariance(np.diag(np.concatenate([errors[data_type][ij]**2 for data_type, pairs in values.items() for ij in pairs])))
         PolluxIO.write_sacc(fname, s)
         return fname
-
-    @abstractmethod
-    def _sacc_tracers(self) -> dict[str, list]:
-        """Return the SACC tracers of each leg role, indexed by map or bin.
-
-        Returns
-        -------
-        dict
-            ``{role: [sacc tracer, ...]}``, all added to the SACC files, in this order.
-        """
 
     @staticmethod
     def _load_sacc(fname: str, return_dict: bool = False, return_errors: bool = False) -> sacc.Sacc | tuple:
@@ -123,6 +115,11 @@ class TwoPointStatistics(ABC):
                     errors[data_type][key] = sigma[indices]
         return (coords, values, errors) if return_errors else (coords, values)
 
+    # endregion
+
+    # ==================================================================================================================
+    # region Workspaces
+
     @staticmethod
     def _saved_bpws(wsp_fname: str, wsp: Callable[[], Any]) -> np.ndarray:
         """Return the bandpower windows of a workspace, saved apart from it.
@@ -146,16 +143,45 @@ class TwoPointStatistics(ABC):
 
     @staticmethod
     def _path_bpws(wsp_fname: str) -> str:
-        """Return the file of the bandpower windows of a workspace, next to it (``{name}_bpws.npy``)."""
+        """Return the file of the bandpower windows of a workspace, next to it (``{name}_bpws.npy``).
+
+        Parameters
+        ----------
+        wsp_fname : str
+            File of the workspace.
+
+        Returns
+        -------
+        str
+        """
         return wsp_fname.replace('.wsp', '_bpws.npy')
 
     @staticmethod
     def _write_wsp(fname: str, wsp: Any) -> None:
-        """Write a workspace, and its bandpower windows apart (:meth:`_saved_bpws`)."""
+        """Write a workspace, and its bandpower windows apart (:meth:`_saved_bpws`).
+
+        Parameters
+        ----------
+        fname : str
+            File of the workspace.
+        wsp : pymaster.NmtWorkspace
+        """
         PolluxIO.write_wsp(fname, wsp)
         TwoPointStatistics._saved_bpws(fname, lambda: wsp)
 
+    # endregion
+
 
 def _tracer_index(name: str) -> int:
-    # bin or map index of a tracer name (e.g. 'kappa_3', 'density_012')
+    """Return the bin or map index of a tracer name (e.g. ``'kappa_3'``, ``'density_012'``).
+
+    Parameters
+    ----------
+    name : str
+        Name of a SACC tracer.
+
+    Returns
+    -------
+    int
+    """
     return int(name.rsplit('_', 1)[-1])

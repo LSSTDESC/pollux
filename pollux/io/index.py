@@ -1,4 +1,4 @@
-"""Index of the products under a root directory, from their ``config.yaml`` (see :mod:`pollux.io.layout`).
+"""Index of the products under a root directory, from their ``config.yaml`` (see :mod:`pollux.io.config`).
 
 Usage::
 
@@ -15,6 +15,7 @@ import os
 
 import yaml
 
+from .config import CONFIG_FNAME, read_config
 from .layout import INTERMEDIATE
 
 
@@ -36,9 +37,8 @@ def product_index(root_dir: str) -> list[dict]:
     products = []
     for dirpath, dirnames, filenames in os.walk(root_dir):
         dirnames[:] = sorted(d for d in dirnames if d != INTERMEDIATE)
-        if 'config.yaml' in filenames:
-            with open(os.path.join(dirpath, 'config.yaml')) as f:
-                products.append(dict(path=os.path.relpath(dirpath, root_dir), **yaml.safe_load(f)))
+        if CONFIG_FNAME in filenames:
+            products.append(dict(path=os.path.relpath(dirpath, root_dir), **read_config(dirpath)))
     return sorted(products, key=lambda p: p['path'])
 
 

@@ -42,7 +42,7 @@ the tidal torquing term). Uniform catalogs have no density weighting unless ``de
 Predictions
 -----------
 
-:attr:`~pollux.catalog.CatalogGenerator.ia_tracers` gives the tracers of the alignments of each bin, with
+:attr:`~pollux.statistics.catalogs.CatalogStatistics.ia_tracers` gives the tracers of the alignments of each bin, with
 amplitudes ``a1 = A_TA``, ``a1delta = b_TA a1`` and ``a2 = A_TT``
 (:meth:`~pollux.ia.CatalogAugmentorIA.tracer_amplitudes`). NLA is computed with the matter power spectrum of the
 predictions, and the other terms with perturbation theory (FAST-PT through CCL), which also gives their B modes.

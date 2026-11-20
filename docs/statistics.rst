@@ -12,16 +12,16 @@ Map builders (shells, convergence) measure angular power spectra with NaMaster:
 
 - :meth:`~pollux.map_builder.MapBuilder.compute_alms` computes the spherical harmonics of the maps, on the padded
   and apodized footprint if any (see :doc:`shells`), and caches them;
-- :meth:`~pollux.map_builder.MapBuilder.compute_cls` computes the decoupled bandpowers of pairs of maps
+- :meth:`~pollux.statistics.maps.MapStatistics.compute_cls` computes the decoupled bandpowers of pairs of maps
   (``pairs``, or all with ``auto_only``), with the binning ``b`` (by default ``nlb`` = 20 bandpowers log-spaced from ℓ = 8 to 2 ``nside``) and a NaMaster
   workspace cached per footprint;
-- :meth:`~pollux.map_builder.MapBuilder.predict_cls` predicts them, convolved with the bandpower windows of the
+- :meth:`~pollux.statistics.maps.MapStatistics.predict_cls` predicts them, convolved with the bandpower windows of the
   workspace (``binning='wsp'``) or averaged in each bin, with the pixel window (``f_ell``), and optionally Gaussian
   error bars with the noise of the maps;
-- :meth:`~pollux.map_builder.MapBuilder.plot_cls` plots both.
+- :meth:`~pollux.statistics.maps.MapStatistics.plot_cls` plots both.
 
-Builders also compute moments of smoothed maps (:meth:`~pollux.map_builder.MapBuilder.compute_map_moments`), and
-Gaussian maps with the predicted spectra (:meth:`~pollux.map_builder.MapBuilder.generate_gaussian_maps`).
+Builders also compute moments of smoothed maps (:meth:`~pollux.statistics.maps.MapStatistics.compute_map_moments`), and
+Gaussian maps with the predicted spectra (:meth:`~pollux.statistics.maps.MapStatistics.generate_gaussian_maps`).
 
 Statistics of catalogs
 ----------------------
@@ -33,12 +33,13 @@ Catalogs measure, for all pairs of tomographic bins:
 - ``'shear'``: the shear correlations ``ξ±(θ)``;
 - ``'shear_clustering'``: galaxy-galaxy lensing ``γt(θ)``, for all ordered pairs of lens and source bins.
 
-:meth:`~pollux.catalog.CatalogGenerator.compute_2pt` measures them with TreeCorr between ``theta_min`` and
-``theta_max`` (``ntheta`` logarithmic bins, ``bin_slop``), and :meth:`~pollux.catalog.CatalogGenerator.compute_cls`
+:meth:`~pollux.statistics.catalogs.CatalogStatistics.compute_2pt` measures them with TreeCorr between ``theta_min`` and
+``theta_max`` (``ntheta`` logarithmic bins, ``bin_slop``), and :meth:`~pollux.statistics.catalogs.CatalogStatistics.compute_cls`
 measures the corresponding power spectra with NaMaster, from maps of the catalogs. ``subsample`` uses a random
 fraction of the galaxies, and ``remove_mean`` subtracts the mean shear of each bin. Error bars are shot noise only.
 
-``shapes`` sets the shapes of the shear legs:
+``shapes`` sets the shapes of the shear legs, of the 2pt functions and of the Cls alike (files ``cat_cls[_{shapes}].fits``
+for the Cls):
 
 - ``'shear'`` (default): the lensing shear (``shear_cols``, ``gamma1`` and ``gamma2`` by default), in
   ``cat_2pt.fits``;
@@ -54,7 +55,8 @@ alignments, :math:`\xi^{\gamma + e^I} = \xi^{GG} + \xi^{GI} + \xi^{IG} + \xi^{II
 difference ``shear_plus_ia - shear - ia``, which the
 plots of ``'ia'`` also show. Plots are named after the shapes: ``xi_shear``, ``xi_ia`` (II) and
 ``xi_shear_plus_ia`` for ``ξ±``, with ``_x_density`` for ``γt`` (``xi_ia_x_density`` is gI), ``xi_shear_x_ia`` for GI,
-``xi_observed`` for the observed ellipticities, and ``xi_density`` for ``w(θ)``.
+``xi_observed`` for the observed ellipticities, and ``xi_density`` for ``w(θ)``; those of the Cls are ``cl_{shapes}_ee``,
+``cl_{shapes}_x_density`` and ``cl_density``.
 
 Predictions
 -----------
@@ -64,6 +66,9 @@ Predictions use two objects of :mod:`pollux.cosmo`, shared by builders and catal
 - :class:`~pollux.cosmo.Tracer` describes an observable: a density (with its linear bias), a shear, intrinsic
   alignments (with their amplitudes) or a convergence, with its redshift distribution and smoothing. Builders and
   catalogs give theirs (``tracers``, ``density_tracers``, ``lensing_tracers``, ``ia_tracers``);
+- :class:`~pollux.cosmo.TracerSum` sums tracers of one field, e.g. the lensing shear and intrinsic alignments of a
+  bin for the shapes ``'shear_plus_ia'``: predictions being bilinear, their spectra are the sums of those of the terms
+  (GG + GI + IG + II), and so are the bandpowers, correlation functions and Gaussian errors of the summed field;
 - :class:`~pollux.cosmo.Theory` predicts their power spectra (:meth:`~pollux.cosmo.Theory.angular_cl`, in the
   Limber approximation), bandpowers (:meth:`~pollux.cosmo.Theory.predict_cls`) and correlation functions
   (:meth:`~pollux.cosmo.Theory.predict_2pt`, by Hankel transform), with a matter power spectrum: CCL's nonlinear
@@ -72,8 +77,8 @@ Predictions use two objects of :mod:`pollux.cosmo`, shared by builders and catal
 Bandpowers are predicted as measured: with the bandpower windows :math:`W_{b\ell}` of the NaMaster workspace and
 the pixel window :math:`p_\ell`, :math:`C_b = \sum_\ell W_{b\ell}\, p_\ell^2\, C_\ell`
 (:meth:`~pollux.cosmo.Theory.binned_cl`). The pixel window is also in the correlation functions of the catalogs,
-from :math:`p_\ell^2 C_\ell` (``pixel_window`` of :meth:`~pollux.catalog.CatalogGenerator.predict_cls` and
-:meth:`~pollux.catalog.CatalogGenerator.predict_2pt`), since galaxies are placed in the pixels of the density maps and
+from :math:`p_\ell^2 C_\ell` (``pixel_window`` of :meth:`~pollux.statistics.catalogs.CatalogStatistics.predict_cls` and
+:meth:`~pollux.statistics.catalogs.CatalogStatistics.predict_2pt`), since galaxies are placed in the pixels of the density maps and
 the fields are interpolated from pixelized maps. The bilinear interpolation probably adds a window of its own, which the
 predictions don't include: ``ξ-`` remains low below a few pixels.
 
@@ -86,14 +91,14 @@ their B modes included in ``ξ±`` and in the bandpowers of two spin-2 fields (s
 Plots
 -----
 
-Plots (:func:`pollux.plotting.plot_pairs`) show one panel per pair of bins, in modes:
+Plots (:func:`pollux.statistics.plotting.plot_pairs`) show one panel per pair of bins, in modes:
 
 - ``'values'``: data and prediction;
 - ``'ratio'``: data over prediction, minus 1;
 - ``'ratio_to_reference'``: the ratios of the data and of the predictions to those of another product, e.g. a
   baryonified catalog to the dark-matter-only one.
 
-Vertical lines mark the reference scales of each pair (:meth:`~pollux.map_builder.MapBuilder.reference_scales`):
+Vertical lines mark the reference scales of each pair (:meth:`~pollux.statistics.maps.MapStatistics.reference_scales`):
 the smoothing, the pixel size and the size of the simulation box at the distance of the tracers. Measurements are
 not expected to follow predictions below the pixel or smoothing scales, nor at angles approaching the box size.
 

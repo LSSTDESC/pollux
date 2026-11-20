@@ -4,7 +4,8 @@ Outputs
 Layout
 ------
 
-Products are organised by realization and matter model (:mod:`pollux.io.layout`). Under
+Products are organised by realization and matter model (:mod:`pollux.io.layout`, whose functions give the directories
+and file names to the builders, catalogs and :class:`~pollux.io.loader.PolluxLoader` alike). Under
 ``{root_dir}/nside{nside}/seed{seed}/`` (with ``pad{padding}/`` for footprints with padding), where ``root_dir`` is
 given to the shell builder:
 
@@ -14,7 +15,7 @@ given to the shell builder:
   - ``smoothed/{s}Mpc/``: smoothed density and tidal maps (``density_{iii}``, ``t11_{iii}``, ...);
   - ``kappa/{nz}/``: convergence and shear maps of the tomographic bins (``kappa_bin{b}``, ``gamma1_bin{b}``, ...), and their redshift distributions (``nzs.txt``);
   - ``kappa/snapshots/``: convergence and shear maps with one source plane per shell (``kappa_{iii}``, ...);
-  - ``catalogs/{nz}/{tag}/``: source catalogs (``cat_bin{b}.fits``) and their statistics (``cat_2pt.fits``, ``cat_cls.fits``, and ``cat_2pt_ia.fits``, ``cat_2pt_shear_plus_ia.fits``, ``cat_2pt_observed.fits`` with the shapes ``'ia'``, ``'shear_plus_ia'`` and ``'observed'``, see :doc:`statistics`);
+  - ``catalogs/{nz}/{tag}/``: source catalogs (``cat_bin{b}.fits``) and their statistics (``cat_2pt.fits``, ``cat_cls.fits``, and ``cat_2pt_{shapes}.fits``, ``cat_cls_{shapes}.fits`` with the shapes ``'ia'``, ``'shear_plus_ia'`` and ``'observed'``, see :doc:`statistics`);
 
 - ``dmb/{tag}/``: the same products for the baryon model ``tag``;
 - ``halos/``: halo catalogs, shared by all baryon models;

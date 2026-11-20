@@ -1,4 +1,4 @@
-"""Plots of two-point statistics of bin pairs against their predictions (:func:`plot_pairs`)."""
+"""Plots of two-point statistics of bin pairs against their predictions (:func:`plot_pairs`), for the maps and catalogs."""
 
 from __future__ import annotations
 
@@ -29,26 +29,6 @@ _SCALE_LINES = {
     'box': ('--', 'box size'),
     'res': ('-.', 'pixel size'),
 }
-
-
-def _plot_capped(ax: plt.Axes, x: np.ndarray, y: np.ndarray, color: str, cap: float = 1.) -> None:
-    """Plot ratios as points, those beyond ``+-cap`` at the cap as arrow markers (bounds).
-
-    Parameters
-    ----------
-    ax : matplotlib.axes.Axes
-        Panel to plot in.
-    x, y : ndarray
-        Positions and ratios.
-    color : str
-        Color of the points.
-    cap : float, optional
-        Largest absolute ratio shown at its value.
-    """
-    x, y = np.asarray(x), np.asarray(y)
-    for sel, value, marker, size in ((np.abs(y) <= cap, y, 'o', 3), (y > cap, cap, '^', 5), (y < -cap, -cap, 'v', 5)):
-        if sel.any():
-            ax.plot(x[sel], np.broadcast_to(value, y.shape)[sel], ls=' ', marker=marker, markersize=size, color=color)
 
 
 def ell_factor_of(x: np.ndarray, ell_factor: int) -> float | np.ndarray:
@@ -131,7 +111,7 @@ def plot_pairs(
     ell_factor : {0, 1, 2}, optional
         Factor of the values in ``'values'`` mode, see :func:`ell_factor_of`.
     scales : dict or None, optional
-        Reference scales (e.g. :meth:`pollux.map_builder.MapBuilder.reference_scales`),
+        Reference scales (e.g. :meth:`pollux.statistics.maps.MapStatistics.reference_scales`),
         per bin: ``ell_smooth``/``ell_box``/``ell_res`` (or ``theta_smooth``/``theta_box``/``theta_res``
         if ``xlabel`` does not contain ``ell``), marked at the geometric mean of the two bins (or per pair,
         for a dict keyed by ``(i, j)``) with dotted, dashed and dash-dotted lines, named in a legend below
@@ -273,3 +253,23 @@ def plot_pairs(
         plt.close(fig)
         logger.debug("Saved to file %s.", fname)
     return fig, axes
+
+
+def _plot_capped(ax: plt.Axes, x: np.ndarray, y: np.ndarray, color: str, cap: float = 1.) -> None:
+    """Plot ratios as points, those beyond ``+-cap`` at the cap as arrow markers (bounds).
+
+    Parameters
+    ----------
+    ax : matplotlib.axes.Axes
+        Panel to plot in.
+    x, y : ndarray
+        Positions and ratios.
+    color : str
+        Color of the points.
+    cap : float, optional
+        Largest absolute ratio shown at its value.
+    """
+    x, y = np.asarray(x), np.asarray(y)
+    for sel, value, marker, size in ((np.abs(y) <= cap, y, 'o', 3), (y > cap, cap, '^', 5), (y < -cap, -cap, 'v', 5)):
+        if sel.any():
+            ax.plot(x[sel], np.broadcast_to(value, y.shape)[sel], ls=' ', marker=marker, markersize=size, color=color)

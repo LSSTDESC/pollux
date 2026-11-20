@@ -70,11 +70,6 @@ DEBUG = {
 }
 
 
-def _seconds(walltime):
-    h, m, sec = (int(x) for x in walltime.split(':'))
-    return 3600 * h + 60 * m + sec
-
-
 class GuardedHighThroughputExecutor(HighThroughputExecutor):
     """HighThroughputExecutor whose scale-in by zero blocks does nothing.
 
@@ -203,3 +198,8 @@ def get_config(run_dir, debug, workflow_name, monitoring_db):
         max_idletime=60,
     )
     return config
+
+
+def _seconds(walltime):
+    h, m, sec = (int(x) for x in walltime.split(':'))
+    return 3600 * h + 60 * m + sec

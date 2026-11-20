@@ -50,6 +50,8 @@ class CatalogAugmentorIA(CatalogAugmentor):
     https://arxiv.org/abs/2509.25166v1
     """
 
+    kind = 'ia'
+
     # model parameters and their defaults
     PARAMETERS = {'A_TA': 1.0, 'A_TT': 1.0, 'delta_b_TA': 0.0, 'delta_b_TT': 0.0}
 
@@ -76,6 +78,10 @@ class CatalogAugmentorIA(CatalogAugmentor):
         if 'TT' in model:
             new_columns += ['e1_ia_tt', 'e2_ia_tt']
         self.new_columns = new_columns
+
+    def config(self) -> dict:
+        """Return the type and parameters of the augmentor, for the ``config.yaml`` of the catalogs."""
+        return {'type': type(self).__name__, 'model': self.model, 'model_params': self.model_params}
 
     def augment_catalog(self, cosmo: pyccl.Cosmology, catalog: dict[str, np.ndarray], **kwargs: Any) -> None:
         r"""Compute and add intrinsic alignment shear components to a catalog.
@@ -144,10 +150,6 @@ class CatalogAugmentorIA(CatalogAugmentor):
                     factor[ok] = np.maximum(0., 1. + (bias + delta_b) * delta[ok]) / weight[ok]
                     catalog[f'e1_ia_{model.lower()}'] *= factor
                     catalog[f'e2_ia_{model.lower()}'] *= factor
-
-    def config(self) -> dict:
-        """Return the type and parameters of the augmentor, for the ``config.yaml`` of the catalogs."""
-        return {'type': type(self).__name__, 'model': self.model, 'model_params': self.model_params}
 
     def coefficients(self, cosmo: pyccl.Cosmology, z: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Return the coefficients of the TA and TT terms, as CCL's :func:`pyccl.nl_pt.translate_IA_norm`.

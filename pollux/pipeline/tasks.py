@@ -4,140 +4,6 @@ import os
 
 from parsl import python_app
 
-
-def _free_memory():
-    # at the end of memory-heavy tasks: pyplot keeps figures alive until closed, and freed memory
-    # is not always returned to the system, so in a long-lived worker a task's peak (and its plots)
-    # would otherwise stay for the next tasks
-    import ctypes
-    import gc
-    import matplotlib.pyplot as plt
-    plt.close('all')
-    gc.collect()
-    try:
-        ctypes.CDLL('libc.so.6').malloc_trim(0)
-    except OSError:
-        pass
-
-
-def _make_shell_builder(reader_dict, shell_dict, baryon_dict):
-    if baryon_dict is not None:
-        return _make_baryon_builder(reader_dict, shell_dict, baryon_dict)
-    import pollux
-    reader = pollux.reader.HACCReader(**reader_dict)
-    return pollux.shells.SnapshotShellBuilder(reader, **shell_dict)
-
-
-def _make_halo_builder(reader_dict, shell_dict):
-    # halo catalogs: all halos (no subsampling of the boxes)
-    import pollux
-    return pollux.shells.SnapshotShellBuilder(pollux.reader.HACCHaloReader(**reader_dict), **{**shell_dict, 'subsample_box': None})
-
-
-def _make_baryon_builder(reader_dict, shell_dict, baryon_dict):
-    import pollux
-    reader = pollux.reader.HACCReader(**reader_dict)
-    builder = pollux.shells.SnapshotShellBuilder(reader, **shell_dict)
-    builder_halo = _make_halo_builder(reader_dict, shell_dict)
-    builder_params = dict(baryon_dict)
-    tag = builder_params.pop('tag', None)
-    bfg_params = builder_params.pop('bfg_params')
-    # the same profiles baryonify the shells and correct the predicted P(k)
-    dmo, dmb = pollux.baryons.s19_profiles(bfg_params, builder_params['mass_def'])
-    return pollux.baryons.BaryonifiedShellBuilder(builder, builder_halo, dmo, dmb, profile_parameters=bfg_params, tag=tag, **builder_params)
-
-
-def _make_lensing(builder, lensing_dict):
-    import pollux
-    if lensing_dict is None:
-        return builder.snapshot_lensing_builder()
-    return pollux.lensing.BornLensingBuilder(builder, **lensing_dict)
-
-
-def _make_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict):
-    import pollux
-    from pollux.catalog import CatalogAugmentorShear
-    from pollux.ia import CatalogAugmentorIA
-    lensing = _make_lensing(_make_shell_builder(reader_dict, shell_dict, baryon_dict), lensing_dict)
-    ia = CatalogAugmentorIA(**ia_dict)
-    shear_aug = CatalogAugmentorShear(
-        compute_reduced_shear=True,
-        generate_intrinsic=True,
-        compute_observed=True,
-    )
-    catalog = pollux.catalog.CatalogClusteredPoisson(
-        lensing,
-        augmentors=[ia, shear_aug],
-        **catalog_dict,
-    )
-    # check the parameters against the config.yaml of existing catalogs (or write it), before any task skips them
-    catalog._write_config()
-    return catalog
-
-
-def _params_id(params):
-    # identifier (8 hexadecimal characters) of the parameters a statistic depends on (binning, statistics options)
-    import hashlib
-    import json
-    return hashlib.sha1(json.dumps(params, sort_keys=True, default=str).encode()).hexdigest()[:8]
-
-
-def _pair_fname(intermediate_dir, name, pair, params_id, stat=None):
-    # intermediate file of the statistic of one bin pair: {intermediate_dir}/{name}_{params_id}/[{stat}_]{i}_{j}.pkl, so
-    # that results with other parameters are not mixed
-    i, j = pair
-    return os.path.join(intermediate_dir, f'{name}_{params_id}', f"{f'{stat}_' if stat else ''}{i}_{j}.pkl")
-
-
-def _params_id_of_pairs(fnames):
-    # identifier of the parameters of the bin pairs combined, from the folder of their files (None if all skipped)
-    ids = {os.path.basename(os.path.dirname(f)).rsplit('_', 1)[1] for f in fnames if f is not None}
-    if len(ids) > 1:
-        raise ValueError(f"Bin pairs measured with different options: {sorted(ids)}")
-    return ids.pop() if ids else None
-
-
-def _statistic_saved(fname, params_id):
-    """Return whether the statistic of ``fname`` is saved, with the options of identifier ``params_id``.
-
-    The combining tasks record the identifier in the SACC metadata (``options_id``): a statistic saved with other
-    options raises, instead of being kept as if it were up to date. Statistics saved before the identifier was
-    recorded are kept, with a warning.
-    """
-    import warnings
-    import sacc
-    if not os.path.exists(fname):
-        return False
-    saved = sacc.Sacc.load_fits(fname).metadata.get('options_id')
-    if saved is None:
-        warnings.warn(f"{fname} has no identifier of the options it was measured with: kept as is.")
-    elif params_id is not None and saved != params_id:
-        raise ValueError(f"{fname} was measured with other options (identifier {saved}, now {params_id}): move it away to measure it again.")
-    return True
-
-
-def _compute_pair(fname, compute):
-    # statistic of one bin pair, computed and saved to fname unless already saved (resumed runs); returns fname, read
-    # by the task combining the pairs (so results go through the disk, not through the main process)
-    import pickle
-    from pollux.io import layout
-    if not os.path.exists(fname):
-        result = compute()
-        os.makedirs(os.path.dirname(fname), exist_ok=True)
-        with layout.atomic_write(fname) as tmp, open(tmp, 'wb') as f:
-            pickle.dump(result, f)
-    return fname
-
-
-def _load_pairs(fnames):
-    # results of the bin pairs saved by _compute_pair (None for tasks skipped because their product exists)
-    import pickle
-    for fname in fnames:
-        if fname is not None:
-            with open(fname, 'rb') as f:
-                yield pickle.load(f)
-
-
 ##############################
 # Shells (dark-matter density maps from sub-volumes)
 
@@ -329,11 +195,11 @@ def catalog_map_tasks(nshells, reader_dict, shell_dict, catalog_dict, kappa_alms
 
 
 @python_app(executors=['heavy'])
-def construct_catalog(ikappa, reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict=None, inputs=[]):
+def construct_catalog(ibin, reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict=None, inputs=[]):
     # catalog of one tomographic bin, unless saved
     catalog = _make_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict)
-    if not os.path.exists(catalog.get_fname(ikappa)):
-        catalog.generate(ikappa)
+    if not os.path.exists(catalog.get_fname(ibin)):
+        catalog.generate(ibin)
     _free_memory()
 
 
@@ -348,11 +214,11 @@ def construct_catalog_shell(ishell, reader_dict, shell_dict, lensing_dict, ia_di
 
 
 @python_app(executors=['highmem'])
-def merge_catalog(ikappa, reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict=None, inputs=[]):
+def merge_catalog(ibin, reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict=None, inputs=[]):
     # inputs contains the construct_catalog_shell futures of all shells; skipped if the catalog is saved
     catalog = _make_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict)
-    if not os.path.exists(catalog.get_fname(ikappa)):
-        catalog.combine_shells(ikappa)
+    if not os.path.exists(catalog.get_fname(ibin)):
+        catalog.combine_shells(ibin)
     _free_memory()
 
 
@@ -490,53 +356,186 @@ def compute_catalog_cls_wsp(stat, reader_dict, shell_dict, lensing_dict, ia_dict
     # workspace shared by all bin pairs of one statistic, from the footprint (compute_cls and predict_cls with shared_wsp=True)
     catalog = _make_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict)
     if not os.path.exists(catalog._wsp_fname(stat)):
-        catalog.get_wsp(stat)
+        catalog.wsp(stat)
     _free_memory()
 
 
 @python_app(executors=['heavy'])
-def compute_catalog_alms(ikappa, reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, stats_dict, baryon_dict=None, inputs=[]):
-    # catalog fields (a_lm) of one tomographic bin for the Cls, saved as intermediate files (skipped if saved, or if the
-    # Cls are saved): the Cls of all its pairs read them instead of loading the catalog again
+def compute_catalog_alms(ibin, reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, stats_dict, baryon_dict=None, shapes='shear', inputs=[]):
+    # catalog fields (a_lm) of one tomographic bin for the Cls with the shapes of the shear legs, saved as intermediate
+    # files (skipped if saved, or if the Cls are saved): the Cls of all its pairs read them instead of loading the catalog again
     catalog = _make_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict)
-    if not os.path.exists(catalog._cls_fname()):
+    if not os.path.exists(catalog._cls_fname(shapes)):
         options = {k: v for k, v in {**stats_dict['common'], **stats_dict['cls']}.items() if k not in ('shared_wsp', 'auto_only')}
-        catalog.compute_alms(ikappa, **options)
+        catalog.compute_alms(ibin, shapes=shapes, **options)
     _free_memory()
 
 
 @python_app(executors=['highmem'])
-def compute_catalog_cls_sub(stat, pair, reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, stats_dict, baryon_dict=None, inputs=[]):
-    # Cls of one statistic ('clustering', 'shear' or 'shear_clustering') for one bin pair, saved to an intermediate file
-    # (its name is returned; None if the Cls are saved), from the fields of its bins (inputs: compute_catalog_alms)
+def compute_catalog_cls_sub(stat, pair, reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, stats_dict, baryon_dict=None, shapes='shear', inputs=[]):
+    # Cls of one statistic ('clustering', 'shear' or 'shear_clustering') for one bin pair, with the shapes of the shear
+    # legs (see CatalogGenerator.compute_cls), saved to an intermediate file (its name is returned; None if the Cls of
+    # these shapes are saved), from the fields of its bins (inputs: compute_catalog_alms)
     from pollux.utils.binning import binning_id
     catalog = _make_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict)
     params_id = _params_id([binning_id(catalog.b), stats_dict['common'], stats_dict['cls']])
-    if _statistic_saved(catalog._cls_fname(), params_id):
+    if _statistic_saved(catalog._cls_fname(shapes), params_id):
         return None
-    fname = _pair_fname(catalog._intermediate_dir, 'cls', pair, params_id, stat=stat)
-    fname = _compute_pair(fname, lambda: catalog.compute_cls(what=stat, pairs=[pair], save=False, **stats_dict['common'], **stats_dict['cls']))
+    fname = _pair_fname(catalog._intermediate_dir, 'cls' if shapes == 'shear' else f'cls_{shapes}', pair, params_id, stat=stat)
+    fname = _compute_pair(fname, lambda: catalog.compute_cls(what=stat, pairs=[pair], shapes=shapes, save=False, **stats_dict['common'], **stats_dict['cls']))
     _free_memory()
     return fname
 
 
 @python_app(executors=['default'])
-def compute_catalog_cls(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict=None, inputs=[]):
-    # inputs contains the files of the (ell, cl) of compute_catalog_cls_sub, saved unless the Cls already are
+def compute_catalog_cls(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict=None, shapes='shear', inputs=[]):
+    # inputs contains the files of the (ell, cl) of compute_catalog_cls_sub, saved to the file of the shapes unless it exists
     catalog = _make_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict)
     params_id = _params_id_of_pairs(inputs)
-    if _statistic_saved(catalog._cls_fname(), params_id):
+    if _statistic_saved(catalog._cls_fname(shapes), params_id):
         return
     cls_out = {}
     for ell, cl in _load_pairs(inputs):
         for data_type, pairs in cl.items():
             cls_out.setdefault(data_type, {}).update(pairs)
-    catalog._save_cls(ell, cls_out, metadata={'options_id': params_id})
+    catalog._save_cls(ell, cls_out, shapes=shapes, metadata={'options_id': params_id})
 
 
 @python_app(executors=['default'])
-def plot_catalog_cls(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict=None, cls_kwargs=None, inputs=[]):
-    # Cls against their predictions ({catalog_dir}/plots); cls_kwargs are the Cls options (shared_wsp, randoms)
+def plot_catalog_cls(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict=None, cls_kwargs=None, shapes='shear', inputs=[]):
+    # Cls against their predictions ({catalog_dir}/plots); cls_kwargs are the Cls options (shared_wsp, randoms), and
+    # shapes those of the shear legs
     catalog = _make_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict)
-    catalog.plot_cls(**{k: v for k, v in (cls_kwargs or {}).items() if k in ('shared_wsp', 'randoms')})
+    catalog.plot_cls(shapes=shapes, **{k: v for k, v in (cls_kwargs or {}).items() if k in ('shared_wsp', 'randoms')})
     _free_memory()
+
+
+def _free_memory():
+    # at the end of memory-heavy tasks: pyplot keeps figures alive until closed, and freed memory
+    # is not always returned to the system, so in a long-lived worker a task's peak (and its plots)
+    # would otherwise stay for the next tasks
+    import ctypes
+    import gc
+    import matplotlib.pyplot as plt
+    plt.close('all')
+    gc.collect()
+    try:
+        ctypes.CDLL('libc.so.6').malloc_trim(0)
+    except OSError:
+        pass
+
+
+def _make_shell_builder(reader_dict, shell_dict, baryon_dict):
+    if baryon_dict is not None:
+        return _make_baryon_builder(reader_dict, shell_dict, baryon_dict)
+    import pollux
+    reader = pollux.reader.HACCReader(**reader_dict)
+    return pollux.shells.SnapshotShellBuilder(reader, **shell_dict)
+
+
+def _make_halo_builder(reader_dict, shell_dict):
+    # halo catalogs: all halos (no subsampling of the boxes)
+    import pollux
+    return pollux.shells.SnapshotShellBuilder(pollux.reader.HACCHaloReader(**reader_dict), **{**shell_dict, 'subsample_box': None})
+
+
+def _make_baryon_builder(reader_dict, shell_dict, baryon_dict):
+    import pollux
+    reader = pollux.reader.HACCReader(**reader_dict)
+    builder = pollux.shells.SnapshotShellBuilder(reader, **shell_dict)
+    builder_halo = _make_halo_builder(reader_dict, shell_dict)
+    builder_params = dict(baryon_dict)
+    tag = builder_params.pop('tag', None)
+    bfg_params = builder_params.pop('bfg_params')
+    # the same profiles baryonify the shells and correct the predicted P(k)
+    dmo, dmb = pollux.baryons.s19_profiles(bfg_params, builder_params['mass_def'])
+    return pollux.baryons.BaryonifiedShellBuilder(builder, builder_halo, dmo, dmb, profile_parameters=bfg_params, tag=tag, **builder_params)
+
+
+def _make_lensing(builder, lensing_dict):
+    import pollux
+    if lensing_dict is None:
+        return builder.snapshot_lensing_builder()
+    return pollux.lensing.BornLensingBuilder(builder, **lensing_dict)
+
+
+def _make_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict):
+    import pollux
+    from pollux.catalog import CatalogAugmentorShear
+    from pollux.ia import CatalogAugmentorIA
+    lensing = _make_lensing(_make_shell_builder(reader_dict, shell_dict, baryon_dict), lensing_dict)
+    ia = CatalogAugmentorIA(**ia_dict)
+    shear_aug = CatalogAugmentorShear(
+        compute_reduced_shear=True,
+        generate_intrinsic=True,
+        compute_observed=True,
+    )
+    catalog = pollux.catalog.CatalogClusteredPoisson(
+        lensing,
+        augmentors=[ia, shear_aug],
+        **catalog_dict,
+    )  # checks its parameters against the config.yaml of existing catalogs (or writes it), before any task skips them
+    return catalog
+
+
+def _params_id(params):
+    # identifier (8 hexadecimal characters) of the parameters a statistic depends on (binning, statistics options)
+    import hashlib
+    import json
+    return hashlib.sha1(json.dumps(params, sort_keys=True, default=str).encode()).hexdigest()[:8]
+
+
+def _pair_fname(intermediate_dir, name, pair, params_id, stat=None):
+    # intermediate file of the statistic of one bin pair: {intermediate_dir}/{name}_{params_id}/[{stat}_]{i}_{j}.pkl, so
+    # that results with other parameters are not mixed
+    i, j = pair
+    return os.path.join(intermediate_dir, f'{name}_{params_id}', f"{f'{stat}_' if stat else ''}{i}_{j}.pkl")
+
+
+def _params_id_of_pairs(fnames):
+    # identifier of the parameters of the bin pairs combined, from the folder of their files (None if all skipped)
+    ids = {os.path.basename(os.path.dirname(f)).rsplit('_', 1)[1] for f in fnames if f is not None}
+    if len(ids) > 1:
+        raise ValueError(f"Bin pairs measured with different options: {sorted(ids)}")
+    return ids.pop() if ids else None
+
+
+def _statistic_saved(fname, params_id):
+    """Return whether the statistic of ``fname`` is saved, with the options of identifier ``params_id``.
+
+    The combining tasks record the identifier in the SACC metadata (``options_id``): a statistic saved with other
+    options raises, instead of being kept as if it were up to date. Statistics saved before the identifier was
+    recorded are kept, with a warning.
+    """
+    import warnings
+    import sacc
+    if not os.path.exists(fname):
+        return False
+    saved = sacc.Sacc.load_fits(fname).metadata.get('options_id')
+    if saved is None:
+        warnings.warn(f"{fname} has no identifier of the options it was measured with: kept as is.")
+    elif params_id is not None and saved != params_id:
+        raise ValueError(f"{fname} was measured with other options (identifier {saved}, now {params_id}): move it away to measure it again.")
+    return True
+
+
+def _compute_pair(fname, compute):
+    # statistic of one bin pair, computed and saved to fname unless already saved (resumed runs); returns fname, read
+    # by the task combining the pairs (so results go through the disk, not through the main process)
+    import pickle
+    from pollux.io import layout
+    if not os.path.exists(fname):
+        result = compute()
+        os.makedirs(os.path.dirname(fname), exist_ok=True)
+        with layout.atomic_write(fname) as tmp, open(tmp, 'wb') as f:
+            pickle.dump(result, f)
+    return fname
+
+
+def _load_pairs(fnames):
+    # results of the bin pairs saved by _compute_pair (None for tasks skipped because their product exists)
+    import pickle
+    for fname in fnames:
+        if fname is not None:
+            with open(fname, 'rb') as f:
+                yield pickle.load(f)

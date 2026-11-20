@@ -17,6 +17,7 @@ import numpy as np
 import pyccl
 
 from .io import layout
+from .io.config import write_config
 from .cosmo import Tracer
 from .map_builder import MapBuilder, MapSum
 from .utils.numerics import quad
@@ -63,7 +64,7 @@ class LensingBuilder(MapBuilder):
         self.shell_builder = shell_builder
         self.tag = tag
         if save_dir is None:
-            save_dir = os.path.join(shell_builder.matter_dir, 'kappa', tag or 'default')
+            save_dir = layout.kappa_dir(shell_builder.matter_dir, tag or 'default')
         elif tag is not None:
             raise ValueError('Provide either tag or save_dir, not both.')
         self.reader = shell_builder.reader
@@ -86,24 +87,31 @@ class LensingBuilder(MapBuilder):
 
         # tomographic bins in file names (kappa_bin{b}), shells for snapshot lensing (kappa_{iii})
         if nzs != 'snapshots':
-            self._index_format = 'bin{}'
+            self._index_format = layout.BIN_INDEX
 
-        # configuration of the products: the n(z), and the shells they come from
-        if nzs == 'snapshots':
-            nz_parameters = 'snapshots'
-        else:
-            # callable n(z) by their values on the grid of the tracers
-            zz = np.linspace(0, shell_builder.shell_edges_redshift[-1], 1000)
-            nz_values = [np.asarray(nz(zz), dtype=float).tolist() if callable(nz) else [np.asarray(a, dtype=float).tolist() for a in nz] for nz in nzs]
-            nz_parameters = dict(nbins=self.nkappas, sha1=hashlib.sha1(repr(nz_values).encode()).hexdigest())
-        parameters = dict(builder=type(self).__name__, nzs=nz_parameters, **self._config_options())
-        layout.write_config(self.save_dir, 'kappa', parameters, inputs=[shell_builder.save_dir], realization=self.realization_dir)
+        # configuration of the products (checked against an existing one), and the n(z)
+        write_config(self.save_dir, self.config(), realization=self.realization_dir)
         if nzs != 'snapshots':
             self._save_nzs()
 
-    def _config_options(self) -> dict:
-        """Return the options of the builder for the ``config.yaml`` of its products: those differing from their defaults (none here)."""
-        return {}
+    def config(self) -> dict:
+        """Return the configuration of the products, for their ``config.yaml`` (:func:`pollux.io.config.write_config`).
+
+        Returns
+        -------
+        dict
+            ``product`` (``'kappa'``), ``parameters`` (builder, and n(z): ``'snapshots'``, or their number
+            and a hash of their values) and ``inputs`` (the shells).
+        """
+        if self.nzs == 'snapshots':
+            nz_parameters = 'snapshots'
+        else:
+            # callable n(z) by their values on the grid of the tracers
+            zz = np.linspace(0, self.shell_builder.shell_edges_redshift[-1], 1000)
+            nz_values = [np.asarray(nz(zz), dtype=float).tolist() if callable(nz) else [np.asarray(a, dtype=float).tolist() for a in nz] for nz in self.nzs]
+            nz_parameters = dict(nbins=self.nkappas, sha1=hashlib.sha1(repr(nz_values).encode()).hexdigest())
+        parameters = dict(builder=type(self).__name__, nzs=nz_parameters)
+        return dict(product='kappa', parameters=parameters, inputs=[self.shell_builder.save_dir])
 
     def _save_nzs(self) -> None:
         """Save the redshift distributions, unless saved already.
@@ -274,13 +282,15 @@ class BornLensingBuilder(LensingBuilder):
             self.dndz_norm = [quad(lambda z: t.ccl(self.cosmo).get_dndz(z), 0., zmax) if t.kind == 'shear' else np.nan for t in self.tracers]
             self.zlens = [self.shell_builder.mean_z_volume(ishell) for ishell in range(self.nshells)]
 
-    def _config_options(self) -> dict:
-        """Return the options of the builder for the ``config.yaml`` of its products: those differing from their defaults.
+    def config(self) -> dict:
+        """Return the configuration of the products (:meth:`LensingBuilder.config`), with the options of the builder.
 
         Options at their defaults are left out, so that the configurations of products made before
         they were recorded stay valid.
         """
-        return {k: True for k in ('multiple_planes', 'nbar_from_maps') if getattr(self, k)}
+        config = super().config()
+        config['parameters'].update({k: True for k in ('multiple_planes', 'nbar_from_maps') if getattr(self, k)})
+        return config
 
     def construct_maps(self, ikappas: int | Iterable[int] | None = None) -> hsp.HealSparseMap | dict[int, hsp.HealSparseMap]:
         """Construct and save convergence maps by summing weighted shells.

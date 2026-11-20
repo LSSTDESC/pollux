@@ -106,7 +106,7 @@ class BaryonifiedShellBuilder(ShellBuilder):
             reader=shell_builder.reader,
             nshells=shell_builder.nshells,
             nside=shell_builder.nside,
-            save_dir=os.path.join(matter, 'shells'),
+            save_dir=layout.shells_dir(matter),
             realization_dir=shell_builder.realization_dir,
             smoothed_dir=os.path.join(matter, 'smoothed'),
             seed=shell_builder.seed,
@@ -142,19 +142,17 @@ class BaryonifiedShellBuilder(ShellBuilder):
         self._interpolator_ishell = None  # shell index currently tabulated in self.model
         self._pk2d = None  # matter power spectrum with baryons, cached by matter_power_spectrum
 
-    def _config(self) -> tuple[str, dict, list[str]]:
-        """Return the kind, parameters and inputs of the baryonified shells, for their ``config.yaml``.
+    def config(self) -> dict:
+        """Return the configuration of the baryonified shells, for their ``config.yaml``.
 
         Returns
         -------
-        product : str
-            ``'shells'``.
-        parameters : dict
-            Parameters of the shells (:meth:`pollux.shells.ShellBuilder._config`), and of the baryon model.
-        inputs : list of str
-            The dark-matter-only shells and the halo catalogs.
+        dict
+            ``product`` (``'shells'``), ``parameters`` (those of the shells, :meth:`pollux.shells.ShellBuilder.config`,
+            and of the baryon model) and ``inputs`` (the dark-matter-only shells and the halo catalogs).
         """
-        _, parameters, _ = super()._config()
+        config = super().config()
+        parameters = config['parameters']
         parameters.update(
             baryon_tag=self.tag,
             dmo_profiles=_profile_name(self.dmo),
@@ -165,7 +163,7 @@ class BaryonifiedShellBuilder(ShellBuilder):
             M_min=self.M_min)
         if self.profile_parameters is not None:
             parameters['profile_parameters'] = self.profile_parameters
-        return 'shells', parameters, [self.shell_builder_ref.save_dir, self.halo_builder.save_dir]
+        return dict(config, product='shells', inputs=[self.shell_builder_ref.save_dir, self.halo_builder.save_dir])
 
     def construct_maps(
         self,

@@ -504,10 +504,6 @@ class HACCReader(Reader):
         """Simulation box side length in Mpc."""
         return self.boxsize_h / self.cosmo["h"]
 
-    def _get_name(self, step: int, isub: int) -> str:
-        """Return the GenericIO file name for a given step/sub-volume."""
-        return os.path.join(self.path, "output", f"STEP{step}/m000.full.mpicosmo.{step}#{isub}")
-
     def read_sub(
         self,
         isnapshot: int,
@@ -586,6 +582,10 @@ class HACCReader(Reader):
         if len(extra_variables) > 0:
             return xyz.astype(self.dtype), box_edges.astype(self.dtype), {k: np.concatenate(out[k]) for k in extra_variables}
         return xyz.astype(self.dtype), box_edges.astype(self.dtype)
+
+    def _get_name(self, step: int, isub: int) -> str:
+        """Return the GenericIO file name for a given step/sub-volume."""
+        return os.path.join(self.path, "output", f"STEP{step}/m000.full.mpicosmo.{step}#{isub}")
 
 
 class HACCLightconeReader(Reader):
@@ -679,10 +679,6 @@ class HACCLightconeReader(Reader):
         """Simulation box side length in Mpc."""
         return self.boxsize_h / self.cosmo["h"]
 
-    def _get_name(self, step: int, isub: int) -> str:
-        """Return the GenericIO lightcone file name for a given step/sub-volume."""
-        return os.path.join(self.path, self.lightcone_path, f"STEP{step}", f"m000.lc.mpicosmo.{step}#{isub}")
-
     def read_sub(self, isnapshot: int, isub: int) -> NDArray:
         """Read one lightcone file and return particle positions.
 
@@ -710,6 +706,10 @@ class HACCLightconeReader(Reader):
         xyz = {k: data / self.cosmo["h"] for k, data in out.items()}
         return np.column_stack([xyz["x"], xyz["y"], xyz["z"]])
 
+    def _get_name(self, step: int, isub: int) -> str:
+        """Return the GenericIO lightcone file name for a given step/sub-volume."""
+        return os.path.join(self.path, self.lightcone_path, f"STEP{step}", f"m000.lc.mpicosmo.{step}#{isub}")
+
 
 class HACCHaloReader(HACCReader):
     """Reader for HACC halo catalogs (GenericIO halo properties files).
@@ -728,10 +728,6 @@ class HACCHaloReader(HACCReader):
         self.variables: list[str] = ["fof_halo_center_x", "fof_halo_center_y", "fof_halo_center_z"]
         self.halo_path = halo_path
         assert not self.group_along_x
-
-    def _get_name(self, step: int, isub: int) -> str:
-        """Return the GenericIO halo file name for a given step/sub-volume."""
-        return os.path.join(self.path, self.halo_path, f"STEP{step}/m000-{step}.haloproperties#{isub}")
 
     def read_props(
             self,
@@ -766,6 +762,10 @@ class HACCHaloReader(HACCReader):
         logger.debug("Reading %s.", name)
         data = pygio.read_genericio(name, variables=props_variables)
         return {k: data[k][ihaloes] for k in props_variables}
+
+    def _get_name(self, step: int, isub: int) -> str:
+        """Return the GenericIO halo file name for a given step/sub-volume."""
+        return os.path.join(self.path, self.halo_path, f"STEP{step}/m000-{step}.haloproperties#{isub}")
 
 
 class SkySimReader(Reader):

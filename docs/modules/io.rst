@@ -8,6 +8,11 @@ I/O
    :undoc-members:
    :show-inheritance:
 
+.. automodule:: pollux.io.config
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 .. automodule:: pollux.io.code_version
    :members:
    :undoc-members:

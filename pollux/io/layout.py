@@ -1,4 +1,4 @@
-"""Layout of the output products: directories, intermediate files and product configurations.
+"""Layout of the output products: directories, file names and intermediate files.
 
 All products of one realization (simulation, nside, seed and footprint padding) live under
 ``{root_dir}/nside{nside}/seed{seed}[/pad{padding}]``::
@@ -9,7 +9,8 @@ All products of one realization (simulation, nside, seed and footprint padding) 
         smoothed/{s}Mpc/            density_{iii}, t11_{iii}, t22_{iii}, t12_{iii}
         kappa/snapshots/            kappa_{iii}, gamma1_{iii}, gamma2_{iii} (one source plane per shell)
         kappa/{nz}/                 kappa_bin{b}, gamma1_bin{b}, gamma2_bin{b}, nzs.txt
-        catalogs/{nz}/{tag}/        cat_bin{b}.fits, cat_2pt[_ia|_shear_plus_ia|_observed].fits, cat_cls.fits
+        catalogs/{nz}/{tag}/        cat_bin{b}.fits, cat_2pt[_{shapes}].fits, cat_cls[_{shapes}].fits (shapes: ia,
+                                    shear_plus_ia, observed)
     dmb/{tag}/                      baryonified products, with the same subtree as dmo/
     intermediate/                   files needed only to make or resume the products (sub-volume maps,
                                     a_lm, partial catalogs, workspaces, statistics of each bin pair), at the
@@ -17,7 +18,7 @@ All products of one realization (simulation, nside, seed and footprint padding) 
     code_version/{date}/            code and environment of each run
 
 Each product directory (shells, halos, kappa, catalogs) holds a ``config.yaml`` with its parameters,
-inputs and code version, so that it can be shared (e.g. registered) on its own. Footprint products
+inputs and code version (:mod:`pollux.io.config`), so that it can be shared (e.g. registered) on its own. Footprint products
 (NaMaster workspaces, padded masks) are shared by all realizations at ``{root_dir}/nside{nside}``.
 """
 from __future__ import annotations
@@ -27,12 +28,6 @@ import socket
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Any
-
-import numpy as np
-import yaml
-
-from .code_version import code_version
 
 INTERMEDIATE = 'intermediate'
 
@@ -75,6 +70,110 @@ def matter_dir(realization: str, baryon_tag: str | None = None) -> str:
     str
     """
     return os.path.join(realization, 'dmo') if baryon_tag is None else os.path.join(realization, 'dmb', baryon_tag)
+
+
+def shells_dir(matter: str) -> str:
+    """Return the directory of the shells of a matter model (:func:`matter_dir`)."""
+    return os.path.join(matter, 'shells')
+
+
+def halos_dir(realization: str) -> str:
+    """Return the directory of the halo catalogs of a realization, shared by all baryon models."""
+    return os.path.join(realization, 'halos')
+
+
+def smoothed_dir(smoothed_root: str, smooth_Mpc: float) -> str:
+    """Return the directory of the maps smoothed at ``smooth_Mpc`` (``{smoothed_root}/{s}Mpc``).
+
+    Parameters
+    ----------
+    smoothed_root : str
+        Directory of the smoothed maps of a product (``{matter}/smoothed`` for shells,
+        ``{kappa}/smoothed`` for convergence maps).
+    smooth_Mpc : float
+        Comoving Gaussian smoothing scale in Mpc.
+
+    Returns
+    -------
+    str
+    """
+    return os.path.join(smoothed_root, f'{smooth_Mpc:g}Mpc')
+
+
+def kappa_dir(matter: str, nz: str) -> str:
+    """Return the directory of the convergence and shear maps of the redshift distributions ``nz`` (``'snapshots'``: one source plane per shell)."""
+    return os.path.join(matter, 'kappa', nz)
+
+
+def catalog_dir(matter: str, nz: str, tag: str | None = None) -> str:
+    """Return the directory of the catalogs of tag ``tag`` (``default`` if None) for the redshift distributions ``nz``."""
+    return os.path.join(matter, 'catalogs', nz, tag or 'default')
+
+
+def footprint_dir(root_dir: str, nside: int) -> str:
+    """Return the directory of the footprint products (NaMaster workspaces, padded masks), shared by all realizations."""
+    return os.path.join(root_dir, f'nside{nside}')
+
+
+# file names (relative to their directory)
+
+SHELL_INDEX = '{:03d}'  # shells, and maps of one source plane per shell
+BIN_INDEX = 'bin{}'  # tomographic bins
+
+
+def map_fname(what: str, index: str | None = None, sub: int | str | None = None, extra: str | None = None, format: str = 'fits') -> str:
+    """Return the name of a map file, ``{what}[_{index}][_sub{sub}][_{extra}].{format}``.
+
+    Parameters
+    ----------
+    what : str
+        Field or product (e.g. ``'shell'``, ``'kappa'``, ``'gamma1'``, ``'alms'``).
+    index : str or None, optional
+        Formatted index of the map (:data:`SHELL_INDEX` or :data:`BIN_INDEX`).
+    sub : int or str or None, optional
+        Sub-volume of the map (intermediate files).
+    extra : str or None, optional
+        Additional string at the end of the name.
+    format : str, optional
+        File extension (without leading dot).
+
+    Returns
+    -------
+    str
+    """
+    parts = [what] + [p for p in (index, None if sub is None else f'sub{sub}', extra) if p is not None]
+    return '_'.join(parts) + f'.{format}'
+
+
+def alms_what(replicate_octant: bool) -> str:
+    """Return the name of the a_lm files, of the octant replicated over the full sky (``alms_octrep``) or not (``alms``)."""
+    return 'alms_octrep' if replicate_octant else 'alms'
+
+
+CLS_FNAME = 'cls.fits'  # power spectra of the maps of a product
+SHELLS_TABLE_FNAME = 'shells.fits'  # table of the shells
+
+
+def catalog_fname(ibin: int, ishell: int | None = None, format: str = 'fits') -> str:
+    """Return the name of the catalog of a tomographic bin, ``cat_bin{b}.{format}``, or of its part from one shell (``cat_bin{b}_{iii}``)."""
+    return f'cat_bin{ibin}.{format}' if ishell is None else f'cat_bin{ibin}_{ishell:03d}.{format}'
+
+
+def catalog_stat_fname(stat: str, shapes: str = 'shear') -> str:
+    """Return the name of a statistic of the catalogs, ``cat_{stat}.fits`` for the lensing shear, else ``cat_{stat}_{shapes}.fits``.
+
+    Parameters
+    ----------
+    stat : {'cls', '2pt'}
+        Statistic.
+    shapes : {'shear', 'ia', 'shear_plus_ia', 'observed'}, optional
+        Shapes of the shear legs.
+
+    Returns
+    -------
+    str
+    """
+    return f'cat_{stat}.fits' if shapes == 'shear' else f'cat_{stat}_{shapes}.fits'
 
 
 def intermediate_dir(product_dir: str, realization: str | None) -> str:
@@ -124,61 +223,3 @@ def atomic_write(fname: str) -> Iterator[str]:
     finally:
         if os.path.exists(tmp):
             os.remove(tmp)
-
-
-def _plain(value: Any) -> Any:
-    # parameters as plain YAML types (numpy scalars and arrays, tuples, dtypes)
-    if isinstance(value, dict):
-        return {str(k): _plain(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple, np.ndarray)):
-        return [_plain(v) for v in value]
-    if isinstance(value, np.generic):
-        return value.item()
-    if isinstance(value, (np.dtype, type)):
-        return np.dtype(value).name
-    return value
-
-
-def write_config(product_dir: str, product: str, parameters: dict, inputs: list[str] | None = None, realization: str | None = None) -> None:
-    """Write the configuration of a product, or check it against the existing one.
-
-    The configuration (``{product_dir}/config.yaml``) records the kind of product, its parameters,
-    its input products and the code version that first wrote it. Products are made or resumed in
-    place, so an existing configuration with other parameters means that the directory holds a
-    different product: this raises instead of mixing them.
-
-    Parameters
-    ----------
-    product_dir : str
-        Directory of the product.
-    product : str
-        Kind of product (e.g. ``'shells'``, ``'kappa'``, ``'catalogs'``).
-    parameters : dict
-        Parameters defining the product.
-    inputs : list of str or None, optional
-        Directories of the input products.
-    realization : str or None, optional
-        Directory of the realization, relative to which inputs are recorded.
-
-    Raises
-    ------
-    ValueError
-        If the directory already holds a product with other parameters.
-    """
-    config = dict(product=product, parameters=_plain(parameters))
-    fname = os.path.join(product_dir, 'config.yaml')
-
-    # existing product: same kind and parameters
-    if os.path.exists(fname):
-        with open(fname) as f:
-            existing = yaml.safe_load(f)
-        if {k: existing.get(k) for k in config} != config:
-            raise ValueError(f"{product_dir} holds another product (see its config.yaml): use another tag or directory.")
-        return
-
-    # new product, written atomically (several workers may create it at once)
-    config['inputs'] = [os.path.relpath(p, realization) if realization else p for p in (inputs or [])]
-    config['code_version'] = dict(code_version())
-    os.makedirs(product_dir, exist_ok=True)
-    with atomic_write(fname) as tmp, open(tmp, 'w') as f:
-        yaml.safe_dump(config, f, sort_keys=False)

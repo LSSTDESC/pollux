@@ -17,3 +17,8 @@ Utils
    :members:
    :undoc-members:
    :show-inheritance:
+
+.. automodule:: pollux.utils.fits
+   :members:
+   :undoc-members:
+   :show-inheritance:

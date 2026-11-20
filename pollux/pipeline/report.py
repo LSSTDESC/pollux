@@ -15,11 +15,6 @@ import sqlite3
 import numpy as np
 
 
-def _timestamp(value: str | None) -> float | None:
-    """Return the time in seconds of a database date, if any."""
-    return datetime.datetime.fromisoformat(value).timestamp() if value else None
-
-
 def task_table(db: sqlite3.Connection, runs: list[str], min_seconds: float = 5.) -> list[dict]:
     """Return the time, memory and CPU use of each kind of task.
 
@@ -123,3 +118,8 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
+
+def _timestamp(value: str | None) -> float | None:
+    """Return the time in seconds of a database date, if any."""
+    return datetime.datetime.fromisoformat(value).timestamp() if value else None

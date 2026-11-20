@@ -3,7 +3,7 @@
 Conventions for the code of pollux: formatting, documentation, naming, organisation, plots and pipeline tasks. New code should read like the code around it.
 
 ## Formatting and checks
-- Format with [yapf](https://github.com/google/yapf), using the repository's `.style.yapf` (Google style, 160 columns): `yapf -i pollux/*.py pollux/pipeline/*.py`.
+- Format with [yapf](https://github.com/google/yapf), using the repository's `.style.yapf` (Google style, 160 columns): `yapf -i -r pollux`.
 - Keep the code clean under `python -m pyflakes`.
 - Python 3.10 or later, with `from __future__ import annotations` and type hints on public functions and methods.
 
@@ -23,20 +23,31 @@ Conventions for the code of pollux: formatting, documentation, naming, organisat
 ## Naming
 - Methods start with a verb when they act: `compute_`, `construct_`, `predict_`, `generate_`, `load_`, `plot_`. Drop `get_` when the noun is enough (`field_map`, not `get_field_map`).
 - Prefix with `_` everything used only internally, including module-level helpers and numba kernels.
-- Use the same names for the same things across modules: `imap`/`ishell`/`ikappa` for indices, `smooth_Mpc` for comoving smoothing scales, `seed`, `nside`, `ell_factor`, `hspmap` for HealSparse maps.
+- Use the same names for the same things across modules: `imap`/`ishell`/`ikappa`/`ibin` (maps, shells, convergence maps, catalog bins) for indices, `smooth_Mpc` for comoving smoothing scales, `seed`, `nside`, `ell_factor`, `hspmap` for HealSparse maps.
 - Class-level constants in upper case (`FIELDS`, `SMOOTHING_SCALES`).
 - Optional flags of public methods are keyword-only (after `*`).
 
 ## Organisation
-- Order the methods of a class along its workflow:
-  1. construction and iteration;
-  2. making products;
-  3. I/O (`get_fname`, save, load);
-  4. footprint and masks;
-  5. transforms (alms, smoothing);
-  6. tracers and theory;
-  7. statistics, in the order compute, save, load, predict, then plot.
-- Put helpers next to the methods that use them, and group related methods (e.g. the smoothing methods).
+- Order the members of a class as:
+  1. class attributes and constants;
+  2. `__init__`, then the other special methods (`__getstate__`, ...);
+  3. `config()`, for the objects that define products: what goes into their `config.yaml` (`product`, `parameters`,
+     `inputs` for builders and catalogs; their entry in the catalog's parameters for augmentors), extended by
+     subclasses through `super().config()`;
+  4. properties (`property`, `cached_property`);
+  5. the other methods along the workflow (making products; I/O; footprint and masks; transforms; tracers and theory;
+     statistics, in the order compute, save, load, predict, then plot), each public method followed by the private
+     helpers it is the first to use.
+- In a module, public classes and functions come first, and private helpers (module-level functions, numba kernels)
+  at the end.
+- A helper used by one module stays in it, private (`_name`). A helper independent of pollux's objects and useful
+  beyond one module goes to `pollux.utils`, by theme (numerics, sky, binning, FITS tables), public.
+- Statistics are mixins of `pollux.statistics` (`MapStatistics`, `CatalogStatistics`, on a common
+  `TwoPointStatistics` for SACC files and bandpower windows), inherited by the builders and catalogs.
+- Directories and file names come from `pollux.io.layout`, and product configurations (`config.yaml`) from
+  `pollux.io.config`, for the builders, catalogs and `PolluxLoader` alike: never build a product path elsewhere.
+- Objects declare what other objects need from them rather than being searched for: e.g. augmentors have a `kind`
+  (`'shear'`, `'ia'`), from which the catalog sets `shear_augmentor` and `ia_augmentor` once.
 - Define a rule used in several places once, and use it everywhere. For example, `Tracer.effective_smooth_Mpc` gives the smoothing actually applied, both to the maps and to their predictions.
 - Avoid small single-use helpers that clutter a module, and keep public APIs small.
 - Use Python features when they make the code clearer, shorter or safer (`functools.cached_property`, `functools.cache`), not for their own sake. Dataclasses don't suit the builders, whose attributes are set and changed after construction.

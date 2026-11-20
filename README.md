@@ -23,16 +23,16 @@ DESC package to create weak lensing and large-scale structure simulations from N
 
 ## Organisation of the code
 - `reader.py` implements `Reader` objects to read particle data from N-body simulation snapshots, and provides basic lightcone information (particle density, shell binning, etc.)
-- `map_builder.py` implements `MapBuilder` abstract objects with their basic functionalities: I/O, spherical harmonic transforms, visualization.
+- `map_builder.py` implements `MapBuilder` abstract objects with their basic functionalities: I/O, footprints, spherical harmonic transforms, visualization.
 - `shells.py` implements `ShellBuilder` objects (subclass of `MapBuilder`) to generate particle and halo lightcone shells.
 - `lensing.py` implements `LensingBuilder` objects (subclass of `MapBuilder`) to generate lensing maps from lightcone shells. 
 - `baryons.py` implements `BaryonifiedShellBuilder` (subclass of `ShellBuilder`) to baryonify shells.
-- `catalog.py` implements `CatalogGenerator` objects to generate tomographic galaxy catalogs from the lightcone shells and lensing maps, and to measure and predict their statistics.
+- `catalog.py` implements `CatalogGenerator` objects to generate tomographic galaxy catalogs from the lightcone shells and lensing maps.
+- `statistics/` measures and predicts the statistics of the maps (`maps.py`, `MapStatistics`) and catalogs (`catalogs.py`, `CatalogStatistics`): mixins inherited by `MapBuilder` and `CatalogGenerator`, with their plots against theory (`plotting.py`).
 - `ia.py` implements the catalog augmentor of intrinsic alignments (`CatalogAugmentorIA`); the observed shapes (`CatalogAugmentorShear`) are in `catalog.py`.
 - `cosmo.py` contains fixed cosmologies, and the `Tracer` and `Theory` objects for predictions.
-- `plotting.py` plots two-point statistics against theory.
 - `io/` handles the products on disk, without the dependencies of the builders (numpy, healpy, healsparse, pyccl, sacc, astropy and PyYAML, but not NaMaster, TreeCorr, BaryonForge or Parsl): their organisation (`layout.py`: directories, file names, intermediate files and the `config.yaml` of each product), the code version of runs (`code_version.py`), their index (`index.py`, `python -m pollux.io.index ROOT`) and `PolluxLoader` to read them (`loader.py`).
-- `utils/` contains helper functions by theme: numerics, sky (coordinates, maps of points, masks) and NaMaster binnings.
+- `utils/` contains helper functions by theme: numerics, sky (coordinates, maps of points, masks), NaMaster binnings and FITS tables.
 - `pipeline/` contains the Parsl tasks and execution configuration, see the documentation.
 
 ## Installation

@@ -12,7 +12,7 @@ Development
 - Baryon-corrected matter power spectrum with the profiles and mass cut of the baryonified shells.
 - Parsl tasks and configuration in :mod:`pollux.pipeline`, for runs by several users from a shared space.
 - Record of the code version and environment of runs, and commit in catalog headers.
-- Plotting module (:mod:`pollux.plotting`) shared by map builders and catalogs.
+- Plotting module (:mod:`pollux.statistics.plotting`) shared by map builders and catalogs.
 - Type hints and docstrings throughout.
 
 Version 0.1

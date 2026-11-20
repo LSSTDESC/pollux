@@ -10,10 +10,10 @@ import healsparse as hsp
 import numpy as np
 import pyccl
 import sacc
-import yaml
 from astropy.io import fits
 
 from . import layout
+from .config import read_config
 
 logger = logging.getLogger(__name__)
 
@@ -56,19 +56,18 @@ class PolluxLoader:
         self.nz = nz
         self.catalog_tag = catalog_tag
         self.matter_dir = layout.matter_dir(realization_dir, baryon_tag)
-        self.shells_dir = os.path.join(self.matter_dir, 'shells')
+        self.shells_dir = layout.shells_dir(self.matter_dir)
 
         logger.info("*** PolluxLoader ***")
         logger.info("  - Path = %s.", self.matter_dir)
 
         # simulation, cosmology and table of the shells (config.yaml and shells.fits of the shells)
-        with open(os.path.join(self.shells_dir, 'config.yaml')) as f:
-            parameters = yaml.safe_load(f)['parameters']
+        parameters = read_config(self.shells_dir)['parameters']
         self.simulation = parameters['simulation']
         self.nside = parameters['nside']
         self.nshells = parameters['nshells']
         self.cosmo = pyccl.Cosmology(**parameters['cosmology'])
-        self.shell_info = fits.getdata(os.path.join(self.shells_dir, 'shells.fits'))
+        self.shell_info = fits.getdata(os.path.join(self.shells_dir, layout.SHELLS_TABLE_FNAME))
         logger.info("  - Simulation = %s, nside = %d, %d shells.", self.simulation['path'], self.nside, self.nshells)
         logger.info("  - Cosmology = %s.", self.cosmo)
 
@@ -85,18 +84,18 @@ class PolluxLoader:
         """Return the directory of the convergence and shear maps of the n(z)."""
         if self.nz is None:
             raise ValueError('nz must be set to reach the convergence, shear and catalog products.')
-        return os.path.join(self.matter_dir, 'kappa', self.nz)
+        return layout.kappa_dir(self.matter_dir, self.nz)
 
     def _kappa_fname(self, what: str, ikappa: int, smooth_Mpc: float | None = None) -> str:
         """Return the file of a convergence or shear map (``kappa_bin{b}``, or ``kappa_{iii}`` for snapshots)."""
-        index = f'{ikappa:03d}' if self.nz == 'snapshots' else f'bin{ikappa}'
-        folder = self._kappa_dir() if smooth_Mpc is None else os.path.join(self._kappa_dir(), 'smoothed', f'{smooth_Mpc:g}Mpc')
-        return os.path.join(folder, f'{what}_{index}.fits')
+        index = (layout.SHELL_INDEX if self.nz == 'snapshots' else layout.BIN_INDEX).format(ikappa)
+        folder = self._kappa_dir() if smooth_Mpc is None else layout.smoothed_dir(os.path.join(self._kappa_dir(), 'smoothed'), smooth_Mpc)
+        return os.path.join(folder, layout.map_fname(what, index))
 
     def _shell_fname(self, what: str, ishell: int, smooth_Mpc: float | None = None) -> str:
         """Return the file of a shell map, smoothed maps being by scale in ``smoothed/{s}Mpc``."""
-        folder = self.shells_dir if smooth_Mpc is None else os.path.join(self.matter_dir, 'smoothed', f'{smooth_Mpc:g}Mpc')
-        return os.path.join(folder, f'{what}_{ishell:03d}.fits')
+        folder = self.shells_dir if smooth_Mpc is None else layout.smoothed_dir(os.path.join(self.matter_dir, 'smoothed'), smooth_Mpc)
+        return os.path.join(folder, layout.map_fname(what, layout.SHELL_INDEX.format(ishell)))
 
     # ------------------------------------------------------------------
     # Shells
@@ -136,7 +135,7 @@ class PolluxLoader:
             a_lm (healpy ordering).
         """
         folder = layout.intermediate_dir(self.shells_dir, self.realization_dir)
-        return hp.read_alm(os.path.join(folder, f'{_alms_what(replicate_octant)}_{ishell:03d}.fits'))
+        return hp.read_alm(os.path.join(folder, layout.map_fname(layout.alms_what(replicate_octant), layout.SHELL_INDEX.format(ishell))))
 
     def load_shell_cls(self) -> sacc.Sacc:
         """Load the measured angular power spectra of the shells.
@@ -145,7 +144,7 @@ class PolluxLoader:
         -------
         sacc.Sacc
         """
-        return sacc.Sacc.load_fits(os.path.join(self.shells_dir, 'cls.fits'))
+        return sacc.Sacc.load_fits(os.path.join(self.shells_dir, layout.CLS_FNAME))
 
     def load_density(self, ishell: int, smooth_Mpc: float | None = None) -> hsp.HealSparseMap:
         """Load the density contrast of one shell.
@@ -201,7 +200,7 @@ class PolluxLoader:
             Concatenated arrays by column (``'ihaloes'``, ``'ra'``, ``'dec'``, ``'chi'``, ``'z'``,
             and the extra columns saved at construction).
         """
-        fname = os.path.join(self.realization_dir, 'halos', f'catalog_{ishell:03d}.fits')
+        fname = os.path.join(layout.halos_dir(self.realization_dir), layout.map_fname('catalog', layout.SHELL_INDEX.format(ishell)))
         with fits.open(fname) as hdul:
             columns = hdul[1].columns.names
             return {k: np.concatenate([hdu.data[k] for hdu in hdul[1:]]) for k in columns}
@@ -241,7 +240,7 @@ class PolluxLoader:
         ndarray
             a_lm (healpy ordering).
         """
-        fname = os.path.basename(self._kappa_fname(_alms_what(replicate_octant), ikappa))
+        fname = os.path.basename(self._kappa_fname(layout.alms_what(replicate_octant), ikappa))
         return hp.read_alm(os.path.join(layout.intermediate_dir(self._kappa_dir(), self.realization_dir), fname))
 
     def load_shear(self, ikappa: int, smooth_Mpc: float | None = None) -> tuple[hsp.HealSparseMap, hsp.HealSparseMap]:
@@ -268,7 +267,7 @@ class PolluxLoader:
         -------
         sacc.Sacc
         """
-        return sacc.Sacc.load_fits(os.path.join(self._kappa_dir(), 'cls.fits'))
+        return sacc.Sacc.load_fits(os.path.join(self._kappa_dir(), layout.CLS_FNAME))
 
     # ------------------------------------------------------------------
     # Source catalogs
@@ -276,7 +275,7 @@ class PolluxLoader:
 
     def catalog_dir(self) -> str:
         """Return the directory of the catalogs (``catalogs/{nz}/{catalog_tag}``)."""
-        return os.path.join(self.matter_dir, 'catalogs', self.nz, self.catalog_tag or 'default')
+        return layout.catalog_dir(self.matter_dir, self.nz, self.catalog_tag)
 
     def load_catalog(self, ibin: int) -> fits.HDUList:
         """Open the source catalog of one tomographic bin.
@@ -290,7 +289,7 @@ class PolluxLoader:
         -------
         astropy.io.fits.HDUList
         """
-        return fits.open(os.path.join(self.catalog_dir(), f'cat_bin{ibin}.fits'))
+        return fits.open(os.path.join(self.catalog_dir(), layout.catalog_fname(ibin)))
 
     def load_catalog_2pt(self, shapes: str = 'shear') -> sacc.Sacc:
         """Load the measured two-point functions of the catalogs.
@@ -306,18 +305,18 @@ class PolluxLoader:
         -------
         sacc.Sacc
         """
-        return sacc.Sacc.load_fits(os.path.join(self.catalog_dir(), 'cat_2pt.fits' if shapes == 'shear' else f'cat_2pt_{shapes}.fits'))
+        return sacc.Sacc.load_fits(os.path.join(self.catalog_dir(), layout.catalog_stat_fname('2pt', shapes)))
 
-    def load_catalog_cls(self) -> sacc.Sacc:
+    def load_catalog_cls(self, shapes: str = 'shear') -> sacc.Sacc:
         """Load the measured angular power spectra of the catalogs.
+
+        Parameters
+        ----------
+        shapes : {'shear', 'ia', 'shear_plus_ia', 'observed'}, optional
+            Shapes of the shear legs, as in :meth:`load_catalog_2pt` (``cat_cls[_{shapes}].fits``).
 
         Returns
         -------
         sacc.Sacc
         """
-        return sacc.Sacc.load_fits(os.path.join(self.catalog_dir(), 'cat_cls.fits'))
-
-
-def _alms_what(replicate_octant: bool) -> str:
-    """Return the name of the a_lm files, of the octant replicated over the full sky or not (as ``MapBuilder``)."""
-    return 'alms_octrep' if replicate_octant else 'alms'
+        return sacc.Sacc.load_fits(os.path.join(self.catalog_dir(), layout.catalog_stat_fname('cls', shapes)))

@@ -82,24 +82,6 @@ def spin2_factor(lmax: int) -> np.ndarray:
     return fl
 
 
-@numba.njit(parallel=False)  # this operation does NOT support parallelization!
-def _add_at(a: np.ndarray, index: np.ndarray, b: np.ndarray) -> None:
-    """Numba helper: add values ``b`` to ``a`` at given indices.
-
-    Parameters
-    ----------
-    a : ndarray
-        1D array modified in-place.
-    index : ndarray of int
-        Indices where to add.
-    b : ndarray
-        Values added elementwise: ``a[index[i]] += b[i]``.
-    """
-    n = len(b)
-    for i in numba.prange(n):
-        a[index[i]] += b[i]
-
-
 def make_healpix_map(
         ra: np.ndarray,
         dec: np.ndarray,
@@ -343,3 +325,54 @@ def make_mask_radec_cuts(
     phmin, phmax = min(phs), max(phs)
     mask[np.where((th < thmax - eps) & (th > thmin + eps) & (ph > phmin + eps) & (ph < phmax - eps))[0]] = dtype(1)
     return mask
+
+
+def generate_radec_in_pix(nside: int, ipix: np.ndarray, rng: np.random.Generator, log2nside_high: int = 29) -> tuple[np.ndarray, np.ndarray]:
+    """Sample random (RA, DEC) coordinates uniformly within Healpix pixels.
+
+    This uses an approximation: pixels are upsampled to a very high nside
+    (``2**log2nside_high``) and one sub-pixel is selected uniformly at random.
+    See https://astro.pages.rwth-aachen.de/astrotools/_modules/healpytools.html#rand_vec_from_map.
+
+    Parameters
+    ----------
+    nside : int
+        Target Healpix nside of the input pixel indices.
+    ipix : array_like of int
+        Pixel indices at resolution ``nside`` (assumed NESTED).
+    rng : numpy.random.Generator
+        Random number generator.
+    log2nside_high : int, optional
+        Log2 of the high resolution nside used internally. Default is 29.
+
+    Returns
+    -------
+    ra, dec : ndarray
+        Longitudes and latitudes in degrees (Healpy ``lonlat=True`` convention).
+    """
+    order = hp.nside2order(nside)
+    nside_high = 2**log2nside_high
+    n_up = log2nside_high - order
+
+    ipix_high = ipix * (4**n_up)
+    ipix_high += rng.integers(0, 4**n_up, size=np.size(ipix))
+
+    return hp.pix2ang(nside_high, ipix_high, nest=True, lonlat=True)  # ra, dec
+
+
+@numba.njit(parallel=False)  # this operation does NOT support parallelization!
+def _add_at(a: np.ndarray, index: np.ndarray, b: np.ndarray) -> None:
+    """Numba helper: add values ``b`` to ``a`` at given indices.
+
+    Parameters
+    ----------
+    a : ndarray
+        1D array modified in-place.
+    index : ndarray of int
+        Indices where to add.
+    b : ndarray
+        Values added elementwise: ``a[index[i]] += b[i]``.
+    """
+    n = len(b)
+    for i in numba.prange(n):
+        a[index[i]] += b[i]

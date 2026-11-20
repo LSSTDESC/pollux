@@ -13,8 +13,8 @@ The Pollux package is organized into the following core modules:
    modules/baryons
    modules/catalog
    modules/ia
+   modules/statistics
    modules/cosmo
-   modules/plotting
    modules/utils
    modules/io
    modules/pipeline
@@ -40,20 +40,21 @@ Module Descriptions
 **Catalog** (:mod:`pollux.catalog`)
    Generates tomographic galaxy catalogs from lightcone shells using uniform or clustered sampling methods, measures their statistics and predicts them.
 
+**Statistics** (:mod:`pollux.statistics`)
+   Power spectra and moments of the maps, and two-point statistics of the catalogs, with their predictions and plots
+   (:mod:`pollux.statistics.plotting`): mixins inherited by the map builders and catalogs.
+
 **Intrinsic alignments** (:mod:`pollux.ia`)
    Catalog augmentor adding intrinsic alignments to the galaxies, from the tidal field of their shell.
 
 **Utils** (:mod:`pollux.utils`)
-   Helper functions, by theme: numerics (integration, grids, sampling), sky (coordinates, maps of points, masks) and NaMaster binnings.
+   Helper functions, by theme: numerics (integration, grids, sampling), sky (coordinates, maps of points, masks), NaMaster binnings and FITS tables (reading chosen rows).
 
 **Cosmology** (:mod:`pollux.cosmo`)
    Fixed cosmologies, tracers of observable fields and their theory predictions.
 
-**Plotting** (:mod:`pollux.plotting`)
-   Plots of two-point statistics of bin pairs against theory.
-
 **I/O** (:mod:`pollux.io`)
-   Products on disk, without the dependencies of the builders (NaMaster, TreeCorr, BaryonForge, Parsl): their layout and ``config.yaml`` (:mod:`pollux.io.layout`), the code
+   Products on disk, without the dependencies of the builders (NaMaster, TreeCorr, BaryonForge, Parsl): their layout (:mod:`pollux.io.layout`) and ``config.yaml`` (:mod:`pollux.io.config`), the code
    version of runs (:mod:`pollux.io.code_version`), their index (``python -m pollux.io.index ROOT``) and loader
    (:class:`pollux.io.PolluxLoader <pollux.io.loader.PolluxLoader>`).
 

@@ -29,6 +29,7 @@ from parallel_sort import argsort as pargsort
 from collections.abc import Iterable
 
 from .io import layout
+from .io.config import write_config
 from .cosmo import Tracer
 from .map_builder import MapBuilder, MapSum
 from .utils.numerics import arange_endpoint, quad, split_bins
@@ -163,10 +164,10 @@ class ShellBuilder(MapBuilder):
             if save_dir is not None:
                 raise ValueError('Provide either root_dir or save_dir, not both.')
             realization = layout.realization_dir(root_dir, nside, seed, kwargs.get('padding_deg') if mask is not None else None)
-            save_dir = os.path.join(realization, 'halos') if halos else os.path.join(layout.matter_dir(realization), 'shells')
+            save_dir = layout.halos_dir(realization) if halos else layout.shells_dir(layout.matter_dir(realization))
             kwargs.setdefault('realization_dir', realization)
             kwargs.setdefault('smoothed_dir', os.path.join(os.path.dirname(save_dir), 'smoothed'))
-            kwargs.setdefault('wsp_dir', os.path.join(root_dir, f'nside{nside}'))
+            kwargs.setdefault('wsp_dir', layout.footprint_dir(root_dir, nside))
         self.matter_dir = os.path.dirname(save_dir)  # parent of the products made from these shells (kappa, catalogs)
         self.group_isometries = group_isometries
 
@@ -256,22 +257,19 @@ class ShellBuilder(MapBuilder):
 
         # configuration of the products (checked against an existing one), then the table of the shells
         # (a DummyReader has no shell edges)
-        layout.write_config(self.save_dir, *self._config(), realization=self.realization_dir)
+        write_config(self.save_dir, self.config(), realization=self.realization_dir)
         if not isinstance(reader, DummyReader):
             self.save_info()
 
-    def _config(self) -> tuple[str, dict, list[str]]:
-        """Return the kind, parameters and inputs of the products, for their ``config.yaml`` (:func:`pollux.io.layout.write_config`).
+    def config(self) -> dict:
+        """Return the configuration of the products, for their ``config.yaml`` (:func:`pollux.io.config.write_config`).
 
         Returns
         -------
-        product : str
-            ``'halos'`` or ``'shells'``.
-        parameters : dict
-            Simulation (path, kind, box, particles, snapshots), cosmology (CCL parameters), resolution,
-            footprint and isometries of the shells.
-        inputs : list of str
-            Input product directories (none).
+        dict
+            ``product`` (``'halos'`` or ``'shells'``), ``parameters`` (simulation: path, kind, box, particles,
+            snapshots; cosmology: CCL parameters; resolution, footprint and isometries of the shells) and
+            ``inputs`` (none).
         """
         reader = self.reader
         simulation = dict(
@@ -307,7 +305,7 @@ class ShellBuilder(MapBuilder):
             dtype=self.dtype,
             shell_edges_match=getattr(self, 'shell_edges_match', None),  # None for SnapshotInterpShellBuilder
         )
-        return ('halos' if self.reader.kind.endswith('halo') else 'shells'), parameters, []
+        return dict(product='halos' if self.reader.kind.endswith('halo') else 'shells', parameters=parameters, inputs=[])
 
     @cached_property
     def shell_edges_comoving_distance(self) -> np.ndarray:
@@ -355,6 +353,26 @@ class ShellBuilder(MapBuilder):
 
         else:
             raise ValueError
+
+    @cached_property
+    def valid_replicas(self) -> list:
+        """Valid replica indices for each (snapshot, sub-volume) job.
+
+        Reads only box edges (no particle data) and calls
+        :meth:`_valid_replicas_sub` to determine which periodic-box replicas
+        overlap each shell.
+
+        Returns
+        -------
+        list
+            List of tuples ``(ijob, replicates)`` where ``replicates`` is a list
+            of (ix, iy, iz) replica indices that may overlap the shell.
+        """
+        replicates = []
+        for ijob in trange(self.reader.njobs, desc='[valid_replicas]'):
+            ishell, isub = self.reader.job_args(ijob)
+            replicates.append((ijob, self._valid_replicas_sub(ishell, isub)))
+        return replicates
 
     def mean_z_volume(self, ishell: int) -> float:
         """Compute the volume-weighted mean redshift of a shell.
@@ -407,10 +425,10 @@ class ShellBuilder(MapBuilder):
     def save_info(self) -> None:
         """Save the table of the shells (:meth:`info_table`) to ``shells.fits``, unless it exists.
 
-        The table follows from the configuration of the products, which :func:`pollux.io.layout.write_config`
+        The table follows from the configuration of the products, which :func:`pollux.io.config.write_config`
         checks against the existing one.
         """
-        fname = os.path.join(self.save_dir, 'shells.fits')
+        fname = os.path.join(self.save_dir, layout.SHELLS_TABLE_FNAME)
         if os.path.exists(fname):
             return
 
@@ -515,25 +533,6 @@ class ShellBuilder(MapBuilder):
         shell_volume = 4. / 3. * np.pi * (chi_edges[ishell + 1]**3 - chi_edges[ishell]**3) * self.fsky
 
         return shell_volume / box_volume
-
-    def get_valid_replicas(self) -> list:
-        """Return valid replica indices for each (snapshot, sub-volume) job.
-
-        Reads only box edges (no particle data) and calls
-        :meth:`_get_valid_replicas` to determine which periodic-box replicas
-        overlap each shell.
-
-        Returns
-        -------
-        list
-            List of tuples ``(ijob, replicates)`` where ``replicates`` is a list
-            of (ix, iy, iz) replica indices that may overlap the shell.
-        """
-        replicates = []
-        for ijob in trange(self.reader.njobs, desc='[get_valid_replicas]'):
-            ishell, isub = self.reader.job_args(ijob)
-            replicates.append((ijob, self._valid_replicas_sub(ishell, isub)))
-        return replicates
 
     def _valid_replicas_sub(self, ishell: int, isub: int) -> list[tuple]:
         """Return replica indices (ix, iy, iz) that may overlap a given shell.
@@ -905,13 +904,16 @@ class ShellBuilder(MapBuilder):
         logger.debug("Found %d particles in the shell.", int(c.sum(dtype=np.int64)))
         return self._make_hspmap(hp.ring2nest(self.nside, uipix), c, nest=True)
 
-    def field_hspmap(self, ishell: int) -> hsp.HealSparseMap:
+    def field_hspmap(self, ishell: int, smooth_Mpc: float | None = None) -> hsp.HealSparseMap:
         """Return the density contrast of one shell as a HealSparse map.
 
         Parameters
         ----------
         ishell : int
             Shell index.
+        smooth_Mpc : float or None, optional
+            Smoothing scale in Mpc: the smoothed density saved by :meth:`compute_tidal_tensor_maps` or
+            :meth:`~pollux.map_builder.MapBuilder.compute_maps_from_alms`. Default is the unsmoothed density.
 
         Returns
         -------
@@ -920,6 +922,8 @@ class ShellBuilder(MapBuilder):
             ``shell_count / pixel_density - 1`` on pixels containing particles, and
             -1 on empty pixels.
         """
+        if smooth_Mpc is not None:
+            return self.load_maps(ishell, what=self.smoothed_field_what, smooth_Mpc=smooth_Mpc)
         shell = self.load_maps(ishell)
         _, ipix = self.get_mask(nest=True, return_ipix=True, padded=True)
         # -1 (no particle) on the padded footprint, then the density contrast where there are particles

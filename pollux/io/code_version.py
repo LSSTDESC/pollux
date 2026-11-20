@@ -17,19 +17,6 @@ import yaml
 logger = logging.getLogger(__name__)
 
 
-def _git(*args: str) -> str | None:
-    """Return the output of a git command in the repository of this package, or None if it fails."""
-    try:
-        return subprocess.run(['git', '-c', 'safe.directory=*', *args],
-                              cwd=os.path.dirname(os.path.abspath(__file__)),
-                              capture_output=True,
-                              text=True,
-                              check=True,
-                              timeout=60).stdout
-    except (OSError, subprocess.SubprocessError):
-        return None
-
-
 @cache
 def code_version() -> dict[str, str | bool | None]:
     """Return the git version of the running code.
@@ -102,3 +89,16 @@ def save_code_version(out_dir: str, files: Iterable[str] = (), require_clean: bo
         shutil.copy(fname, folder)
     logger.info("Saved code version to %s.", folder)
     return folder
+
+
+def _git(*args: str) -> str | None:
+    """Return the output of a git command in the repository of this package, or None if it fails."""
+    try:
+        return subprocess.run(['git', '-c', 'safe.directory=*', *args],
+                              cwd=os.path.dirname(os.path.abspath(__file__)),
+                              capture_output=True,
+                              text=True,
+                              check=True,
+                              timeout=60).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None

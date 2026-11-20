@@ -54,7 +54,7 @@ Module Descriptions
    Fixed cosmologies, tracers of observable fields and their theory predictions.
 
 **I/O** (:mod:`pollux.io`)
-   Products on disk, without the dependencies of the builders (NaMaster, TreeCorr, BaryonForge, Parsl): their layout (:mod:`pollux.io.layout`) and ``config.yaml`` (:mod:`pollux.io.config`), the code
+   Products on disk, without the dependencies of the builders (NaMaster, TreeCorr, BaryonForge, Parsl): their files (:class:`pollux.io.PolluxIO <pollux.io.layout.PolluxIO>`, :mod:`pollux.io.layout`) and ``config.yaml`` (:mod:`pollux.io.config`), the code
    version of runs (:mod:`pollux.io.code_version`), their index (``python -m pollux.io.index ROOT``) and loader
    (:class:`pollux.io.PolluxLoader <pollux.io.loader.PolluxLoader>`).
 

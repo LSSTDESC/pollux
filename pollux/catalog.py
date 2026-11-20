@@ -20,8 +20,6 @@ import pymaster as nmt
 import fitsio
 from astropy.io import fits
 
-from .io import layout
-from .io.config import write_config
 from .io.code_version import code_version
 from .utils.numerics import quad, sample_pdf
 from .utils.fits import read_fits_rows
@@ -48,7 +46,7 @@ class CatalogGenerator(CatalogStatistics, ABC):
         Lensing map builder used to define tomographic bins and provide maps to
         interpolate.
     tag : str or None, optional
-        Tag of the catalogs: they go to ``catalogs/{nz}/{tag}/`` next to the maps (see :mod:`pollux.io.layout`), ``default`` if None.
+        Tag of the catalogs: they go to ``catalogs/{nz}/{tag}/`` next to the maps (see :class:`pollux.io.layout.PolluxIO`), ``default`` if None.
     nbar_input : float or array-like
         Galaxy surface density in gal/arcmin^2 (required, keyword only). If a float, the same surface
         density is used for all tomographic bins; if an array-like, it must
@@ -136,11 +134,8 @@ class CatalogGenerator(CatalogStatistics, ABC):
         self.shear_augmentor = by_kind.get('shear')
         self.ia_augmentor = by_kind.get('ia')
 
-        # catalogs by n(z) and tag, next to the maps they come from (see pollux.io.layout)
-        shell_builder = self.lensing.shell_builder
-        self._catalog_dir = layout.catalog_dir(shell_builder.matter_dir, os.path.basename(lensing.save_dir), tag)
-        self._intermediate_dir = layout.intermediate_dir(self._catalog_dir, shell_builder.realization_dir)
-        os.makedirs(self._catalog_dir, exist_ok=True)
+        # catalogs by n(z) and tag, next to the maps they come from
+        self.io = lensing.io.with_options(tag=tag)
 
         # Compute derived attributes
         self.cosmo = self.lensing.cosmo
@@ -182,10 +177,10 @@ class CatalogGenerator(CatalogStatistics, ABC):
         logger.info("  - Lensing class = %s.", self.lensing.__class__.__name__)
         logger.info("  - Shell builder class = %s.", self.lensing.shell_builder.__class__.__name__)
         logger.info("  - Number of catalogs = %d.", self.ncats)
-        logger.info("  - Catalogs saved to %s.", self._catalog_dir)
+        logger.info("  - Catalogs saved to %s.", self.io.dir('catalogs'))
 
         # configuration of the catalogs (checked against an existing one), before any product is read or written
-        write_config(self._catalog_dir, self.config(), realization=self.lensing.shell_builder.realization_dir)
+        self.io.write_config('catalogs', self.config())
 
     def config(self) -> dict:
         """Return the configuration of the catalogs, for their ``config.yaml`` (:func:`pollux.io.config.write_config`).
@@ -209,7 +204,7 @@ class CatalogGenerator(CatalogStatistics, ABC):
             smoothing=self.smoothing,
             augmentors=augmentors,
         )
-        inputs = [self.lensing.save_dir, self.snap_lensing.save_dir, shell_builder.save_dir, shell_builder.smoothed_dir]
+        inputs = [self.lensing.save_dir, self.snap_lensing.save_dir, shell_builder.save_dir, shell_builder.io.dir('smoothed')]
         return dict(product='catalogs', parameters=parameters, inputs=inputs)
 
     @classmethod
@@ -457,7 +452,7 @@ class CatalogGenerator(CatalogStatistics, ABC):
         for augmentor in self.augmentors:
             columns += augmentor.new_columns
         if ishell is not None:
-            os.makedirs(os.path.dirname(self.get_fname(0, ishell=ishell)), exist_ok=True)
+            os.makedirs(os.path.dirname(self.path(0, ishell=ishell)), exist_ok=True)
 
         for ibin in self.lensing.tqdm(ibins, desc="[generate] saving", leave=False):
 
@@ -474,10 +469,7 @@ class CatalogGenerator(CatalogStatistics, ABC):
 
             hdul = [fits.PrimaryHDU(), fits.BinTableHDU.from_columns([ra, dec, z, chi] + interp_colums, header)]
 
-            fname = self.get_fname(ibin, format='fits', ishell=ishell)
-            with layout.atomic_write(fname) as tmp:
-                fits.HDUList(hdul).writeto(tmp, overwrite=True)
-            logger.debug("Saved to file %s.", fname)
+            self.io.write_table(self.path(ibin, ext='fits', ishell=ishell), hdul)
 
     def combine_shells(self, ibins: int | Iterable[int] | None = None) -> None:
         """Concatenate the per-shell partial catalogs into one catalog per bin.
@@ -494,15 +486,12 @@ class CatalogGenerator(CatalogStatistics, ABC):
         all shells at once.
         """
         for ibin in self.lensing.tqdm(ibins, desc="[combine_shells]", leave=False):
-            parts = [fits.getdata(self.get_fname(ibin, ishell=ishell), 1) for ishell in range(self.nshells)]
+            parts = [fits.getdata(self.path(ibin, ishell=ishell), 1) for ishell in range(self.nshells)]
             header = fits.Header()
             for k, v in self.header_dict.items():
                 header[k] = v
             hdul = [fits.PrimaryHDU(), fits.BinTableHDU(data=np.concatenate(parts), header=header)]
-            fname = self.get_fname(ibin)
-            with layout.atomic_write(fname) as tmp:
-                fits.HDUList(hdul).writeto(tmp, overwrite=True)
-            logger.debug("Saved to file %s.", fname)
+            self.io.write_table(self.path(ibin), hdul)
 
     def _generate_z(self, catalog: dict[int, dict[str, np.ndarray]], ibin: int) -> None:
         """Draw redshifts from the tracer n(z) via inverse-CDF sampling.
@@ -544,14 +533,14 @@ class CatalogGenerator(CatalogStatistics, ABC):
         """
         return np.random.default_rng([self.lensing.shell_builder.seed, stream, ibin, ishell + 1])
 
-    def get_fname(self, ibin: int, format: str = 'fits', ishell: int | None = None) -> str:
+    def path(self, ibin: int, ext: str = 'fits', ishell: int | None = None) -> str:
         """Return the path for the saved catalog of one tomographic bin.
 
         Parameters
         ----------
         ibin : int
             Tomographic-bin index.
-        format : str, optional
+        ext : str, optional
             File extension without the leading dot. Default is ``'fits'``.
         ishell : int or None, optional
             If given, path of the partial catalog of shell ``ishell``.
@@ -559,13 +548,13 @@ class CatalogGenerator(CatalogStatistics, ABC):
         Returns
         -------
         str
-            ``{catalog_dir}/cat_bin{ibin}.{format}``, with ``catalog_dir`` the
+            ``{catalog_dir}/cat_bin{ibin}.{ext}``, with ``catalog_dir`` the
             ``catalogs/{nz}/{tag}`` directory of the maps' products (see :mod:`pollux.io.layout`), or
-            ``{intermediate}/parts/cat_bin{ibin}_{ishell:03d}.{format}`` for a partial catalog.
+            ``{intermediate}/parts/cat_bin{ibin}_{ishell:03d}.{ext}`` for a partial catalog.
         """
         if ishell is None:
-            return os.path.join(self._catalog_dir, layout.catalog_fname(ibin, format=format))
-        return os.path.join(self._intermediate_dir, 'parts', layout.catalog_fname(ibin, ishell, format=format))
+            return self.io.path('catalogs', 'cat', f'bin{ibin}', ext=ext)
+        return self.io.path('catalogs', 'cat', f'bin{ibin}', f'{ishell:03d}', ext=ext, intermediate=True, folder='parts')
 
     def load_catalogs(
             self,
@@ -618,7 +607,7 @@ class CatalogGenerator(CatalogStatistics, ABC):
         headers = {}
         tables = {}
         for ibin in self.lensing.tqdm(ibins, desc="[load_catalogs]"):
-            fname = self.get_fname(ibin, format='fits')
+            fname = self.path(ibin, ext='fits')
             headers[ibin] = fits.getheader(fname, ext=1)
             if subsample is None:
                 table = fitsio.read(fname, ext=1, columns=columns)
@@ -660,7 +649,7 @@ class CatalogUniform(CatalogGenerator):
     lensing : LensingBuilder
         Lensing map builder.
     tag : str or None, optional
-        Tag of the catalogs: they go to ``catalogs/{nz}/{tag}/`` next to the maps (see :mod:`pollux.io.layout`), ``default`` if None.
+        Tag of the catalogs: they go to ``catalogs/{nz}/{tag}/`` next to the maps (see :class:`pollux.io.layout.PolluxIO`), ``default`` if None.
     nbar_input : float or array-like
         Galaxy surface density in gal/arcmin^2, per bin or for all (required, keyword only).
     interp_fields, interp_method, smooth_fields, smooth_Mpc
@@ -722,7 +711,7 @@ class CatalogClustered(CatalogGenerator):
     lensing : LensingBuilder
         Lensing map builder.
     tag : str or None, optional
-        Tag of the catalogs: they go to ``catalogs/{nz}/{tag}/`` next to the maps (see :mod:`pollux.io.layout`), ``default`` if None.
+        Tag of the catalogs: they go to ``catalogs/{nz}/{tag}/`` next to the maps (see :class:`pollux.io.layout.PolluxIO`), ``default`` if None.
     nbar_input : float or array-like
         Galaxy surface density in gal/arcmin^2, per bin or for all (required, keyword only).
     bias : float or array-like, optional
@@ -863,7 +852,7 @@ class CatalogClusteredMultinomial(CatalogClustered):
     lensing : LensingBuilder
         Lensing map builder.
     tag : str or None, optional
-        Tag of the catalogs: they go to ``catalogs/{nz}/{tag}/`` next to the maps (see :mod:`pollux.io.layout`), ``default`` if None.
+        Tag of the catalogs: they go to ``catalogs/{nz}/{tag}/`` next to the maps (see :class:`pollux.io.layout.PolluxIO`), ``default`` if None.
     nbar_input : float or array-like
         Galaxy surface density in gal/arcmin^2, per bin or for all (required, keyword only).
     bias, bias_model : optional
@@ -950,7 +939,7 @@ class CatalogClusteredPoisson(CatalogClustered):
     lensing : LensingBuilder
         Lensing map builder.
     tag : str or None, optional
-        Tag of the catalogs: they go to ``catalogs/{nz}/{tag}/`` next to the maps (see :mod:`pollux.io.layout`), ``default`` if None.
+        Tag of the catalogs: they go to ``catalogs/{nz}/{tag}/`` next to the maps (see :class:`pollux.io.layout.PolluxIO`), ``default`` if None.
     nbar_input : float or array-like
         Galaxy surface density in gal/arcmin^2, per bin or for all (required, keyword only).
     bias, bias_model : optional

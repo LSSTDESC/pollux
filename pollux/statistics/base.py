@@ -10,7 +10,7 @@ from typing import Any, Callable
 import numpy as np
 import sacc
 
-from ..io import layout
+from ..io.layout import PolluxIO
 
 logger = logging.getLogger(__name__)
 
@@ -73,9 +73,7 @@ class TwoPointStatistics(ABC):
         if errors is not None:
             # same order as the data points added above
             s.add_covariance(np.diag(np.concatenate([errors[data_type][ij]**2 for data_type, pairs in values.items() for ij in pairs])))
-        with layout.atomic_write(fname) as tmp:
-            s.save_fits(tmp, overwrite=True)
-        logger.debug("Saved to file %s.", fname)
+        PolluxIO.write_sacc(fname, s)
         return fname
 
     @abstractmethod
@@ -108,7 +106,7 @@ class TwoPointStatistics(ABC):
             The SACC object, or ``(coords, values[, errors])``, each ``{data_type: {(i, j): array}}``,
             with ``(i, j)`` the indices of the tracer names.
         """
-        s = sacc.Sacc.load_fits(fname)
+        s = PolluxIO.read_sacc(fname)
         logger.debug("Found and loaded file at %s.", fname)
         if not return_dict:
             return s
@@ -147,9 +145,8 @@ class TwoPointStatistics(ABC):
         """
         fname = wsp_fname.replace('.wsp', '_bpws.npy')
         if not os.path.exists(fname):
-            with layout.atomic_write(fname) as tmp:
-                np.save(tmp, wsp().get_bandpower_windows())
-        return np.load(fname)
+            PolluxIO.write_npy(fname, wsp().get_bandpower_windows())
+        return PolluxIO.read_npy(fname)
 
 
 def _tracer_index(name: str) -> int:

@@ -499,11 +499,6 @@ class HACCReader(Reader):
         nsub = 16 if self.group_along_x else 64
         super().__init__(cosmo, "hacc", "Mpc_over_h", nparticles, zsnapshots, snap_sub_zmax, nsub, dtype=dtype)
 
-    @property
-    def boxsize(self) -> float:
-        """Simulation box side length in Mpc."""
-        return self.boxsize_h / self.cosmo["h"]
-
     def read_sub(
         self,
         isnapshot: int,
@@ -582,6 +577,11 @@ class HACCReader(Reader):
         if len(extra_variables) > 0:
             return xyz.astype(self.dtype), box_edges.astype(self.dtype), {k: np.concatenate(out[k]) for k in extra_variables}
         return xyz.astype(self.dtype), box_edges.astype(self.dtype)
+
+    @property
+    def boxsize(self) -> float:
+        """Simulation box side length in Mpc."""
+        return self.boxsize_h / self.cosmo["h"]
 
     def _get_name(self, step: int, isub: int) -> str:
         """Return the GenericIO file name for a given step/sub-volume."""

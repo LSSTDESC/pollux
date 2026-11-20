@@ -17,7 +17,7 @@ import numpy as np
 import pyccl
 
 from .io import layout
-from .io.config import write_config
+from .io.layout import PolluxIO
 from .cosmo import Tracer
 from .map_builder import MapBuilder, MapSum
 from .utils.numerics import quad
@@ -41,10 +41,8 @@ class LensingBuilder(MapBuilder):
         Otherwise, a list describing source n(z) per tomographic bin. Each entry
         can be a callable ``nz(z)`` or a tuple ``(z, n(z))``.
     tag : str or None, optional
-        Name of the n(z): maps go to ``{shell_builder.matter_dir}/kappa/{tag}/`` (see
-        :mod:`pollux.io.layout`), ``kappa/default/`` when None. Mutually exclusive with ``save_dir``.
-    save_dir : str or None, optional
-        Explicit output directory.
+        Name of the n(z): maps go to the ``'kappa'`` product of the shell builder's files with
+        ``nz=tag`` (``kappa/{tag}/``, see :class:`pollux.io.layout.PolluxIO`), ``kappa/default/`` when None.
     dtype : data-type, optional
         Output dtype for kappa and shear maps.
     **kwargs
@@ -53,20 +51,9 @@ class LensingBuilder(MapBuilder):
         those of ``shell_builder``.
     """
 
-    def __init__(
-            self,
-            shell_builder: ShellBuilder,
-            nzs: str | list,
-            tag: str | None = None,
-            save_dir: str | None = None,
-            dtype: np.dtype = np.float32,
-            **kwargs: Any) -> None:
+    def __init__(self, shell_builder: ShellBuilder, nzs: str | list, tag: str | None = None, dtype: np.dtype = np.float32, **kwargs: Any) -> None:
         self.shell_builder = shell_builder
         self.tag = tag
-        if save_dir is None:
-            save_dir = layout.kappa_dir(shell_builder.matter_dir, tag or 'default')
-        elif tag is not None:
-            raise ValueError('Provide either tag or save_dir, not both.')
         self.reader = shell_builder.reader
         self.cosmo = shell_builder.cosmo
         self.nshells = shell_builder.nshells
@@ -75,22 +62,24 @@ class LensingBuilder(MapBuilder):
         self.nzs = nzs
         self.nkappas = self.shell_builder.nshells if nzs == 'snapshots' else len(nzs)
 
-        base_fname = 'kappa'
-
-        kwargs.setdefault('wsp_dir', shell_builder.wsp_dir)
-        kwargs.setdefault('realization_dir', shell_builder.realization_dir)
         kwargs.setdefault('mask', shell_builder.footprint)
         for k in ('padding_deg', 'apotype', 'padding_nside', 'replicate_octant', 'remove_monopole'):
             kwargs.setdefault(k, getattr(shell_builder, k))
         super().__init__(
-            nside=shell_builder.nside, dtype=dtype, save_dir=save_dir, base_fname=base_fname, nmaps=self.nkappas, sacc_type="galaxy_convergence_cl", **kwargs)
+            nside=shell_builder.nside,
+            dtype=dtype,
+            io=shell_builder.io.with_options(nz=tag or 'default'),
+            product='kappa',
+            nmaps=self.nkappas,
+            sacc_type="galaxy_convergence_cl",
+            **kwargs)
 
         # tomographic bins in file names (kappa_bin{b}), shells for snapshot lensing (kappa_{iii})
         if nzs != 'snapshots':
-            self._index_format = layout.BIN_INDEX
+            self._index_format = PolluxIO.BIN_INDEX
 
         # configuration of the products (checked against an existing one), and the n(z)
-        write_config(self.save_dir, self.config(), realization=self.realization_dir)
+        self.io.write_config(self.product, self.config())
         if nzs != 'snapshots':
             self._save_nzs()
 
@@ -121,14 +110,14 @@ class LensingBuilder(MapBuilder):
         """
         tables = [nz for nz in self.nzs if not callable(nz)]
         common = len(tables) == len(self.nzs) and all(np.array_equal(np.asarray(nz[0]), np.asarray(tables[0][0])) for nz in tables)
-        fname = os.path.join(self.save_dir, 'nzs.txt' if common else 'nzs.npy')
+        fname = self.io.path(self.product, 'nzs', ext='txt' if common else 'npy')
         if os.path.exists(fname):
             return
+        if not common:
+            self.io.write_npy(fname, np.array(self.nzs, dtype=object))
+            return
         with layout.atomic_write(fname) as tmp:
-            if common:
-                np.savetxt(tmp, np.column_stack([tables[0][0]] + [nz[1] for nz in tables]), header='z ' + ' '.join(f'nz_{i}' for i in range(len(tables))))
-            else:
-                np.save(tmp, np.array(self.nzs, dtype=object), allow_pickle=True)
+            np.savetxt(tmp, np.column_stack([tables[0][0]] + [nz[1] for nz in tables]), header='z ' + ' '.join(f'nz_{i}' for i in range(len(tables))))
         logger.debug("Saved to file %s.", fname)
 
     def _smooth_distance(self, ikappa: int) -> float:
@@ -182,9 +171,9 @@ class LensingBuilder(MapBuilder):
 
         gammas = {}
         for ikappa in self.tqdm(ikappas, desc="[compute_shear_maps]"):
-            g1 = self.check_maps(read=True, fname=self.get_fname(ikappa, what='gamma1', smooth_Mpc=smooth_Mpc))
-            g2 = self.check_maps(read=True, fname=self.get_fname(ikappa, what='gamma2', smooth_Mpc=smooth_Mpc))
-            field_done = not save_field_map or os.path.exists(self.get_fname(ikappa, what=self.smoothed_field_what, smooth_Mpc=smooth_Mpc))
+            g1 = self.check_maps(read=True, fname=self.path(ikappa, what='gamma1', smooth_Mpc=smooth_Mpc))
+            g2 = self.check_maps(read=True, fname=self.path(ikappa, what='gamma2', smooth_Mpc=smooth_Mpc))
+            field_done = not save_field_map or os.path.exists(self.path(ikappa, what=self.smoothed_field_what, smooth_Mpc=smooth_Mpc))
             if g1 is not None and g2 is not None and field_done:
                 gammas[ikappa] = [g1, g2]
                 continue
@@ -196,7 +185,7 @@ class LensingBuilder(MapBuilder):
                 if save_field_map:
                     self._save_map(
                         self._alm2hspmap(klm, ipix, lmax, mean=self._alm_field_mean(ikappa)),
-                        self.get_fname(ikappa, what=self.smoothed_field_what, smooth_Mpc=smooth_Mpc))
+                        self.path(ikappa, what=self.smoothed_field_what, smooth_Mpc=smooth_Mpc))
 
             # Convert to shear
             glm_E = hp.almxfl(klm, fl)
@@ -207,8 +196,8 @@ class LensingBuilder(MapBuilder):
             gamma1 = self._make_hspmap(ipix, g1[ipix])
             gamma2 = self._make_hspmap(ipix, g2[ipix])
 
-            gamma1_fname = self.get_fname(ikappa, what='gamma1', smooth_Mpc=smooth_Mpc)
-            gamma2_fname = self.get_fname(ikappa, what='gamma2', smooth_Mpc=smooth_Mpc)
+            gamma1_fname = self.path(ikappa, what='gamma1', smooth_Mpc=smooth_Mpc)
+            gamma2_fname = self.path(ikappa, what='gamma2', smooth_Mpc=smooth_Mpc)
             self._save_map(gamma1, gamma1_fname)
             self._save_map(gamma2, gamma2_fname)
 
@@ -244,7 +233,7 @@ class BornLensingBuilder(LensingBuilder):
 
     Parameters
     ----------
-    shell_builder, nzs, tag, save_dir, dtype
+    shell_builder, nzs, tag, dtype
         See :class:`LensingBuilder`.
     multiple_planes : bool, optional
         If True, compute weights using a multiple-lens-planes approximation.
@@ -261,7 +250,6 @@ class BornLensingBuilder(LensingBuilder):
             shell_builder: ShellBuilder,
             nzs: str | list,
             tag: str | None = None,
-            save_dir: str | None = None,
             dtype: np.dtype = np.float32,
             multiple_planes: bool = False,
             nbar_from_maps: bool = False,
@@ -269,7 +257,7 @@ class BornLensingBuilder(LensingBuilder):
         # options set first, for the configuration written by LensingBuilder
         self.multiple_planes = multiple_planes
         self.nbar_from_maps = nbar_from_maps
-        super().__init__(shell_builder, nzs, tag=tag, save_dir=save_dir, dtype=dtype, **kwargs)
+        super().__init__(shell_builder, nzs, tag=tag, dtype=dtype, **kwargs)
 
         if multiple_planes:
             mpart = self.reader.mass_particles
@@ -345,7 +333,7 @@ class BornLensingBuilder(LensingBuilder):
 
         kappas = {ikappa: kappa_sum.to_map() for ikappa, kappa_sum in kappa_sums.items()}
         for ikappa, kappa in kappas.items():
-            fname = self.get_fname(ikappa)
+            fname = self.path(ikappa)
             self._save_map(kappa, fname)
 
         return kappas[ikappas] if np.isscalar(ikappas) else kappas

@@ -4,8 +4,10 @@ Outputs
 Layout
 ------
 
-Products are organised by realization and matter model (:mod:`pollux.io.layout`, whose functions give the directories
-and file names to the builders, catalogs and :class:`~pollux.io.loader.PolluxLoader` alike). Under
+Products are organised by realization and matter model. :class:`~pollux.io.layout.PolluxIO` gives every path, to the
+builders and catalogs, which get one (``io``, or ``root_dir`` for the shell builder), and to
+:class:`~pollux.io.loader.PolluxLoader`. Every file follows one rule, ``{product directory}[/{folder}]/{name}.{ext}``,
+with intermediate files at the same relative path under ``intermediate/``. Under
 ``{root_dir}/nside{nside}/seed{seed}/`` (with ``pad{padding}/`` for footprints with padding), where ``root_dir`` is
 given to the shell builder:
 
@@ -54,4 +56,13 @@ builders, so that it only needs the I/O dependencies (numpy, healpy, healsparse,
     xi = dmb.load_catalog_2pt(shapes='ia')      # SACC of the 2pt functions of the intrinsic alignments
 
 The ``nz`` of the loader names the redshift distributions of the convergence maps and catalogs (``'SRDv1_nz'`` by
-default).
+default). The loader is a :class:`~pollux.io.layout.PolluxIO`: :meth:`~pollux.io.layout.PolluxIO.path` gives any
+file by product and name, and the readers by format (``read_map``, ``read_alm``, ``read_table``, ``read_sacc``,
+``read_npy``) read it:
+
+.. code-block:: python
+
+    gamma1 = dmb.read_map(dmb.path('kappa', 'gamma1', 'bin4'))                     # kappa/SRDv1_nz/gamma1_bin4.fits
+    density = dmo.read_map(dmo.path('shells', 'density', '030', smooth_Mpc=2.))    # smoothed/2Mpc/density_030.fits
+    alm = dmo.read_alm(dmo.path('shells', 'alms', '030', intermediate=True))       # intermediate/dmo/shells/alms_030.fits
+    config = dmb.read_config('catalogs')                         # config.yaml of the catalogs

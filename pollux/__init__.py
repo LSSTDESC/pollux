@@ -7,9 +7,9 @@ dependencies (:mod:`pollux.io`: no NaMaster, TreeCorr, BaryonForge or Parsl).
 
 import warnings
 
-from .io import PolluxLoader
+from .io import PolluxIO, PolluxLoader
 
-__all__ = ['PolluxLoader']
+__all__ = ['PolluxIO', 'PolluxLoader']
 
 try:
     from .lensing import BornLensingBuilder, SnapshotBornLensingBuilder

@@ -198,7 +198,7 @@ def catalog_map_tasks(nshells, reader_dict, shell_dict, catalog_dict, kappa_alms
 def construct_catalog(ibin, reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict=None, inputs=[]):
     # catalog of one tomographic bin, unless saved
     catalog = _make_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict)
-    if not os.path.exists(catalog.get_fname(ibin)):
+    if not os.path.exists(catalog.path(ibin)):
         catalog.generate(ibin)
     _free_memory()
 
@@ -208,7 +208,7 @@ def construct_catalog_shell(ishell, reader_dict, shell_dict, lensing_dict, ia_di
     # galaxies of one shell, for all tomographic bins (partial catalogs), unless saved or already merged
     catalog = _make_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict)
     bins = range(catalog.lensing.nmaps)
-    if not (all(os.path.exists(catalog.get_fname(i, ishell=ishell)) for i in bins) or all(os.path.exists(catalog.get_fname(i)) for i in bins)):
+    if not (all(os.path.exists(catalog.path(i, ishell=ishell)) for i in bins) or all(os.path.exists(catalog.path(i)) for i in bins)):
         catalog.generate(ishell=ishell)
     _free_memory()
 
@@ -217,7 +217,7 @@ def construct_catalog_shell(ishell, reader_dict, shell_dict, lensing_dict, ia_di
 def merge_catalog(ibin, reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict=None, inputs=[]):
     # inputs contains the construct_catalog_shell futures of all shells; skipped if the catalog is saved
     catalog = _make_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict)
-    if not os.path.exists(catalog.get_fname(ibin)):
+    if not os.path.exists(catalog.path(ibin)):
         catalog.combine_shells(ibin)
     _free_memory()
 
@@ -232,9 +232,9 @@ def compute_shell_cls_sub(pair, reader_dict, shell_dict, baryon_dict=None, input
     from pollux.utils.binning import binning_id
     builder = _make_shell_builder(reader_dict, shell_dict, baryon_dict)
     params_id = _params_id(binning_id(builder.b))
-    if _statistic_saved(builder.get_fname(what='cls', format='fits'), params_id):
+    if _statistic_saved(builder.path(what='cls', ext='fits'), params_id):
         return None
-    fname = _pair_fname(builder.intermediate_dir, 'cls', pair, params_id)
+    fname = builder.io.path(builder.product, *pair, ext='pkl', intermediate=True, folder=f'cls_{params_id}')
     fname = _compute_pair(fname, lambda: builder.compute_cls(pairs=[pair], save=False, use_precomputed_alms=True))
     _free_memory()
     return fname
@@ -245,7 +245,7 @@ def compute_shell_cls(reader_dict, shell_dict, baryon_dict=None, inputs=[]):
     # inputs contains the files of the (ell, cl) of compute_shell_cls_sub, saved unless the Cls already are
     builder = _make_shell_builder(reader_dict, shell_dict, baryon_dict)
     params_id = _params_id_of_pairs(inputs)
-    if _statistic_saved(builder.get_fname(what='cls', format='fits'), params_id):
+    if _statistic_saved(builder.path(what='cls', ext='fits'), params_id):
         return
     cls_out = {}
     for ell, cl in _load_pairs(inputs):
@@ -268,9 +268,9 @@ def compute_kappa_cls_sub(pair, reader_dict, shell_dict, lensing_dict, baryon_di
     from pollux.utils.binning import binning_id
     lensing = _make_lensing(_make_shell_builder(reader_dict, shell_dict, baryon_dict), lensing_dict)
     params_id = _params_id(binning_id(lensing.b))
-    if _statistic_saved(lensing.get_fname(what='cls', format='fits'), params_id):
+    if _statistic_saved(lensing.path(what='cls', ext='fits'), params_id):
         return None
-    fname = _pair_fname(lensing.intermediate_dir, 'cls', pair, params_id)
+    fname = lensing.io.path(lensing.product, *pair, ext='pkl', intermediate=True, folder=f'cls_{params_id}')
     fname = _compute_pair(fname, lambda: lensing.compute_cls(pairs=[pair], save=False, use_precomputed_alms=True))
     _free_memory()
     return fname
@@ -281,7 +281,7 @@ def compute_kappa_cls(reader_dict, shell_dict, lensing_dict, baryon_dict=None, i
     # inputs contains the files of the (ell, cl) of compute_kappa_cls_sub, saved unless the Cls already are
     lensing = _make_lensing(_make_shell_builder(reader_dict, shell_dict, baryon_dict), lensing_dict)
     params_id = _params_id_of_pairs(inputs)
-    if _statistic_saved(lensing.get_fname(what='cls', format='fits'), params_id):
+    if _statistic_saved(lensing.path(what='cls', ext='fits'), params_id):
         return
     cls_out = {}
     for ell, cl in _load_pairs(inputs):
@@ -310,9 +310,9 @@ def compute_catalog_2pt_sub(stat, pair, reader_dict, shell_dict, lensing_dict, i
     # saved to an intermediate file (its name is returned; None if the 2pt functions of these shapes are saved)
     catalog = _make_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict)
     params_id = _params_id([stats_dict['common'], stats_dict['2pt']])
-    if _statistic_saved(catalog._2pt_fname(shapes), params_id):
+    if _statistic_saved(catalog._stat_path('2pt', shapes), params_id):
         return None
-    fname = _pair_fname(catalog._intermediate_dir, f'2pt_{shapes}', pair, params_id, stat=stat)
+    fname = catalog.io.path('catalogs', stat, *pair, ext='pkl', intermediate=True, folder=f'2pt_{shapes}_{params_id}')
     fname = _compute_pair(
         fname, lambda: catalog.compute_2pt(
             what=stat, pairs=[pair], shapes=shapes, save=False, error_bars=True, theta_per_pair=True, **stats_dict['common'], **stats_dict['2pt']))
@@ -326,7 +326,7 @@ def compute_catalog_2pt(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_
     # unless it exists
     catalog = _make_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict)
     params_id = _params_id_of_pairs(inputs)
-    if _statistic_saved(catalog._2pt_fname(shapes), params_id):
+    if _statistic_saved(catalog._stat_path('2pt', shapes), params_id):
         return
     theta_out, xi_out, dxi_out = {}, {}, {}
     for theta, xi, dxi in _load_pairs(inputs):
@@ -355,7 +355,7 @@ def plot_catalog_2pt(
 def compute_catalog_cls_wsp(stat, reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, stats_dict, baryon_dict=None, inputs=[]):
     # workspace shared by all bin pairs of one statistic, from the footprint (compute_cls and predict_cls with shared_wsp=True)
     catalog = _make_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict)
-    if not os.path.exists(catalog._wsp_fname(stat)):
+    if not os.path.exists(catalog._wsp_path(stat)):
         catalog.wsp(stat)
     _free_memory()
 
@@ -365,7 +365,7 @@ def compute_catalog_alms(ibin, reader_dict, shell_dict, lensing_dict, ia_dict, c
     # catalog fields (a_lm) of one tomographic bin for the Cls with the shapes of the shear legs, saved as intermediate
     # files (skipped if saved, or if the Cls are saved): the Cls of all its pairs read them instead of loading the catalog again
     catalog = _make_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict)
-    if not os.path.exists(catalog._cls_fname(shapes)):
+    if not os.path.exists(catalog._stat_path('cls', shapes)):
         options = {k: v for k, v in {**stats_dict['common'], **stats_dict['cls']}.items() if k not in ('shared_wsp', 'auto_only')}
         catalog.compute_alms(ibin, shapes=shapes, **options)
     _free_memory()
@@ -379,9 +379,9 @@ def compute_catalog_cls_sub(stat, pair, reader_dict, shell_dict, lensing_dict, i
     from pollux.utils.binning import binning_id
     catalog = _make_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict)
     params_id = _params_id([binning_id(catalog.b), stats_dict['common'], stats_dict['cls']])
-    if _statistic_saved(catalog._cls_fname(shapes), params_id):
+    if _statistic_saved(catalog._stat_path('cls', shapes), params_id):
         return None
-    fname = _pair_fname(catalog._intermediate_dir, 'cls' if shapes == 'shear' else f'cls_{shapes}', pair, params_id, stat=stat)
+    fname = catalog.io.path('catalogs', stat, *pair, ext='pkl', intermediate=True, folder='cls_' + ('' if shapes == 'shear' else f'{shapes}_') + params_id)
     fname = _compute_pair(fname, lambda: catalog.compute_cls(what=stat, pairs=[pair], shapes=shapes, save=False, **stats_dict['common'], **stats_dict['cls']))
     _free_memory()
     return fname
@@ -392,7 +392,7 @@ def compute_catalog_cls(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_
     # inputs contains the files of the (ell, cl) of compute_catalog_cls_sub, saved to the file of the shapes unless it exists
     catalog = _make_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict)
     params_id = _params_id_of_pairs(inputs)
-    if _statistic_saved(catalog._cls_fname(shapes), params_id):
+    if _statistic_saved(catalog._stat_path('cls', shapes), params_id):
         return
     cls_out = {}
     for ell, cl in _load_pairs(inputs):
@@ -480,16 +480,10 @@ def _make_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, 
 
 def _params_id(params):
     # identifier (8 hexadecimal characters) of the parameters a statistic depends on (binning, statistics options)
+    # the files of the bin pairs go to a folder named with it, so that results with other parameters are not mixed
     import hashlib
     import json
     return hashlib.sha1(json.dumps(params, sort_keys=True, default=str).encode()).hexdigest()[:8]
-
-
-def _pair_fname(intermediate_dir, name, pair, params_id, stat=None):
-    # intermediate file of the statistic of one bin pair: {intermediate_dir}/{name}_{params_id}/[{stat}_]{i}_{j}.pkl, so
-    # that results with other parameters are not mixed
-    i, j = pair
-    return os.path.join(intermediate_dir, f'{name}_{params_id}', f"{f'{stat}_' if stat else ''}{i}_{j}.pkl")
 
 
 def _params_id_of_pairs(fnames):
@@ -508,10 +502,10 @@ def _statistic_saved(fname, params_id):
     recorded are kept, with a warning.
     """
     import warnings
-    import sacc
+    from pollux.io import PolluxIO
     if not os.path.exists(fname):
         return False
-    saved = sacc.Sacc.load_fits(fname).metadata.get('options_id')
+    saved = PolluxIO.read_sacc(fname).metadata.get('options_id')
     if saved is None:
         warnings.warn(f"{fname} has no identifier of the options it was measured with: kept as is.")
     elif params_id is not None and saved != params_id:
@@ -522,20 +516,15 @@ def _statistic_saved(fname, params_id):
 def _compute_pair(fname, compute):
     # statistic of one bin pair, computed and saved to fname unless already saved (resumed runs); returns fname, read
     # by the task combining the pairs (so results go through the disk, not through the main process)
-    import pickle
-    from pollux.io import layout
+    from pollux.io import PolluxIO
     if not os.path.exists(fname):
-        result = compute()
-        os.makedirs(os.path.dirname(fname), exist_ok=True)
-        with layout.atomic_write(fname) as tmp, open(tmp, 'wb') as f:
-            pickle.dump(result, f)
+        PolluxIO.write_pickle(fname, compute())
     return fname
 
 
 def _load_pairs(fnames):
     # results of the bin pairs saved by _compute_pair (None for tasks skipped because their product exists)
-    import pickle
+    from pollux.io import PolluxIO
     for fname in fnames:
         if fname is not None:
-            with open(fname, 'rb') as f:
-                yield pickle.load(f)
+            yield PolluxIO.read_pickle(fname)

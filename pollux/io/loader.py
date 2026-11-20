@@ -5,23 +5,23 @@ from __future__ import annotations
 import logging
 import os
 
-import healpy as hp
 import healsparse as hsp
 import numpy as np
 import pyccl
 import sacc
 from astropy.io import fits
 
-from . import layout
-from .config import read_config
+from .layout import PolluxIO
 
 logger = logging.getLogger(__name__)
 
 
-class PolluxLoader:
-    """Loader of the products of one realization, from their files only (see :mod:`pollux.io.layout`).
+class PolluxLoader(PolluxIO):
+    """Loader of the products of one realization, from their files only: :class:`~pollux.io.layout.PolluxIO` with named readers.
 
-    No ``pollux`` builder is created, so the products can be read with the I/O dependencies only.
+    No ``pollux`` builder is created, so the products can be read with the I/O dependencies only. Any file
+    can also be read with the generic readers of :class:`~pollux.io.layout.PolluxIO` (e.g.
+    ``loader.read_map(loader.path('kappa', 'gamma1', 'bin3'))``).
 
     Parameters
     ----------
@@ -51,272 +51,88 @@ class PolluxLoader:
     """
 
     def __init__(self, realization_dir: str, baryon_tag: str | None = None, nz: str | None = 'SRDv1_nz', catalog_tag: str | None = None) -> None:
-        self.realization_dir = realization_dir
-        self.baryon_tag = baryon_tag
-        self.nz = nz
-        self.catalog_tag = catalog_tag
-        self.matter_dir = layout.matter_dir(realization_dir, baryon_tag)
-        self.shells_dir = layout.shells_dir(self.matter_dir)
-
+        super().__init__(realization_dir, baryon_tag=baryon_tag, nz=nz, tag=catalog_tag)
         logger.info("*** PolluxLoader ***")
-        logger.info("  - Path = %s.", self.matter_dir)
+        logger.info("  - Path = %s.", os.path.dirname(self.dir('shells')))
 
         # simulation, cosmology and table of the shells (config.yaml and shells.fits of the shells)
-        parameters = read_config(self.shells_dir)['parameters']
+        parameters = self.read_config('shells')['parameters']
         self.simulation = parameters['simulation']
         self.nside = parameters['nside']
         self.nshells = parameters['nshells']
         self.cosmo = pyccl.Cosmology(**parameters['cosmology'])
-        self.shell_info = fits.getdata(os.path.join(self.shells_dir, layout.SHELLS_TABLE_FNAME))
+        self.shell_info = fits.getdata(self.path('shells', 'shells'))
         logger.info("  - Simulation = %s, nside = %d, %d shells.", self.simulation['path'], self.nside, self.nshells)
         logger.info("  - Cosmology = %s.", self.cosmo)
 
         # redshift distributions: list of (z, n(z)) per bin
         if nz not in (None, 'snapshots'):
-            fname = os.path.join(self._kappa_dir(), 'nzs.txt')
+            fname = self.path('kappa', 'nzs', ext='txt')
             if os.path.exists(fname):
                 table = np.loadtxt(fname)
                 self.nzs = [(table[:, 0], table[:, i]) for i in range(1, table.shape[1])]
             else:
-                self.nzs = list(np.load(os.path.join(self._kappa_dir(), 'nzs.npy'), allow_pickle=True))
+                self.nzs = list(self.read_npy(self.path('kappa', 'nzs', ext='npy'), allow_pickle=True))
 
-    def _kappa_dir(self) -> str:
-        """Return the directory of the convergence and shear maps of the n(z)."""
+    def _kappa_index(self, ikappa: int) -> str:
+        """Return the index of a convergence map in file names: ``bin{b}``, or ``{iii}`` for snapshots."""
         if self.nz is None:
             raise ValueError('nz must be set to reach the convergence, shear and catalog products.')
-        return layout.kappa_dir(self.matter_dir, self.nz)
-
-    def _kappa_fname(self, what: str, ikappa: int, smooth_Mpc: float | None = None) -> str:
-        """Return the file of a convergence or shear map (``kappa_bin{b}``, or ``kappa_{iii}`` for snapshots)."""
-        index = (layout.SHELL_INDEX if self.nz == 'snapshots' else layout.BIN_INDEX).format(ikappa)
-        folder = self._kappa_dir() if smooth_Mpc is None else layout.smoothed_dir(os.path.join(self._kappa_dir(), 'smoothed'), smooth_Mpc)
-        return os.path.join(folder, layout.map_fname(what, index))
-
-    def _shell_fname(self, what: str, ishell: int, smooth_Mpc: float | None = None) -> str:
-        """Return the file of a shell map, smoothed maps being by scale in ``smoothed/{s}Mpc``."""
-        folder = self.shells_dir if smooth_Mpc is None else layout.smoothed_dir(os.path.join(self.matter_dir, 'smoothed'), smooth_Mpc)
-        return os.path.join(folder, layout.map_fname(what, layout.SHELL_INDEX.format(ishell)))
-
-    # ------------------------------------------------------------------
-    # Shells
-    # ------------------------------------------------------------------
+        return (self.SHELL_INDEX if self.nz == 'snapshots' else self.BIN_INDEX).format(ikappa)
 
     def load_shell(self, ishell: int, density: bool = False) -> hsp.HealSparseMap:
-        """Load the particle counts of one shell.
-
-        Parameters
-        ----------
-        ishell : int
-            Shell index.
-        density : bool, optional
-            If True, return the density contrast, ``counts / pixel_density - 1``.
-
-        Returns
-        -------
-        hsp.HealSparseMap
-        """
-        shell = hsp.HealSparseMap.read(self._shell_fname('shell', ishell))
+        """Load the particle counts of one shell, or with ``density`` its density contrast, ``counts / pixel_density - 1``."""
+        shell = self.read_map(self.path('shells', 'shell', self.SHELL_INDEX.format(ishell)))
         return shell / self.shell_info['pixel_density'][ishell] - 1. if density else shell
 
     def load_shell_alms(self, ishell: int, *, replicate_octant: bool = False) -> np.ndarray:
-        """Load the a_lm of one shell (intermediate file).
-
-        Parameters
-        ----------
-        ishell : int
-            Shell index.
-        replicate_octant : bool, optional
-            If True, the a_lm of the octant replicated over the full sky (``alms_octrep``, see
-            ``replicate_octant`` of :class:`~pollux.map_builder.MapBuilder`).
-
-        Returns
-        -------
-        ndarray
-            a_lm (healpy ordering).
-        """
-        folder = layout.intermediate_dir(self.shells_dir, self.realization_dir)
-        return hp.read_alm(os.path.join(folder, layout.map_fname(layout.alms_what(replicate_octant), layout.SHELL_INDEX.format(ishell))))
+        """Load the a_lm of one shell (intermediate file), of the octant replicated over the full sky with ``replicate_octant``."""
+        return self.read_alm(self.path('shells', 'alms_octrep' if replicate_octant else 'alms', self.SHELL_INDEX.format(ishell), intermediate=True))
 
     def load_shell_cls(self) -> sacc.Sacc:
-        """Load the measured angular power spectra of the shells.
-
-        Returns
-        -------
-        sacc.Sacc
-        """
-        return sacc.Sacc.load_fits(os.path.join(self.shells_dir, layout.CLS_FNAME))
+        """Load the measured angular power spectra of the shells."""
+        return self.read_sacc(self.path('shells', 'cls'))
 
     def load_density(self, ishell: int, smooth_Mpc: float | None = None) -> hsp.HealSparseMap:
-        """Load the density contrast of one shell.
-
-        Parameters
-        ----------
-        ishell : int
-            Shell index.
-        smooth_Mpc : float or None, optional
-            Gaussian smoothing scale in Mpc of the map. If None, the unsmoothed density
-            contrast of the shell (:meth:`load_shell`).
-
-        Returns
-        -------
-        hsp.HealSparseMap
-        """
+        """Load the density contrast of one shell, smoothed at ``smooth_Mpc`` (Mpc) if given."""
         if smooth_Mpc is None:
             return self.load_shell(ishell, density=True)
-        return hsp.HealSparseMap.read(self._shell_fname('density', ishell, smooth_Mpc))
+        return self.read_map(self.path('shells', 'density', self.SHELL_INDEX.format(ishell), smooth_Mpc=smooth_Mpc))
 
     def load_tidal(self, ishell: int, smooth_Mpc: float | None = None) -> tuple[hsp.HealSparseMap, hsp.HealSparseMap, hsp.HealSparseMap]:
-        """Load the tidal-tensor components (t11, t22, t12) of one shell.
-
-        Parameters
-        ----------
-        ishell : int
-            Shell index.
-        smooth_Mpc : float or None, optional
-            Gaussian smoothing scale in Mpc of the maps.
-
-        Returns
-        -------
-        tuple of hsp.HealSparseMap
-            ``(t11, t22, t12)``.
-        """
-        return tuple(hsp.HealSparseMap.read(self._shell_fname(what, ishell, smooth_Mpc)) for what in ('t11', 't22', 't12'))
-
-    # ------------------------------------------------------------------
-    # Halo catalogs
-    # ------------------------------------------------------------------
+        """Load the tidal-tensor components ``(t11, t22, t12)`` of one shell, smoothed at ``smooth_Mpc`` (Mpc)."""
+        return tuple(self.read_map(self.path('shells', what, self.SHELL_INDEX.format(ishell), smooth_Mpc=smooth_Mpc)) for what in ('t11', 't22', 't12'))
 
     def load_haloes(self, ishell: int) -> dict[str, np.ndarray]:
-        """Load the halo catalog of one shell, shared by all baryon models.
-
-        Parameters
-        ----------
-        ishell : int
-            Shell index.
-
-        Returns
-        -------
-        dict
-            Concatenated arrays by column (``'ihaloes'``, ``'ra'``, ``'dec'``, ``'chi'``, ``'z'``,
-            and the extra columns saved at construction).
-        """
-        fname = os.path.join(layout.halos_dir(self.realization_dir), layout.map_fname('catalog', layout.SHELL_INDEX.format(ishell)))
-        with fits.open(fname) as hdul:
+        """Load the halo catalog of one shell, shared by all baryon models, as concatenated arrays by column."""
+        with self.read_table(self.path('halos', 'catalog', self.SHELL_INDEX.format(ishell))) as hdul:
             columns = hdul[1].columns.names
             return {k: np.concatenate([hdu.data[k] for hdu in hdul[1:]]) for k in columns}
 
-    # ------------------------------------------------------------------
-    # Convergence and shear
-    # ------------------------------------------------------------------
-
     def load_kappa(self, ikappa: int, smooth_Mpc: float | None = None) -> hsp.HealSparseMap:
-        """Load one convergence map.
-
-        Parameters
-        ----------
-        ikappa : int
-            Tomographic bin (or shell, for ``nz='snapshots'``).
-        smooth_Mpc : float or None, optional
-            Gaussian smoothing scale in Mpc of the map (snapshots only).
-
-        Returns
-        -------
-        hsp.HealSparseMap
-        """
-        return hsp.HealSparseMap.read(self._kappa_fname('kappa', ikappa, smooth_Mpc))
+        """Load one convergence map, of a tomographic bin (or shell, for ``nz='snapshots'``)."""
+        return self.read_map(self.path('kappa', 'kappa', self._kappa_index(ikappa), smooth_Mpc=smooth_Mpc))
 
     def load_kappa_alms(self, ikappa: int, *, replicate_octant: bool = False) -> np.ndarray:
-        """Load the a_lm of one convergence map (intermediate file).
-
-        Parameters
-        ----------
-        ikappa : int
-            Tomographic bin (or shell, for ``nz='snapshots'``).
-        replicate_octant : bool, optional
-            If True, the a_lm of the octant replicated over the full sky (``alms_octrep``).
-
-        Returns
-        -------
-        ndarray
-            a_lm (healpy ordering).
-        """
-        fname = os.path.basename(self._kappa_fname(layout.alms_what(replicate_octant), ikappa))
-        return hp.read_alm(os.path.join(layout.intermediate_dir(self._kappa_dir(), self.realization_dir), fname))
+        """Load the a_lm of one convergence map (intermediate file)."""
+        return self.read_alm(self.path('kappa', 'alms_octrep' if replicate_octant else 'alms', self._kappa_index(ikappa), intermediate=True))
 
     def load_shear(self, ikappa: int, smooth_Mpc: float | None = None) -> tuple[hsp.HealSparseMap, hsp.HealSparseMap]:
-        """Load the shear maps of one tomographic bin (or shell).
-
-        Parameters
-        ----------
-        ikappa : int
-            Tomographic bin (or shell, for ``nz='snapshots'``).
-        smooth_Mpc : float or None, optional
-            Gaussian smoothing scale in Mpc of the maps (snapshots only).
-
-        Returns
-        -------
-        tuple of hsp.HealSparseMap
-            ``(gamma1, gamma2)``.
-        """
-        return tuple(hsp.HealSparseMap.read(self._kappa_fname(what, ikappa, smooth_Mpc)) for what in ('gamma1', 'gamma2'))
+        """Load the shear maps ``(gamma1, gamma2)`` of one tomographic bin (or shell)."""
+        return tuple(self.read_map(self.path('kappa', what, self._kappa_index(ikappa), smooth_Mpc=smooth_Mpc)) for what in ('gamma1', 'gamma2'))
 
     def load_kappa_cls(self) -> sacc.Sacc:
-        """Load the measured angular power spectra of the convergence maps.
-
-        Returns
-        -------
-        sacc.Sacc
-        """
-        return sacc.Sacc.load_fits(os.path.join(self._kappa_dir(), layout.CLS_FNAME))
-
-    # ------------------------------------------------------------------
-    # Source catalogs
-    # ------------------------------------------------------------------
-
-    def catalog_dir(self) -> str:
-        """Return the directory of the catalogs (``catalogs/{nz}/{catalog_tag}``)."""
-        return layout.catalog_dir(self.matter_dir, self.nz, self.catalog_tag)
+        """Load the measured angular power spectra of the convergence maps."""
+        return self.read_sacc(self.path('kappa', 'cls'))
 
     def load_catalog(self, ibin: int) -> fits.HDUList:
-        """Open the source catalog of one tomographic bin.
-
-        Parameters
-        ----------
-        ibin : int
-            Tomographic bin.
-
-        Returns
-        -------
-        astropy.io.fits.HDUList
-        """
-        return fits.open(os.path.join(self.catalog_dir(), layout.catalog_fname(ibin)))
+        """Open the source catalog of one tomographic bin."""
+        return self.read_table(self.path('catalogs', 'cat', f'bin{ibin}'))
 
     def load_catalog_2pt(self, shapes: str = 'shear') -> sacc.Sacc:
-        """Load the measured two-point functions of the catalogs.
-
-        Parameters
-        ----------
-        shapes : {'shear', 'ia', 'shear_plus_ia', 'observed'}, optional
-            Shapes of the shear legs: lensing shear (``cat_2pt.fits``), intrinsic alignments
-            (``cat_2pt_ia.fits``), their sum without shape noise (``cat_2pt_shear_plus_ia.fits``),
-            or the observed ellipticities, with shape noise (``cat_2pt_observed.fits``).
-
-        Returns
-        -------
-        sacc.Sacc
-        """
-        return sacc.Sacc.load_fits(os.path.join(self.catalog_dir(), layout.catalog_stat_fname('2pt', shapes)))
+        """Load the measured two-point functions of the catalogs, with the shapes ``shapes`` of the shear legs (``cat_2pt[_{shapes}].fits``)."""
+        return self.read_sacc(self.path('catalogs', 'cat_2pt', None if shapes == 'shear' else shapes))
 
     def load_catalog_cls(self, shapes: str = 'shear') -> sacc.Sacc:
-        """Load the measured angular power spectra of the catalogs.
-
-        Parameters
-        ----------
-        shapes : {'shear', 'ia', 'shear_plus_ia', 'observed'}, optional
-            Shapes of the shear legs, as in :meth:`load_catalog_2pt` (``cat_cls[_{shapes}].fits``).
-
-        Returns
-        -------
-        sacc.Sacc
-        """
-        return sacc.Sacc.load_fits(os.path.join(self.catalog_dir(), layout.catalog_stat_fname('cls', shapes)))
+        """Load the measured angular power spectra of the catalogs, with the shapes ``shapes`` (``cat_cls[_{shapes}].fits``)."""
+        return self.read_sacc(self.path('catalogs', 'cat_cls', None if shapes == 'shear' else shapes))

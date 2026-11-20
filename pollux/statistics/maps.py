@@ -33,18 +33,6 @@ class MapStatistics(TwoPointStatistics):
     Subclasses implement :meth:`_create_tracers`, and :meth:`_noise_cls` for noise-aware predictions.
     """
 
-    @cached_property
-    def tracers(self) -> list:
-        """Return (and lazily create) the tracers describing the maps.
-
-        Returns
-        -------
-        list of pollux.cosmo.Tracer
-            One tracer per map, from which CCL (:attr:`tracers_ccl`) and SACC
-            (:attr:`tracers_sacc`) tracers are derived.
-        """
-        return self._create_tracers()
-
     @property
     def tracers_ccl(self) -> list:
         """Return the CCL tracers of the maps.
@@ -56,95 +44,16 @@ class MapStatistics(TwoPointStatistics):
         return [t.ccl(self.cosmo) for t in self.tracers]
 
     @cached_property
-    def tracers_sacc(self) -> list:
-        """Return the SACC tracers used to store measured spectra.
+    def tracers(self) -> list:
+        """Return (and lazily create) the tracers describing the maps.
 
         Returns
         -------
-        list of sacc.tracers.BaseTracer
+        list of pollux.cosmo.Tracer
+            One tracer per map, from which CCL (:attr:`tracers_ccl`) and SACC
+            (:attr:`tracers_sacc`) tracers are derived.
         """
-        return [t.sacc() for t in self.tracers]
-
-    @cached_property
-    def theory(self) -> Theory:
-        """Return the theory predictor of the maps.
-
-        Returns
-        -------
-        pollux.cosmo.Theory
-            With the builder's cosmology and :meth:`matter_power_spectrum`.
-        """
-        return Theory(self.cosmo, p_of_k_a=self.matter_power_spectrum())
-
-    @cached_property
-    def b(self) -> nmt.NmtBin:
-        """Return (and lazily create) the NaMaster binning scheme.
-
-        Returns
-        -------
-        pymaster.NmtBin
-            Bandpower binning used for :meth:`compute_cls` and :meth:`predict_cls`.
-
-        Notes
-        -----
-        Lazy, so that the builder stays light to pickle: the ``NmtBin`` is not
-        constructed until first accessed (unless given at construction).
-        """
-        return make_nmtbin_logspaced(self.nside, 8, 2 * self.nside, self.nlb, f_ell=self.f_ell)
-
-    @cached_property
-    def wsp(self) -> nmt.NmtWorkspace:
-        """Return (and lazily create) the NaMaster workspace.
-
-        The workspace stores the mode-coupling matrix and bandpower windows for
-        the current mask and binning, and is cached on disk under ``self.wsp_dir``.
-
-        Returns
-        -------
-        pymaster.NmtWorkspace
-            Workspace containing the coupling matrix and bandpower windows.
-
-        Notes
-        -----
-        Lazy, so that the builder stays light to pickle: the ``NmtWorkspace`` is
-        not constructed until first accessed.
-        """
-        fname = self._wsp_fname
-        wsp = nmt.NmtWorkspace()
-        if os.path.exists(fname):
-            wsp.read_from(fname)
-            logger.info("Found and loaded workspace at %s.", fname)
-        else:
-            mask = self._alm_weights
-            b = self.b
-            dummy_f = nmt.NmtField(mask, [np.zeros_like(mask)], lite=True)
-            wsp.compute_coupling_matrix(dummy_f, dummy_f, b)
-            with layout.atomic_write(fname) as tmp:
-                wsp.write_to(tmp)
-            logger.info("Computed and saved workspace to file %s.", fname)
-        return wsp
-
-    @property
-    def _wsp_fname(self) -> str:
-        """File of the NaMaster workspace, shared by the realizations with the same footprint and binning."""
-        padding = f'_pad{self.padding_deg:g}{self.apotype or ""}' if self.padding_deg is not None else ''
-        if self.replicate_octant:
-            padding = '_octrep'
-        return os.path.join(self.wsp_dir, f'wsp_nside{self.nside}_{self.footprint_id}{padding}_b{binning_id(self.b, self.f_ell)}.wsp')
-
-    @cached_property
-    def bpws(self) -> np.ndarray:
-        """Return the bandpower windows of the workspace (see :attr:`wsp`).
-
-        They are saved apart, next to the workspace, so that predictions do not load the
-        coupling matrix (several GB at high resolution), only once to save them.
-
-        Returns
-        -------
-        ndarray
-            Shape ``(n_cl, n_bands, n_cl, lmax + 1)``.
-        """
-        return self._saved_bpws(self._wsp_fname, lambda: self.wsp)
+        return self._create_tracers()
 
     @abstractmethod
     def _create_tracers(self) -> list:
@@ -159,6 +68,16 @@ class MapStatistics(TwoPointStatistics):
     def _sacc_tracers(self) -> dict[str, list]:
         """Return the SACC tracers of the maps (role ``'map'``), see :meth:`~pollux.statistics.base.TwoPointStatistics._sacc_tracers`."""
         return {'map': self.tracers_sacc}
+
+    @cached_property
+    def tracers_sacc(self) -> list:
+        """Return the SACC tracers used to store measured spectra.
+
+        Returns
+        -------
+        list of sacc.tracers.BaseTracer
+        """
+        return [t.sacc() for t in self.tracers]
 
     def matter_power_spectrum(self) -> pyccl.Pk2D | None:
         """Return the matter power spectrum consistent with the maps, for predictions.
@@ -218,16 +137,12 @@ class MapStatistics(TwoPointStatistics):
             previous_pair = (-1, -1)
             for i, j in self.tqdm(pairs, desc="[compute_cls]"):
                 if not i == previous_pair[0]:
-                    almi_fname = self._alm_fname(i)
-                    almi = hp.read_alm(almi_fname)
-                    logger.debug("Found and loaded alms at %s.", almi_fname)
+                    almi = self.compute_alms(i)
                 if i == j:
                     almj = almi
                 else:
                     if not j == previous_pair[1]:
-                        almj_fname = self._alm_fname(j)
-                        almj = hp.read_alm(almj_fname)
-                        logger.debug("Found and loaded alms at %s.", almj_fname)
+                        almj = self.compute_alms(j)
                 pcl = hp.alm2cl(almi, almj)
                 cl[i, j] = wsp.decouple_cell([pcl])[0]
                 previous_pair = (i, j)
@@ -275,8 +190,65 @@ class MapStatistics(TwoPointStatistics):
             return imaps, [(i, i) for i in imaps]
         return imaps, [(i1, i2) for i, i2 in enumerate(imaps) for i1 in imaps[i:]]  # with this order, i2 is preserved
 
+    @cached_property
+    def b(self) -> nmt.NmtBin:
+        """Return (and lazily create) the NaMaster binning scheme.
+
+        Returns
+        -------
+        pymaster.NmtBin
+            Bandpower binning used for :meth:`compute_cls` and :meth:`predict_cls`.
+
+        Notes
+        -----
+        Lazy, so that the builder stays light to pickle: the ``NmtBin`` is not
+        constructed until first accessed (unless given at construction).
+        """
+        return make_nmtbin_logspaced(self.nside, 8, 2 * self.nside, self.nlb, f_ell=self.f_ell)
+
+    @cached_property
+    def wsp(self) -> nmt.NmtWorkspace:
+        """Return (and lazily create) the NaMaster workspace.
+
+        The workspace stores the mode-coupling matrix and bandpower windows for
+        the current mask and binning, and is cached on disk with the footprint products (``io.dir('footprint')``).
+
+        Returns
+        -------
+        pymaster.NmtWorkspace
+            Workspace containing the coupling matrix and bandpower windows.
+
+        Notes
+        -----
+        Lazy, so that the builder stays light to pickle: the ``NmtWorkspace`` is
+        not constructed until first accessed.
+        """
+        fname = self._wsp_path
+        wsp = nmt.NmtWorkspace()
+        if os.path.exists(fname):
+            wsp.read_from(fname)
+            logger.info("Found and loaded workspace at %s.", fname)
+        else:
+            mask = self._alm_weights
+            b = self.b
+            dummy_f = nmt.NmtField(mask, [np.zeros_like(mask)], lite=True)
+            wsp.compute_coupling_matrix(dummy_f, dummy_f, b)
+            with layout.atomic_write(fname) as tmp:
+                wsp.write_to(tmp)
+            logger.info("Computed and saved workspace to file %s.", fname)
+            self._saved_bpws(fname, lambda: wsp)
+        return wsp
+
+    @property
+    def _wsp_path(self) -> str:
+        """File of the NaMaster workspace, shared by the realizations with the same footprint and binning."""
+        padding = f'_pad{self.padding_deg:g}{self.apotype or ""}' if self.padding_deg is not None else ''
+        if self.replicate_octant:
+            padding = '_octrep'
+        return self.io.path('footprint', f'wsp_nside{self.nside}_{self.footprint_id}{padding}_b{binning_id(self.b, self.f_ell)}', ext='wsp')
+
     def _save_cls(self, ell: np.ndarray, cl: dict[tuple[int, int], np.ndarray], metadata: dict | None = None) -> str:
-        """Save angular power spectra to a SACC FITS file (:meth:`_cls_fname`).
+        """Save angular power spectra to a SACC FITS file (``cls.fits`` of the product).
 
         Parameters
         ----------
@@ -294,11 +266,7 @@ class MapStatistics(TwoPointStatistics):
         str
             Path to the saved SACC FITS file.
         """
-        return self._save_sacc(self._cls_fname(), {self.sacc_type: cl}, ell, {self.sacc_type: ('map', 'map')}, metadata=metadata)
-
-    def _cls_fname(self) -> str:
-        """Return the file of the power spectra of the maps (``{save_dir}/cls.fits``)."""
-        return os.path.join(self.save_dir, layout.CLS_FNAME)
+        return self._save_sacc(self.io.path(self.product, 'cls'), {self.sacc_type: cl}, ell, {self.sacc_type: ('map', 'map')}, metadata=metadata)
 
     def load_cls(self, return_dict: bool = False, return_errors: bool = False) -> sacc.Sacc | tuple:
         """Load saved angular power spectra.
@@ -324,7 +292,7 @@ class MapStatistics(TwoPointStatistics):
         FileNotFoundError
             If the SACC file does not exist.
         """
-        res = self._load_sacc(self._cls_fname(), return_dict=return_dict, return_errors=return_errors)
+        res = self._load_sacc(self.io.path(self.product, 'cls'), return_dict=return_dict, return_errors=return_errors)
         if not return_dict:
             return res
         ell, cl, *errors = (r.get(self.sacc_type, {}) for r in res)
@@ -422,6 +390,20 @@ class MapStatistics(TwoPointStatistics):
                                       progress=self.tqdm)
         return res
 
+    @cached_property
+    def bpws(self) -> np.ndarray:
+        """Return the bandpower windows of the workspace (see :attr:`wsp`).
+
+        They are saved apart, next to the workspace, so that predictions do not load the
+        coupling matrix (several GB at high resolution), only once to save them.
+
+        Returns
+        -------
+        ndarray
+            Shape ``(n_cl, n_bands, n_cl, lmax + 1)``.
+        """
+        return self._saved_bpws(self._wsp_path, lambda: self.wsp)
+
     def _noise_cls(self, imap: int) -> float | np.ndarray:
         """Return the noise angular power spectrum for one map.
 
@@ -446,6 +428,17 @@ class MapStatistics(TwoPointStatistics):
             If this builder does not implement a noise model.
         """
         raise NotImplementedError
+
+    @cached_property
+    def theory(self) -> Theory:
+        """Return the theory predictor of the maps.
+
+        Returns
+        -------
+        pollux.cosmo.Theory
+            With the builder's cosmology and :meth:`matter_power_spectrum`.
+        """
+        return Theory(self.cosmo, p_of_k_a=self.matter_power_spectrum())
 
     def reference_scales(self, smooth_Mpc: float | None = None) -> dict[str, np.ndarray]:
         """Return the angular scales of the simulation box, of the map resolution, and of a smoothing, per map.
@@ -507,7 +500,7 @@ class MapStatistics(TwoPointStatistics):
 
         Notes
         -----
-        Saves ``{base_fname}_cls``, with suffix ``_{mode}`` for modes other than ``'values'``.
+        Saves ``{map_name}_cls``, with suffix ``_{mode}`` for modes other than ``'values'``.
         """
         from .plotting import plot_pairs
         plot_dir = plot_dir or os.path.join(self.save_dir, 'plots')
@@ -529,9 +522,9 @@ class MapStatistics(TwoPointStatistics):
                 color_theory='orange',
                 logy=logy,
                 xlim=(self.b.get_ell_min(0), self.b.get_ell_max(self.b.get_n_bands() - 1)),
-                title=f'{self.base_fname} {{i}} {{j}}',
+                title=f'{self.map_name} {{i}} {{j}}',
                 sharey=False,
-                fname=os.path.join(plot_dir, f'{self.base_fname}_cls' + ('' if mode == 'values' else f'_{mode}') + '.png'))
+                fname=os.path.join(plot_dir, f'{self.map_name}_cls' + ('' if mode == 'values' else f'_{mode}') + '.png'))
 
     def compute_map_moments(self, theta_smooth: np.ndarray | Iterable[float], nside_small: int = 512, save: bool = True) -> tuple[np.ndarray, dict, dict, dict]:
         """Compute 2nd/3rd/4th moments of smoothed maps.
@@ -620,10 +613,7 @@ class MapStatistics(TwoPointStatistics):
                 moments['fourth_moment'][theta][i, j, k, l] = np.mean(data[i] * data[j] * data[k] * data[l])
 
         if save:
-            fname = self.get_fname(what='2nd_3rd_4th_moments', format='npy')
-            with layout.atomic_write(fname) as tmp:
-                np.save(tmp, moments)
-            logger.info("Saved to file %s.", fname)
+            self.io.write_npy(self.path(what='2nd_3rd_4th_moments', ext='npy'), moments)
 
         return theta_smooth, moments['second_moment'], moments['third_moment'], moments['fourth_moment']
 
@@ -648,8 +638,8 @@ class MapStatistics(TwoPointStatistics):
         FileNotFoundError
             If the moments file does not exist.
         """
-        fname = self.get_fname(what='2nd_3rd_4th_moments', format='npy')
-        moments = np.load(fname, allow_pickle=True).item()
+        fname = self.path(what='2nd_3rd_4th_moments', ext='npy')
+        moments = self.io.read_npy(fname, allow_pickle=True).item()
         logger.debug("Found and loaded file at %s.", fname)
         return moments['theta_smooth'], moments['second_moment'], moments['third_moment'], moments['fourth_moment']
 
@@ -687,7 +677,7 @@ class MapStatistics(TwoPointStatistics):
                 hspmap = self._make_hspmap(ipix, out[ipix])
 
                 # Save map
-                fname = self.get_fname(imap)
+                fname = self.path(imap)
                 self._save_map(hspmap, fname)
 
         else:
@@ -700,5 +690,5 @@ class MapStatistics(TwoPointStatistics):
                 hspmap = self._make_hspmap(ipix, out[ipix])
 
                 # Save map
-                fname = self.get_fname(imap)
+                fname = self.path(imap)
                 self._save_map(hspmap, fname)

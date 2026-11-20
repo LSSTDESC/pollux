@@ -34,18 +34,21 @@ Conventions for the code of pollux: formatting, documentation, naming, organisat
   3. `config()`, for the objects that define products: what goes into their `config.yaml` (`product`, `parameters`,
      `inputs` for builders and catalogs; their entry in the catalog's parameters for augmentors), extended by
      subclasses through `super().config()`;
-  4. properties (`property`, `cached_property`);
-  5. the other methods along the workflow (making products; I/O; footprint and masks; transforms; tracers and theory;
-     statistics, in the order compute, save, load, predict, then plot), each public method followed by the private
-     helpers it is the first to use.
+  4. the methods along the workflow, grouped by theme (making products; I/O; footprint and masks; transforms;
+     tracers and theory; statistics, in the order compute, save, load, predict, then plot), each followed by the
+     private helpers and properties it is the first to use: a property sits with its theme, the short ones used
+     by `__init__` (e.g. `save_dir`) right after it.
 - In a module, public classes and functions come first, and private helpers (module-level functions, numba kernels)
   at the end.
 - A helper used by one module stays in it, private (`_name`). A helper independent of pollux's objects and useful
   beyond one module goes to `pollux.utils`, by theme (numerics, sky, binning, FITS tables), public.
 - Statistics are mixins of `pollux.statistics` (`MapStatistics`, `CatalogStatistics`, on a common
   `TwoPointStatistics` for SACC files and bandpower windows), inherited by the builders and catalogs.
-- Directories and file names come from `pollux.io.layout`, and product configurations (`config.yaml`) from
-  `pollux.io.config`, for the builders, catalogs and `PolluxLoader` alike: never build a product path elsewhere.
+- Paths come from the `PolluxIO` of the object (`self.io.path(product, *name, ...)`), for the builders, catalogs and
+  `PolluxLoader` alike: never build a product path elsewhere. A new file needs no change to `PolluxIO`; a new product
+  directory is one line of `PolluxIO.PRODUCTS`. Files are written and read with the methods of `PolluxIO` by format
+  (`self.io.write_map(fname, hspmap)`, `self.io.read_table(fname)`, ...), whose writes are atomic; `atomic_write`
+  directly only for a format they don't cover (e.g. NaMaster workspaces, text).
 - Objects declare what other objects need from them rather than being searched for: e.g. augmentors have a `kind`
   (`'shear'`, `'ia'`), from which the catalog sets `shear_augmentor` and `ia_augmentor` once.
 - Define a rule used in several places once, and use it everywhere. For example, `Tracer.effective_smooth_Mpc` gives the smoothing actually applied, both to the maps and to their predictions.
@@ -54,7 +57,7 @@ Conventions for the code of pollux: formatting, documentation, naming, organisat
 
 ## Plots
 Statistics are plotted with `plotting.plot_pairs`, one panel per bin pair:
-- Each figure is saved in `{save_dir}/plots` (`{catalog_dir}/plots` for catalogs), one figure per mode (values, ratio, ...).
+- Each figure is saved in the `plots` folder of its product (`io.dir(product, folder='plots')`), one figure per mode (values, ratio, ...).
 - x limits come from the binning (Cls) or the measured range (2pt).
 - Reference scales are vertical lines when within the x range (box size, pixel size, smoothing), with their legend below the figure.
 - Ratio panels don't share their y axis, and values beyond ±1 are drawn at ±1 as arrows.

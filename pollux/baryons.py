@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import copy
 import logging
-import os
 from typing import Any, Iterable
 
 import numpy as np
@@ -13,7 +12,6 @@ import healpy as hp
 import healsparse as hsp
 import BaryonForge as bfg
 from tqdm.auto import trange
-from .io import layout
 from .shells import ShellBuilder, SnapshotShellBuilder
 
 logger = logging.getLogger(__name__)
@@ -95,10 +93,6 @@ class BaryonifiedShellBuilder(ShellBuilder):
         self.tag = tag
         self._interpolator_kwargs = {**interpolator_kwargs, 'M_min': self.M_min}
 
-        # products of the baryon model (see pollux.io.layout), next to the dark-matter-only ones
-        realization = shell_builder.realization_dir or os.path.dirname(shell_builder.matter_dir)
-        matter = layout.matter_dir(realization, tag or 'default')
-
         # Initialize parent ShellBuilder with the same configuration
         if self.shell_builder_ref.kind == 'snapshot':
             self.shell_edges_match = self.shell_builder_ref.shell_edges_match
@@ -106,9 +100,8 @@ class BaryonifiedShellBuilder(ShellBuilder):
             reader=shell_builder.reader,
             nshells=shell_builder.nshells,
             nside=shell_builder.nside,
-            save_dir=layout.shells_dir(matter),
-            realization_dir=shell_builder.realization_dir,
-            smoothed_dir=os.path.join(matter, 'smoothed'),
+            # products of the baryon model, next to the dark-matter-only ones (dmb/{tag})
+            io=shell_builder.io.with_options(baryon_tag=tag or 'default'),
             seed=shell_builder.seed,
             dtype=shell_builder.dtype,
             apply_grid_isometry=(shell_builder.Abs if shell_builder.apply_grid_isometry else False),
@@ -117,7 +110,6 @@ class BaryonifiedShellBuilder(ShellBuilder):
             nside_c=shell_builder.nside_c,
             mask=shell_builder.footprint,
             save_format=shell_builder.save_format,
-            wsp_dir=shell_builder.wsp_dir,
             b=shell_builder.b,
             nlb=shell_builder.nlb,
             remove_monopole=shell_builder.remove_monopole,
@@ -126,8 +118,7 @@ class BaryonifiedShellBuilder(ShellBuilder):
             padding_nside=shell_builder.padding_nside,
             replicate_octant=shell_builder.replicate_octant,
             nocompress=shell_builder.nocompress,
-            f_ell=shell_builder.f_ell,
-            base_fname='shell')
+            f_ell=shell_builder.f_ell)
 
         # Set up baryonification model
         self.cosmo_dict = self.cosmo.to_dict()
@@ -193,7 +184,7 @@ class BaryonifiedShellBuilder(ShellBuilder):
 
         _, ipix = self.get_mask(nest=False, return_ipix=True, padded=True)
         for ishell in self.tqdm(ishells, desc="[construct_maps]"):
-            fname = self.get_fname(ishell)
+            fname = self.path(ishell)
             shell = self.check_maps(read=True, fname=fname)
             if shell is not None:
                 shells[ishell] = shell

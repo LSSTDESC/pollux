@@ -38,7 +38,7 @@ class BaryonifiedShellBuilder(ShellBuilder):
     halo_builder : SnapshotShellBuilder
         Builder providing halo catalogs per shell.
     dmo, dmb : BaryonForge profiles
-        Dark-matter-only and baryonified profiles (e.g. :func:`s19_profiles`),
+        Dark-matter-only and baryonified profiles (e.g. :func:`s19_profiles` or :func:`mead20_profiles`),
         used both to baryonify the shells and to correct the matter power
         spectrum of the predictions (:meth:`matter_power_spectrum`).
     mass_def : tuple
@@ -157,8 +157,8 @@ class BaryonifiedShellBuilder(ShellBuilder):
         _, parameters, _ = super()._config()
         parameters.update(
             baryon_tag=self.tag,
-            dmo_profiles=type(self.dmo).__name__,
-            dmb_profiles=type(self.dmb).__name__,
+            dmo_profiles=_profile_name(self.dmo),
+            dmb_profiles=_profile_name(self.dmb),
             mass_def=self.mass_def,
             mass_name=self.mass_name,
             mass_unit=self.mass_unit,
@@ -335,9 +335,9 @@ def s19_profiles(
 ) -> tuple[bfg.Profiles.Base.BaseBFGProfiles, bfg.Profiles.Base.BaseBFGProfiles]:
     """Return the S19 dark-matter-only and baryonified halo profiles.
 
-    Both profiles share their components (dark matter, gas, stars, collisionless
-    matter, two-halo term), with BaryonForge's default numerical settings unless
-    overridden by ``kwargs``.
+    The profiles of Schneider et al. (2019), BaryonForge's default ones: dark matter and two-halo term
+    without baryons, and gas, stars and collisionless matter with them, built by the profiles from
+    the same parameters, with BaryonForge's default numerical settings unless overridden by ``kwargs``.
 
     Parameters
     ----------
@@ -357,14 +357,56 @@ def s19_profiles(
     """
     S19 = bfg.Profiles.Schneider19
     kwargs = dict(bfg_params, mass_def=pyccl.halos.massdef.MassDef(*mass_def), **kwargs)
-    dm = S19.DarkMatter(**kwargs)
-    gas = S19.Gas(**kwargs)
-    stars = S19.Stars(**kwargs)
-    clm = S19.CollisionlessMatter(gas=gas, stars=stars, darkmatter=dm, **kwargs)
-    two = S19.TwoHalo(**kwargs)
-    dmo = S19.DarkMatterOnly(darkmatter=dm, twohalo=two, **kwargs)
-    dmb = S19.DarkMatterBaryon(gas=gas, stars=stars, collisionlessmatter=clm, darkmatter=dm, twohalo=two, **kwargs)
-    return dmo, dmb
+    return S19.DarkMatterOnly(**kwargs), S19.DarkMatterBaryon(**kwargs)
+
+
+def mead20_profiles(
+    bfg_params: dict,
+    mass_def: tuple,
+    **kwargs: Any,
+) -> tuple[bfg.Profiles.Base.BaseBFGProfiles, bfg.Profiles.Base.BaseBFGProfiles]:
+    """Return the Mead20 (HMcode-2020) dark-matter-only and baryonified halo profiles.
+
+    The simplest pair of BaryonForge: an NFW profile without baryons, and bound gas,
+    ejected gas, stars and collisionless matter with them, without two-halo term.
+    The parameters may be set by a single AGN temperature, interpolated in the calibration of
+    Mead et al. (2020, Table 2) by BaryonForge's ``Tagn2pars``.
+
+    Parameters
+    ----------
+    bfg_params : dict
+        Mead20 model parameters. ``log10_T_AGN`` (e.g. 7.8) sets them all from the calibration,
+        with ``calibration`` (``'All'``, default, or ``'MatterPressure'``); other keys override
+        them (e.g. ``cutoff`` and ``proj_cutoff``, in Mpc, or ``epsilon_max`` of
+        :class:`BaryonifiedShellBuilder`).
+    mass_def : tuple
+        Halo mass definition, passed to ``pyccl.halos.massdef.MassDef(*mass_def)``
+        (e.g. ``('200', 'critical')``).
+    **kwargs
+        Other options of the BaryonForge Mead20 profiles (e.g. ``r_min_int``, ``r_max_int``,
+        ``r_steps``, ``c_M_relation``).
+
+    Returns
+    -------
+    dmo, dmb : BaryonForge profiles
+        ``DarkMatterOnly`` and ``DarkMatterBaryon`` profiles.
+
+    Notes
+    -----
+    The masses of the calibration are converted from Msun/h to Msun by BaryonForge with h = 0.7.
+    """
+    from BaryonForge.Profiles.Mead20 import Tagn2pars
+    M20 = bfg.Profiles.Mead20
+    params = dict(bfg_params)
+    if 'log10_T_AGN' in params:
+        params = {**Tagn2pars(float(params.pop('log10_T_AGN')), mode=params.pop('calibration', 'All')), **params}
+    kwargs = dict(params, mass_def=pyccl.halos.massdef.MassDef(*mass_def), **kwargs)
+    return M20.DarkMatterOnly(**kwargs), M20.DarkMatterBaryon(**kwargs)
+
+
+def _profile_name(profile: bfg.Profiles.Base.BaseBFGProfiles) -> str:
+    # model and class of a profile (e.g. 'Schneider19.DarkMatterOnly'), for the config.yaml of the shells
+    return f'{type(profile).__module__.rsplit(".", 1)[-1]}.{type(profile).__name__}'
 
 
 class _MassThreshold(bfg.Profiles.Base.BaseBFGProfiles):

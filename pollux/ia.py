@@ -133,10 +133,15 @@ class CatalogAugmentorIA(CatalogAugmentor):
         if 'density' in self.required_interp_fields:
             delta = catalog['density']
             bias = kwargs.get('bias', 0.0)
+            # galaxies are placed with the density smoothed for their positions, and delta may have another
+            # smoothing: where 1 + bias delta <= 0, no modulation (factor 1) rather than infinite or of the wrong sign
+            weight = 1. + bias * delta
+            ok = weight > 0.
             for model in ('TA', 'TT'):
                 delta_b = self.parameters[f'delta_b_{model}']
                 if delta_b != 0.0 and model in self.model:
-                    factor = _density_factor(delta, bias, delta_b)
+                    factor = np.ones_like(delta, dtype=float)
+                    factor[ok] = np.maximum(0., 1. + (bias + delta_b) * delta[ok]) / weight[ok]
                     catalog[f'e1_ia_{model.lower()}'] *= factor
                     catalog[f'e2_ia_{model.lower()}'] *= factor
 
@@ -195,17 +200,3 @@ class CatalogAugmentorIA(CatalogAugmentor):
         if 'TT' in self.model:
             amplitudes['a2'] = self.parameters['A_TT']
         return amplitudes
-
-
-def _density_factor(delta: np.ndarray, bias: float, delta_b: float) -> np.ndarray:
-    """Return the density modulation of the intrinsic alignments, ``max(0, 1 + (bias + delta_b) delta) / (1 + bias delta)``.
-
-    Galaxies are placed with the density smoothed for their positions, and ``delta`` (the
-    ``density`` field of the catalog) may have another smoothing: where ``1 + bias delta <= 0``,
-    the factor is 1 (no modulation) rather than infinite or of the wrong sign.
-    """
-    weight = 1. + bias * delta
-    factor = np.ones_like(delta, dtype=float)
-    ok = weight > 0.
-    factor[ok] = np.maximum(0., 1. + (bias + delta_b) * delta[ok]) / weight[ok]
-    return factor

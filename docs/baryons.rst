@@ -15,7 +15,8 @@ Inputs
   :class:`~pollux.reader.HACCHaloReader` and the same options, whose ``construct_catalogs`` writes one halo catalog
   per shell;
 - the dark-matter-only and baryonified halo profiles, e.g. those of Schneider et al. (2019) from
-  :func:`~pollux.baryons.s19_profiles`, and the halo mass definition and column (``mass_def``, ``mass_name``,
+  :func:`~pollux.baryons.s19_profiles`, or the simpler ones of Mead et al. (2020, HMcode) from
+  :func:`~pollux.baryons.mead20_profiles`, set by a single AGN temperature (``log10_T_AGN``), and the halo mass definition and column (``mass_def``, ``mass_name``,
   ``mass_unit``).
 
 Halos lighter than ``M_min`` (by default 10 particles) are left unchanged. The profiles are convolved with the

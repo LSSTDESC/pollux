@@ -17,7 +17,7 @@ for _nb in glob.glob(os.path.join(_here, '..', 'notebooks', '*.ipynb')):
 project = 'Pollux'
 copyright = '2022-2026, LSST Dark Energy Science Collaboration (DESC)'
 author = 'Cyrille Doux'
-release = '0.1'
+release = '0.2'
 
 extensions = [
     'sphinx.ext.autodoc',

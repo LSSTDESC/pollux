@@ -1,8 +1,11 @@
 Changelog
 =========
 
-Development
+Version 0.2
 -----------
+
+Production of the HACC-HOS-Y1 lightcones (`PR #34 <https://github.com/LSSTDESC/pollux/pull/34>`_).
+
 
 - Maps on padded and apodized footprints, for all harmonic transforms.
 - Density contrast relative to the cosmic mean; means removed only for harmonic transforms, and added back after smoothing.

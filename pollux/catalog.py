@@ -2075,7 +2075,7 @@ class CatalogGenerator(ABC):
     # shape fields of the shear legs of the predictions: lensing shear (G) and intrinsic alignments (I)
     _SHAPES = {'shear': ('shear',), 'ia': ('ia',), 'shear_plus_ia': ('shear', 'ia'), 'observed': ('shear', 'ia')}
 
-    def predict_2pt(self, theta: dict, nell: int = 500, *, shapes: str = 'shear') -> dict:
+    def predict_2pt(self, theta: dict, nell: int = 500, *, shapes: str = 'shear', pixel_window: bool = True) -> dict:
         """Predict the catalog two-point correlation functions.
 
         Predictions use the matter power spectrum of the catalog's shells (see :meth:`predict_cls`).
@@ -2095,6 +2095,10 @@ class CatalogGenerator(ABC):
             ``e2_obs`` (with shape noise, of zero mean), predicted as ``'shear_plus_ia'``, or as
             ``'shear'`` without intrinsic alignments (``include_ia`` of :class:`~pollux.catalog.CatalogAugmentorShear`).
             See :attr:`ia_tracers`.
+        pixel_window : bool, optional
+            If True (default), multiply the spectra by the pixel window of the maps (one per field),
+            as :meth:`predict_cls`: galaxies are placed in the pixels of the density maps, and the
+            fields are interpolated from pixelized maps.
 
         Returns
         -------
@@ -2107,6 +2111,7 @@ class CatalogGenerator(ABC):
             tracers['ia'] = self.ia_tracers
             if tracers['ia'] is None:
                 raise ValueError(f"shapes={shapes!r} needs an intrinsic-alignment augmentor")
+        f_ell = hp.pixwin(self.lensing.nside, lmax=self.b.lmax) if pixel_window else None
         xi = {}
         for data_type, type_pairs in theta.items():
             if data_type not in self._SACC_TYPE_COMPONENT_2PT:
@@ -2119,7 +2124,7 @@ class CatalogGenerator(ABC):
             for kind_i in legs[0]:
                 for kind_j in legs[1]:
                     pairs = {(i, j): (tracers[kind_i][i], tracers[kind_j][j]) for i, j in type_pairs}
-                    res = self.lensing.theory.predict_2pt(pairs, type_pairs, self.b.lmax, nell=nell)
+                    res = self.lensing.theory.predict_2pt(pairs, type_pairs, self.b.lmax, nell=nell, f_ell=f_ell)
                     for ij, r in res.items():
                         xi[data_type][ij] = xi[data_type][ij] + (r if component is None else r[component])
         return xi

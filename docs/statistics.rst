@@ -71,7 +71,11 @@ Predictions use two objects of :mod:`pollux.cosmo`, shared by builders and catal
 
 Bandpowers are predicted as measured: with the bandpower windows :math:`W_{b\ell}` of the NaMaster workspace and
 the pixel window :math:`p_\ell`, :math:`C_b = \sum_\ell W_{b\ell}\, p_\ell^2\, C_\ell`
-(:meth:`~pollux.cosmo.Theory.binned_cl`).
+(:meth:`~pollux.cosmo.Theory.binned_cl`). The pixel window is also in the correlation functions of the catalogs,
+from :math:`p_\ell^2 C_\ell` (``pixel_window`` of :meth:`~pollux.catalog.CatalogGenerator.predict_cls` and
+:meth:`~pollux.catalog.CatalogGenerator.predict_2pt`), since galaxies are placed in the pixels of the density maps and
+the fields are interpolated from pixelized maps. The bilinear interpolation probably adds a window of its own, which the
+predictions don't include: ``ξ-`` remains low below a few pixels.
 
 A tracer smoothed by a Gaussian of comoving scale ``s`` multiplies the matter power spectrum by
 ``exp(-k² s² / 2)``, which is exact in Limber for a transverse smoothing. Scales that change from shell to shell

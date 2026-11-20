@@ -8,6 +8,11 @@ Planned technical developments of pollux, with their GitHub issue when there is 
   - Separate lens and source catalogs (e.g. maglim-like lenses and metadetect-like sources), each with its own n(z), density and interpolated fields (no shear for lenses): an option for catalogs without the shear and IA augmentors in the pipeline, and a catalog block per sample in the run scripts.
   - Sample galaxies from halos with a halo occupation distribution (HOD), as an alternative to the biased sampling of the density field (`HOD.py`, placeholder for now) ([#9](https://github.com/LSSTDESC/pollux/issues/9)).
   - Make the pixel-scale floor of the smoothing (`Tracer.effective_smooth_Mpc`) a parameter.
+  - Remove the pixel effects from the catalogs, so that they compare to data at all scales above a recorded resolution:
+    - evaluate the fields exactly at the galaxy positions from their a_lm (e.g. `ducc0.sht.experimental.synthesis_general`), instead of the bilinear interpolation of maps, which adds a window of its own;
+    - deconvolve the pixel window of the shear and convergence (as done for the smoothed fields), with a band limit or mild smoothing against the particle shot noise near ℓmax;
+    - draw the galaxy positions from the density interpolated within each pixel, instead of uniformly;
+    - record the transfer function of each field in the catalog's `config.yaml` (smoothing per shell, band limit, pixel window), read by the predictions (`pixel_window` of `predict_cls` and `predict_2pt`) instead of set by hand, and documented as the scale cuts of the catalogs.
 - Systematics
   - Variable depth on the sky: galaxy density and shape noise varying with position.
   - Variable redshift distributions on the sky.

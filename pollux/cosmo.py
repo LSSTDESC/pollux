@@ -695,7 +695,7 @@ class Theory:
                     outputs.append(cov)
         return tuple(outputs)
 
-    def predict_2pt(self, pairs: dict, theta: np.ndarray | dict, lmax: int, nell: int = 500) -> dict:
+    def predict_2pt(self, pairs: dict, theta: np.ndarray | dict, lmax: int, nell: int = 500, f_ell: np.ndarray | None = None) -> dict:
         """Predict real-space correlation functions of tracer pairs.
 
         Parameters
@@ -709,6 +709,10 @@ class Theory:
             Maximum multipole of the C_ell used for the Hankel transform.
         nell : int, optional
             Number of log-spaced multipoles in ``[1, lmax]``.
+        f_ell : ndarray or None, optional
+            Window applied to the fields (e.g. the pixel window), at the multipoles ``0, 1, ...``
+            up to at least ``lmax``: the C_ell are multiplied by ``f_ell**2`` (as in :meth:`binned_cl`)
+            before the Hankel transform.
 
         Returns
         -------
@@ -718,14 +722,15 @@ class Theory:
             C_EE - C_BB, see :meth:`angular_cl`).
         """
         ell = np.geomspace(1, lmax, nell)
+        window = 1. if f_ell is None else np.interp(ell, np.arange(len(f_ell)), f_ell)**2
         xi = {}
         for key, (t1, t2) in pairs.items():
             corr = self._CORRELATION_TYPES[t1.kind, t2.kind]
             theta_deg = np.asarray(theta[key] if isinstance(theta, dict) else theta) / 60.
-            cl = self.angular_cl(t1, t2, ell)
+            cl = self.angular_cl(t1, t2, ell) * window
             if isinstance(corr, tuple):
                 # xi+- of spin-2 fields: from C_EE +- C_BB
-                cl_bb = self.angular_cl(t1, t2, ell, bb=True)
+                cl_bb = self.angular_cl(t1, t2, ell, bb=True) * window
                 xi[key] = tuple(self._correlation(ell, cl + sign * cl_bb, theta_deg, c) for c, sign in zip(corr, (1., -1.), strict=True))
             else:
                 xi[key] = self._correlation(ell, cl, theta_deg, corr)

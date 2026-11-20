@@ -5,7 +5,7 @@ Planned technical developments of pollux, with their GitHub issue when there is 
 - Simulations
   - Ingest the Gower Street simulations ([#30](https://github.com/LSSTDESC/pollux/issues/30)).
 - Galaxies
-  - Separate lens and source catalogs (e.g. maglim-like lenses and metadetect-like sources), each with its own n(z), density and interpolated fields (no shear for lenses): an option for catalogs without the shear and IA augmentors in the pipeline, and a catalog block per sample in the run scripts.
+  - Separate lens and source catalogs (e.g. maglim-like lenses and metadetect-like sources), each with its own n(z), density and interpolated fields (no shear for lenses): an option for catalogs without the shear and IA augmentors in the pipeline, and a catalog block per sample in the run scripts. With different footprints or masks per sample, the NaMaster workspaces of the Cls must be keyed by the footprints of both fields of a pair, not by one.
   - Sample galaxies from halos with a halo occupation distribution (HOD), as an alternative to the biased sampling of the density field (`HOD.py`, placeholder for now) ([#9](https://github.com/LSSTDESC/pollux/issues/9)).
   - Make the pixel-scale floor of the smoothing (`Tracer.effective_smooth_Mpc`) a parameter.
   - Remove the pixel effects from the catalogs, so that they compare to data at all scales above a recorded resolution:

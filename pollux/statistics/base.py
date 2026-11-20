@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from abc import ABC, abstractmethod
 from typing import Any, Callable
 
@@ -134,7 +133,7 @@ class TwoPointStatistics(ABC):
         Parameters
         ----------
         wsp_fname : str
-            File of the workspace; the windows are at ``{wsp_fname without .wsp}_bpws.npy``.
+            File of the workspace; the windows are next to it (:meth:`_path_bpws`).
         wsp : callable
             Returns the workspace, called only if the windows are not saved.
 
@@ -143,10 +142,18 @@ class TwoPointStatistics(ABC):
         ndarray
             Shape ``(n_cl, n_bands, n_cl, lmax + 1)``.
         """
-        fname = wsp_fname.replace('.wsp', '_bpws.npy')
-        if not os.path.exists(fname):
-            PolluxIO.write_npy(fname, wsp().get_bandpower_windows())
-        return PolluxIO.read_npy(fname)
+        return PolluxIO.cached(TwoPointStatistics._path_bpws(wsp_fname), lambda: wsp().get_bandpower_windows(), PolluxIO.read_npy, PolluxIO.write_npy)
+
+    @staticmethod
+    def _path_bpws(wsp_fname: str) -> str:
+        """Return the file of the bandpower windows of a workspace, next to it (``{name}_bpws.npy``)."""
+        return wsp_fname.replace('.wsp', '_bpws.npy')
+
+    @staticmethod
+    def _write_wsp(fname: str, wsp: Any) -> None:
+        """Write a workspace, and its bandpower windows apart (:meth:`_saved_bpws`)."""
+        PolluxIO.write_wsp(fname, wsp)
+        TwoPointStatistics._saved_bpws(fname, lambda: wsp)
 
 
 def _tracer_index(name: str) -> int:

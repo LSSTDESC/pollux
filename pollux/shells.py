@@ -528,13 +528,11 @@ class ShellBuilder(MapBuilder):
         """Save the table of the shells (:meth:`info_table`) to ``shells.fits``, unless it exists.
 
         The table follows from the configuration of the products, which :func:`pollux.io.config.write_config`
-        checks against the existing one.
+        checks against the existing one, so an existing table is the same.
         """
         fname = self.io.path(self.product, 'shells')
-        if os.path.exists(fname):
-            return
-
-        self.io.write_table(fname, [fits.BinTableHDU(self.info_table(), name='SHELLS')])
+        if not os.path.exists(fname):
+            self.io.write_table(fname, [fits.BinTableHDU(self.info_table(), name='SHELLS')])
 
     def random_isometries(self, group_isometries: bool | float | None = None, get_shell_identifier: bool = False) -> list:
         r"""Generate random affine isometries for shells.
@@ -831,7 +829,7 @@ class ShellBuilder(MapBuilder):
         Notes
         -----
         Orphan particles are added when ``self.add_orphans`` is True
-        (set on :class:`SnapshotInterpShellBuilder`; False everywhere else): their map is built here if missing
+        (set on :class:`SnapshotInterpShellBuilder`; False everywhere else): their map is built here
         (``construct_maps_sub(None, None, do_orphan_ishell=ishell)``), from the orphan particles saved by the
         sub-volumes of the shell, so all of them must be built first.
         """
@@ -839,23 +837,16 @@ class ShellBuilder(MapBuilder):
 
         mask = self.get_mask(nest=True, padded=True)
         for ishell in self.tqdm(ishells, desc="[combine_maps_subs]"):
-            fname = self.path(ishell)
-            shell = self.check_maps(read=True, fname=fname)
-            if shell is not None:
-                shells[ishell] = shell
-                continue
-
             isubs = list(self.reader.isubs_for_snapshot(ishell))
             if self.add_orphans:
                 isubs.append('orphan')
-                if not os.path.exists(self.path(ishell, sub='orphan')):
-                    self.construct_maps_sub(None, None, do_orphan_ishell=ishell)
+                self.construct_maps_sub(None, None, do_orphan_ishell=ishell)
             shell_sum = MapSum(mask, self.nside_c, self.dtype)
             for _, sub_map in self.iter_maps(ishell, isubs=isubs, allow_missing=allow_missing_subs, desc=f"[combine_maps_subs: shell {ishell}]"):
                 shell_sum.add(sub_map)
             shell = shell_sum.to_map()
 
-            self._save_map(shell, fname)
+            self._save_map(shell, self.path(ishell))
 
             shells[ishell] = shell
 
@@ -921,16 +912,14 @@ class ShellBuilder(MapBuilder):
         """Return the comoving distance of the far edge of a shell, converting smoothing scales to angles."""
         return self.shell_edges_comoving_distance[ishell + 1]
 
-    def compute_tidal_tensor_maps(
-            self,
-            ishells: int | Iterable[int] | None = None,
-            smooth_Mpc: float | None = None,
-            lmax: int | None = None,
-            save_field_map: bool = True) -> list[hsp.HealSparseMap] | dict[int, list[hsp.HealSparseMap]]:
+    def compute_tidal_tensor_maps(self,
+                                  ishells: int | Iterable[int] | None = None,
+                                  smooth_Mpc: float | None = None,
+                                  save_field_map: bool = True) -> list[hsp.HealSparseMap] | dict[int, list[hsp.HealSparseMap]]:
         r"""Compute tidal tensor component maps from shell density maps.
 
         For each shell, computes a spin-2 transform of the E-mode a_lm of the
-        density map, and combines it with the density (trace) to obtain
+        density map (saved by :meth:`compute_alms`), and combines it with the density (trace) to obtain
         approximate 2D tidal components (t11, t22, t12) on the sky::
 
             t11 = delta / 6 + Q / 2,  t22 = delta / 6 - Q / 2,  t12 = U = 2 s12
@@ -947,9 +936,6 @@ class ShellBuilder(MapBuilder):
         smooth_Mpc : float or None, optional
             Comoving Gaussian smoothing scale in Mpc of the density a_lm (angular width
             at the shell's far edge, see :meth:`_smooth_sigma`).
-        lmax : int or None, optional
-            Maximum multipole used for harmonic transforms. Defaults to
-            ``3*nside - 1``.
         save_field_map : bool, optional
             With ``smooth_Mpc``, also save the smoothed density map, from the same
             a_lm (as :meth:`~pollux.map_builder.MapBuilder.compute_maps_from_alms`).
@@ -976,24 +962,14 @@ class ShellBuilder(MapBuilder):
         the transverse part of the traceless tidal tensor :math:`s_{ij} = (\partial_i \partial_j / \nabla^2 - \delta_{ij} / 3)\,
         \delta`, for a shell with no line-of-sight component: :math:`t_{11} + t_{22} = \delta / 3`.
         """
-        if lmax is None:
-            lmax = 3 * self.nside - 1
-
         _, ipix = self.get_mask(nest=False, return_ipix=True, padded=True)
         whats = ['t11', 't22', 't12']
         save_field_map = save_field_map and smooth_Mpc is not None
 
         ts = {}
         for ishell in self.tqdm(ishells, desc="[compute_tidal_tensor]"):
-            t11 = self.check_maps(read=True, fname=self.path(ishell, what='t11', smooth_Mpc=smooth_Mpc))
-            t22 = self.check_maps(read=True, fname=self.path(ishell, what='t22', smooth_Mpc=smooth_Mpc))
-            t12 = self.check_maps(read=True, fname=self.path(ishell, what='t12', smooth_Mpc=smooth_Mpc))
-            field_done = not save_field_map or os.path.exists(self.path(ishell, what=self.smoothed_field_what, smooth_Mpc=smooth_Mpc))
-            if t11 is not None and t22 is not None and t12 is not None and field_done:
-                ts[ishell] = [t11, t22, t12]
-                continue
-
-            alm = self.compute_alms(ishell, pol=False, lmax=lmax)
+            alm = self.load_alms(ishell)
+            lmax = hp.Alm.getlmax(len(alm))
 
             if smooth_Mpc is not None:
                 # smoothed density, from the a_lm smoothed in place (reused for the tidal field below)
@@ -1151,10 +1127,6 @@ class SnapshotShellBuilder(ShellBuilder):
         if ijob is not None:
             ishell, isub = self.reader.job_args(ijob)
         fname = self.path(ishell, sub=isub)
-
-        shell = self.check_maps(read=True, fname=fname)
-        if shell is not None:
-            return shell
 
         # get shell radii
         chi_edges = self.shell_edges_comoving_distance
@@ -1326,15 +1298,6 @@ class SnapshotShellBuilder(ShellBuilder):
             isubs = self.reader.isubs_for_snapshot(ishell)
 
             fname = self.path(ishell, what='catalog')
-
-            if os.path.exists(fname):
-                try:
-                    out[ishell] = self.io.read_table(fname)
-                    logger.debug("Found and loaded catalog at %s.", fname)
-                    continue
-                except Exception as e:
-                    warnings.warn(f"Cannot read catalog at {fname}: {e}.")
-
             hdul = [fits.PrimaryHDU()]
 
             for isub in self.tqdm(isubs, desc=f"[construct_catalogs: shell {ishell}]"):
@@ -1533,11 +1496,6 @@ class LightconeShellBuilder(ShellBuilder):
             ishell, isub = self.reader.job_args(ijob)
         fname = self.path(ishell, sub=isub)
 
-        # check if shell has already been created
-        shell = self.check_maps(read=True, fname=fname)
-        if shell is not None:
-            return shell
-
         # get shell radii and redshifts
         chi_edges = self.shell_edges_comoving_distance
         rmin2, rmax2 = chi_edges[ishell]**2, chi_edges[ishell + 1]**2
@@ -1653,10 +1611,6 @@ class SnapshotInterpShellBuilder(ShellBuilder):
             ishell = do_orphan_ishell
 
         fname = self.path(ishell, sub='orphan' if do_orphan_ishell is not None else isub)
-
-        shell = self.check_maps(read=True, fname=fname)
-        if shell is not None:
-            return shell
 
         # get lightcone line
         z_edges = self.shell_edges_redshift

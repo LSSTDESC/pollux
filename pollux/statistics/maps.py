@@ -18,7 +18,6 @@ import pyccl
 import pymaster as nmt
 import sacc
 
-from ..io import layout
 from ..cosmo import Theory, Tracer
 from ..utils.binning import binning_id, make_nmtbin_logspaced
 from .base import TwoPointStatistics
@@ -137,12 +136,12 @@ class MapStatistics(TwoPointStatistics):
             previous_pair = (-1, -1)
             for i, j in self.tqdm(pairs, desc="[compute_cls]"):
                 if not i == previous_pair[0]:
-                    almi = self.compute_alms(i)
+                    almi = self.load_alms(i)
                 if i == j:
                     almj = almi
                 else:
                     if not j == previous_pair[1]:
-                        almj = self.compute_alms(j)
+                        almj = self.load_alms(j)
                 pcl = hp.alm2cl(almi, almj)
                 cl[i, j] = wsp.decouple_cell([pcl])[0]
                 previous_pair = (i, j)
@@ -223,24 +222,18 @@ class MapStatistics(TwoPointStatistics):
         Lazy, so that the builder stays light to pickle: the ``NmtWorkspace`` is
         not constructed until first accessed.
         """
-        fname = self._wsp_path
+        return self.io.cached(self._path_wsp, self._compute_wsp, self.io.read_wsp, self._write_wsp)
+
+    def _compute_wsp(self) -> nmt.NmtWorkspace:
+        # workspace of the alm weights and binning (see wsp)
+        mask = self._alm_weights
+        dummy_f = nmt.NmtField(mask, [np.zeros_like(mask)], lite=True)
         wsp = nmt.NmtWorkspace()
-        if os.path.exists(fname):
-            wsp.read_from(fname)
-            logger.info("Found and loaded workspace at %s.", fname)
-        else:
-            mask = self._alm_weights
-            b = self.b
-            dummy_f = nmt.NmtField(mask, [np.zeros_like(mask)], lite=True)
-            wsp.compute_coupling_matrix(dummy_f, dummy_f, b)
-            with layout.atomic_write(fname) as tmp:
-                wsp.write_to(tmp)
-            logger.info("Computed and saved workspace to file %s.", fname)
-            self._saved_bpws(fname, lambda: wsp)
+        wsp.compute_coupling_matrix(dummy_f, dummy_f, self.b)
         return wsp
 
     @property
-    def _wsp_path(self) -> str:
+    def _path_wsp(self) -> str:
         """File of the NaMaster workspace, shared by the realizations with the same footprint and binning."""
         padding = f'_pad{self.padding_deg:g}{self.apotype or ""}' if self.padding_deg is not None else ''
         if self.replicate_octant:
@@ -402,7 +395,7 @@ class MapStatistics(TwoPointStatistics):
         ndarray
             Shape ``(n_cl, n_bands, n_cl, lmax + 1)``.
         """
-        return self._saved_bpws(self._wsp_path, lambda: self.wsp)
+        return self._saved_bpws(self._path_wsp, lambda: self.wsp)
 
     def _noise_cls(self, imap: int) -> float | np.ndarray:
         """Return the noise angular power spectrum for one map.
@@ -576,7 +569,7 @@ class MapStatistics(TwoPointStatistics):
             kappa[imap] = {}
 
             # read the alm's
-            alm = self.compute_alms(imaps=imap)[imap]
+            alm = self.load_alms(imap)
             lmax = hp.Alm.getlmax(len(alm))
             alm = hp.sphtfunc.resize_alm(alm, lmax=lmax, mmax=lmax, lmax_out=lmax_out, mmax_out=lmax_out)
 

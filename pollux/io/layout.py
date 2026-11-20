@@ -29,7 +29,8 @@ import os
 import pickle
 import socket
 import uuid
-from collections.abc import Iterator
+import warnings
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from typing import Any
 
@@ -54,7 +55,7 @@ class PolluxIO:
     catalog tag): builders and catalogs get an object with their own options (:meth:`with_options`).
 
     Files are written and read by format (``write_map`` and ``read_map``, ``_alm``, ``_table``, ``_sacc``,
-    ``_npy``, ``_pickle``), writes being atomic (:func:`atomic_write`): readers and resumed runs never see a
+    ``_npy``, ``_wsp``, ``_pickle``), writes being atomic (:func:`atomic_write`): readers and resumed runs never see a
     partial file.
 
     Parameters
@@ -178,6 +179,42 @@ class PolluxIO:
         """
         return os.path.join(self.dir(product, **dir_kwargs), '_'.join(str(p) for p in name if p is not None) + f'.{ext}')
 
+    @staticmethod
+    def cached(fname: str, compute: Callable[[], Any], read: Callable[[str], Any], write: Callable[[str, Any], None]) -> Any:
+        """Return an object saved at ``fname``, or compute it and save it there.
+
+        For objects that computations need and that are expensive to make again (e.g. NaMaster workspaces):
+        the first process computes and saves them, the others (and later calls) read them back. The products
+        themselves are made by the pipeline tasks, which skip those already saved.
+
+        Parameters
+        ----------
+        fname : str
+            File of the object.
+        compute : callable
+            Returns the object.
+        read : callable
+            Reads the object from ``fname``.
+        write : callable
+            Writes the object to ``fname`` (atomically, e.g. a ``write_*`` method).
+
+        Returns
+        -------
+        object
+            The object read from ``fname`` if it is there and readable (a warning if not readable), otherwise
+            computed and written.
+        """
+        if os.path.exists(fname):
+            try:
+                obj = read(fname)
+                logger.debug("Found and loaded %s.", fname)
+                return obj
+            except Exception as e:
+                warnings.warn(f"Cannot read {fname} ({e}): computing it again.")
+        obj = compute()
+        write(fname, obj)
+        return obj
+
     # files, by format: written atomically (see :func:`atomic_write`), read back from their path (see :meth:`path`)
 
     @staticmethod
@@ -240,6 +277,21 @@ class PolluxIO:
         """Write a NumPy array."""
         with atomic_write(fname) as tmp:
             np.save(tmp, array)
+        logger.debug("Saved to file %s.", fname)
+
+    @staticmethod
+    def read_wsp(fname: str, read_unbinned_MCM: bool = True) -> Any:
+        """Read a NaMaster workspace (``read_unbinned_MCM``: also the unbinned mode-coupling matrix, needed for bandpower windows)."""
+        import pymaster as nmt  # here: only the statistics need NaMaster
+        wsp = nmt.NmtWorkspace()
+        wsp.read_from(fname, read_unbinned_MCM=read_unbinned_MCM)
+        return wsp
+
+    @staticmethod
+    def write_wsp(fname: str, wsp: Any) -> None:
+        """Write a NaMaster workspace."""
+        with atomic_write(fname) as tmp:
+            wsp.write_to(tmp)
         logger.debug("Saved to file %s.", fname)
 
     @staticmethod

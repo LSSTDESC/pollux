@@ -21,7 +21,6 @@ import sacc
 import treecorr
 from astropy.io import fits
 
-from ..io import layout
 from ..io.layout import PolluxIO
 from ..cosmo import Tracer, TracerSum
 from ..utils.binning import binning_id
@@ -235,7 +234,7 @@ class CatalogStatistics(TwoPointStatistics):
         """Compute the NaMaster catalog fields of tomographic bins, used by :meth:`compute_cls`.
 
         Each field (its a_lm and those of its mask) is the costly part of the catalog Cls: it is
-        computed once per bin and saved as an intermediate file (:meth:`_cls_field_path`), read by
+        computed once per bin and saved as an intermediate file (:meth:`_path_cls_field`), read by
         later calls instead of loading the catalog again.
 
         Parameters
@@ -282,10 +281,10 @@ class CatalogStatistics(TwoPointStatistics):
 
         fields = {'density': {}, 'shear': {}}
         for ibin in self.lensing.tqdm(ibins, desc="[compute_alms]"):
-            fnames = {kind: self._cls_field_path(kind, ibin, options) for kind in kinds}
+            fnames = {kind: self._path_cls_field(kind, ibin, options) for kind in kinds}
             missing = [kind for kind in kinds if not (save and os.path.exists(fnames[kind]))]
             if missing:
-                built = self._build_cls_fields(ibin, missing, **options)
+                built = self._compute_cls_fields(ibin, missing, **options)
             for kind in kinds:
                 if kind in missing:
                     fields[kind][ibin] = built[kind]
@@ -339,7 +338,7 @@ class CatalogStatistics(TwoPointStatistics):
             bin_tracers = [TracerSum(f'{shapes}_{i}', [tracers[term][i] for term in terms]) for i in range(self.ncats)]
         return Shapes(shapes, terms, columns, bin_tracers, shape_noise=shapes == 'observed')
 
-    def _cls_field_path(self, kind: str, ibin: int, options: dict) -> str:
+    def _path_cls_field(self, kind: str, ibin: int, options: dict) -> str:
         """Return the intermediate file of the catalog field ``kind`` (density or shear) of a bin.
 
         The folder is named by an identifier of what the field depends on: the multipoles of the
@@ -378,7 +377,7 @@ class CatalogStatistics(TwoPointStatistics):
             raise ValueError(f"cls_lmax_mask={lmax_mask} is below the fields' lmax={self.b.lmax}")
         return lmax_mask
 
-    def _build_cls_fields(
+    def _compute_cls_fields(
             self, ibin: int, kinds: list[str], shear_cols: tuple[str, str], subsample: float | None, remove_mean: bool, randoms: bool, nran_factor: int,
             shared_randoms: bool, seed: int) -> dict[str, nmt.NmtField]:
         """Build the catalog fields ``kinds`` (``'density'``, ``'shear'``) of one bin (see :meth:`compute_alms`)."""
@@ -463,7 +462,7 @@ class CatalogStatistics(TwoPointStatistics):
         the fields' ``mask_amplitude`` (see :meth:`compute_cls`); with clustered
         sources, it misses the coupling from the clustering of galaxy positions.
 
-        Workspaces are cached on disk (:meth:`_wsp_path`), with their bandpower
+        Workspaces are cached on disk (:meth:`_path_wsp`), with their bandpower
         windows when computed; shared workspaces are also cached in memory.
 
         Parameters
@@ -492,36 +491,33 @@ class CatalogStatistics(TwoPointStatistics):
             return self._wsp[stat][0]
 
         # otherwise read it from disk, or compute and save it (with its bandpower windows)
-        fname = self._wsp_path(stat, pair, field_kwargs.get('randoms', False))
-        wsp = nmt.NmtWorkspace()
-        if os.path.exists(fname):
-            wsp.read_from(fname, read_unbinned_MCM=read_unbinned_MCM)
-            logger.info("Found and loaded workspace at %s.", fname)
-        else:
-            if pair is None:
-                # shared: fields of the footprint mask, with the spins of the statistic
-                spins = {'clustering': (0, 0), 'shear': (2, 2), 'shear_clustering': (0, 2)}[stat]
-                f_spin = {spin: nmt.NmtField(self.footprint, None, spin=spin, lmax=self.b.lmax, lmax_mask=self.lmax_mask) for spin in set(spins)}
-                fields = (f_spin[spins[0]], f_spin[spins[1]])
-            elif fields is None:
-                # per pair: the catalog fields of the two bins
-                i, j = pair
-                f_dens, f_shear = self.compute_alms(sorted({i, j}), [stat], **field_kwargs)
-                f1, f2 = {'clustering': (f_dens, f_dens), 'shear': (f_shear, f_shear), 'shear_clustering': (f_dens, f_shear)}[stat]
-                fields = (f1[i], f2[j])
-            wsp.compute_coupling_matrix(*fields, self.b)
-            with layout.atomic_write(fname) as tmp:
-                wsp.write_to(tmp)
-            logger.info("Computed and saved workspace to file %s.", fname)
-            self._saved_bpws(fname, lambda: wsp)
-            read_unbinned_MCM = True
+        wsp = self.io.cached(
+            self._path_wsp(stat, pair, field_kwargs.get('randoms', False)), lambda: self._compute_wsp(stat, pair, fields, **field_kwargs),
+            lambda fname: self.io.read_wsp(fname, read_unbinned_MCM=read_unbinned_MCM), self._write_wsp)
 
         # keep the shared workspace in memory
         if pair is None:
             self._wsp[stat] = (wsp, read_unbinned_MCM)
         return wsp
 
-    def _wsp_path(self, stat: str, pair: tuple[int, int] | None = None, randoms: bool = False) -> str:
+    def _compute_wsp(self, stat: str, pair: tuple[int, int] | None, fields: tuple | None, **field_kwargs: Any) -> nmt.NmtWorkspace:
+        # workspace of one statistic: shared (pair None), from the footprint, or of a bin pair, from its fields (see wsp)
+        if pair is None:
+            # shared: fields of the footprint mask, with the spins of the statistic
+            spins = {'clustering': (0, 0), 'shear': (2, 2), 'shear_clustering': (0, 2)}[stat]
+            f_spin = {spin: nmt.NmtField(self.footprint, None, spin=spin, lmax=self.b.lmax, lmax_mask=self.lmax_mask) for spin in set(spins)}
+            fields = (f_spin[spins[0]], f_spin[spins[1]])
+        elif fields is None:
+            # per pair: the catalog fields of the two bins
+            i, j = pair
+            f_dens, f_shear = self.compute_alms(sorted({i, j}), [stat], **field_kwargs)
+            f1, f2 = {'clustering': (f_dens, f_dens), 'shear': (f_shear, f_shear), 'shear_clustering': (f_dens, f_shear)}[stat]
+            fields = (f1[i], f2[j])
+        wsp = nmt.NmtWorkspace()
+        wsp.compute_coupling_matrix(*fields, self.b)
+        return wsp
+
+    def _path_wsp(self, stat: str, pair: tuple[int, int] | None = None, randoms: bool = False) -> str:
         """Return the path of a workspace (see :meth:`wsp`).
 
         Parameters
@@ -577,8 +573,8 @@ class CatalogStatistics(TwoPointStatistics):
         FileNotFoundError
             If the workspace of a bin pair has not been computed (see :meth:`compute_cls`).
         """
-        fname = self._wsp_path(stat, pair, randoms)
-        if pair is not None and not os.path.exists(fname) and not os.path.exists(fname.replace('.wsp', '_bpws.npy')):
+        fname = self._path_wsp(stat, pair, randoms)
+        if pair is not None and not os.path.exists(fname) and not os.path.exists(self._path_bpws(fname)):
             raise FileNotFoundError(f"No workspace at {fname}, compute it with compute_cls or wsp.")
         return self._saved_bpws(fname, lambda: self.wsp(stat, pair, randoms=randoms))
 
@@ -753,7 +749,7 @@ class CatalogStatistics(TwoPointStatistics):
         return ell, cl
 
     def _save_cls(self, ell: np.ndarray, cl: dict, shapes: str = 'shear', metadata: dict | None = None) -> str:
-        """Save catalog-based angular power spectra to a SACC FITS file (:meth:`_stat_path`).
+        """Save catalog-based angular power spectra to a SACC FITS file (:meth:`_path_stat`).
 
         The catalog's density and shear fields share the same underlying n(z)
         per bin (galaxy redshifts are drawn from the lensing tracers' own
@@ -779,7 +775,7 @@ class CatalogStatistics(TwoPointStatistics):
         str
             Path to the saved SACC FITS file.
         """
-        return self._save_sacc(self._stat_path('cls', shapes), cl, ell, self._SACC_TYPE_LEGS_CLS, metadata=metadata)
+        return self._save_sacc(self._path_stat('cls', shapes), cl, ell, self._SACC_TYPE_LEGS_CLS, metadata=metadata)
 
     def load_cls(self, return_dict: bool = False, return_errors: bool = False, shapes: str = 'shear') -> sacc.Sacc | tuple:
         """Load catalog-based angular power spectra previously saved by :meth:`_save_cls`.
@@ -806,7 +802,7 @@ class CatalogStatistics(TwoPointStatistics):
             have computed all of them), with no dependency on ``self.lensing``
             beyond the file path.
         """
-        res = self._load_sacc(self._stat_path('cls', shapes), return_dict=return_dict, return_errors=return_errors)
+        res = self._load_sacc(self._path_stat('cls', shapes), return_dict=return_dict, return_errors=return_errors)
         if not return_dict:
             return res
         ell = next(e for pairs in res[0].values() for e in pairs.values())
@@ -1307,7 +1303,7 @@ class CatalogStatistics(TwoPointStatistics):
             return theta_out, xi
 
     def _save_2pt(self, theta: dict, xi: dict, dxi: dict | None = None, shapes: str = 'shear', metadata: dict | None = None) -> str:
-        """Save catalog-based real-space two-point functions to a SACC FITS file (:meth:`_stat_path`).
+        """Save catalog-based real-space two-point functions to a SACC FITS file (:meth:`_path_stat`).
 
         Mirrors :meth:`_save_cls`: the catalog's density and shear fields
         share the same underlying n(z) per bin but are registered under
@@ -1338,9 +1334,9 @@ class CatalogStatistics(TwoPointStatistics):
         str
             Path to the saved SACC FITS file.
         """
-        return self._save_sacc(self._stat_path('2pt', shapes), xi, theta, self._SACC_TYPE_LEGS_2PT, coord='theta', errors=dxi, metadata=metadata)
+        return self._save_sacc(self._path_stat('2pt', shapes), xi, theta, self._SACC_TYPE_LEGS_2PT, coord='theta', errors=dxi, metadata=metadata)
 
-    def _stat_path(self, stat: str, shapes: str = 'shear') -> str:
+    def _path_stat(self, stat: str, shapes: str = 'shear') -> str:
         """Return the file of the statistics ``stat`` (``'cls'`` or ``'2pt'``) measured with the shapes ``shapes``, ``cat_{stat}[_{shapes}].fits``."""
         return self.io.path('catalogs', f'cat_{stat}', None if shapes == 'shear' else shapes)
 
@@ -1369,7 +1365,7 @@ class CatalogStatistics(TwoPointStatistics):
             the file (:meth:`compute_2pt` may not have computed all of them),
             with no dependency on ``self.lensing`` beyond the file path.
         """
-        return self._load_sacc(self._stat_path('2pt', shapes), return_dict=return_dict, return_errors=return_errors)
+        return self._load_sacc(self._path_stat('2pt', shapes), return_dict=return_dict, return_errors=return_errors)
 
     def predict_2pt(self, theta: dict, nell: int = 500, *, shapes: str = 'shear', pixel_window: bool = True) -> dict:
         """Predict the catalog two-point correlation functions.
@@ -1488,7 +1484,7 @@ class CatalogStatistics(TwoPointStatistics):
             figures.append((fig_name, ylabel, {t: (theta[t], xi[t], xi_th[t], dxi.get(t), xi_ref.get(t), xi_th_ref.get(t)) for t in data_types if t in xi}))
 
         # GI = (shear + IA) - shear - IA, from the same galaxies (data) and from the predictions at the same theta
-        if shapes == 'ia' and all(os.path.exists(self._stat_path('2pt', s)) for s in ('shear', 'shear_plus_ia')):
+        if shapes == 'ia' and all(os.path.exists(self._path_stat('2pt', s)) for s in ('shear', 'shear_plus_ia')):
             _, xi_tot = self.load_2pt(return_dict=True, shapes='shear_plus_ia')
             _, xi_g = self.load_2pt(return_dict=True, shapes='shear')
             th_tot, th_g = self.predict_2pt(theta, shapes='shear_plus_ia'), self.predict_2pt(theta, shapes='shear')

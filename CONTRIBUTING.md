@@ -66,7 +66,10 @@ Statistics are plotted with `plotting.plot_pairs`, one panel per bin pair:
 
 ## Pipeline tasks (`pollux.pipeline.tasks`)
 - One product per task. Plots get their own tasks (`plot_shell_maps`, `plot_kappa_maps`, `plot_catalog_2pt`, `plot_catalog_cls`), separate from the tasks computing what they plot.
-- Tasks skip outputs already on disk, so that a run can be resumed. A true rerun needs a new output directory or tag.
+- Tasks decide what to make: each skips its outputs if saved (`_run(outputs, compute)`), so that a run can be resumed. Builders
+  and catalogs only compute and write, and read their inputs (raising if missing, e.g. `load_alms`); objects that
+  computations need and that are expensive to make again (workspaces, padding) go through `PolluxIO.cached`. A true
+  rerun needs a new output directory or tag.
 - End every memory-heavy task with `_free_memory()`: Parsl workers live across tasks, and would otherwise keep a task's peak memory for the next tasks.
 - Run each task on the executor matching its memory (`pollux.pipeline.config`).
 - Run scripts and their configurations live outside the repository, with the data. Each run records its code and environment (`code_version/`), and refuses to run with uncommitted changes unless allowed.

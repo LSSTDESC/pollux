@@ -176,20 +176,13 @@ class BaryonifiedShellBuilder(ShellBuilder):
 
         Notes
         -----
-        Only halos heavier than ``M_min`` are baryonified. Shells already on disk
-        are read instead of recomputed; the interpolator is rebuilt for the others
-        (see :meth:`_setup_interpolator`).
+        Only halos heavier than ``M_min`` are baryonified. The interpolator is
+        rebuilt for each shell (see :meth:`_setup_interpolator`).
         """
         shells = {}
 
         _, ipix = self.get_mask(nest=False, return_ipix=True, padded=True)
         for ishell in self.tqdm(ishells, desc="[construct_maps]"):
-            fname = self.path(ishell)
-            shell = self.check_maps(read=True, fname=fname)
-            if shell is not None:
-                shells[ishell] = shell
-                continue
-
             self._setup_interpolator(ishell)
 
             # Load the shell, turn into count map (in RING ordering), and set unseen/empty pixels to 0.
@@ -213,7 +206,7 @@ class BaryonifiedShellBuilder(ShellBuilder):
 
             # Save the baryonified map
             shell = self._make_hspmap(ipix, baryonified_count[ipix])
-            self._save_map(shell, fname)
+            self._save_map(shell, self.path(ishell))
 
             shells[ishell] = shell
 

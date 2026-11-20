@@ -128,13 +128,11 @@ class LensingBuilder(MapBuilder):
                 "for n(z) bins there is no single comoving distance to convert Mpc to an angle.")
         return self.shell_builder.shell_edges_comoving_distance[ikappa + 1]
 
-    def compute_shear_maps(
-            self,
-            ikappas: int | Iterable[int] | None = None,
-            smooth_Mpc: float | None = None,
-            lmax: int | None = None,
-            save_field_map: bool = True) -> list[hsp.HealSparseMap] | dict[int, list[hsp.HealSparseMap]]:
-        """Compute shear (gamma1, gamma2) maps from convergence maps.
+    def compute_shear_maps(self,
+                           ikappas: int | Iterable[int] | None = None,
+                           smooth_Mpc: float | None = None,
+                           save_field_map: bool = True) -> list[hsp.HealSparseMap] | dict[int, list[hsp.HealSparseMap]]:
+        """Compute shear (gamma1, gamma2) maps from the a_lm of convergence maps (saved by :meth:`compute_alms`).
 
         Parameters
         ----------
@@ -145,9 +143,6 @@ class LensingBuilder(MapBuilder):
             deriving shear (angular width at the source plane, see
             :meth:`_smooth_sigma`; only for per-shell maps, ``nzs='snapshots'``).
             Shear maps are saved with the suffix ``_{smooth_Mpc}Mpc``.
-        lmax : int or None, optional
-            Maximum multipole used in harmonic transforms. Defaults to
-            ``3*nside - 1``.
         save_field_map : bool, optional
             With ``smooth_Mpc``, also save the smoothed convergence map, from the same
             a_lm (as :meth:`~pollux.map_builder.MapBuilder.compute_maps_from_alms`).
@@ -160,26 +155,14 @@ class LensingBuilder(MapBuilder):
             - If ``ikappas`` is ``None`` or an iterable: returns a dict keyed by kappa index
               with list values ``[gamma1_map, gamma2_map]``. Also writes maps to disk.
         """
-        if lmax is None:
-            lmax = 3 * self.shell_builder.nside - 1
-
-        # E-mode of the shear from the convergence
-        fl = spin2_factor(3 * self.shell_builder.nside - 1)
-
         _, ipix = self.get_mask(nest=False, return_ipix=True, padded=True)
         save_field_map = save_field_map and smooth_Mpc is not None
 
         gammas = {}
         for ikappa in self.tqdm(ikappas, desc="[compute_shear_maps]"):
-            g1 = self.check_maps(read=True, fname=self.path(ikappa, what='gamma1', smooth_Mpc=smooth_Mpc))
-            g2 = self.check_maps(read=True, fname=self.path(ikappa, what='gamma2', smooth_Mpc=smooth_Mpc))
-            field_done = not save_field_map or os.path.exists(self.path(ikappa, what=self.smoothed_field_what, smooth_Mpc=smooth_Mpc))
-            if g1 is not None and g2 is not None and field_done:
-                gammas[ikappa] = [g1, g2]
-                continue
-
-            # Get harmonic coefficients of convergence map, smoothed in place if requested (and the smoothed convergence saved)
-            klm = self.compute_alms(ikappa, pol=False, lmax=lmax)
+            # harmonic coefficients of the convergence map, smoothed in place if requested (and the smoothed convergence saved)
+            klm = self.load_alms(ikappa)
+            lmax = hp.Alm.getlmax(len(klm))
             if smooth_Mpc is not None:
                 self._smooth_alms(ikappa, klm, smooth_Mpc, lmax)
                 if save_field_map:
@@ -187,8 +170,8 @@ class LensingBuilder(MapBuilder):
                         self._alm2hspmap(klm, ipix, lmax, mean=self._alm_field_mean(ikappa)),
                         self.path(ikappa, what=self.smoothed_field_what, smooth_Mpc=smooth_Mpc))
 
-            # Convert to shear
-            glm_E = hp.almxfl(klm, fl)
+            # E-mode of the shear from the convergence
+            glm_E = hp.almxfl(klm, spin2_factor(lmax))
 
             # Generate shear map (ring-ordered)
             g1, g2 = hp.sphtfunc.alm2map_spin([glm_E, np.zeros_like(glm_E)], nside=self.nside, spin=2, lmax=lmax)
@@ -295,16 +278,6 @@ class BornLensingBuilder(LensingBuilder):
             - If ``ikappas`` is ``None`` or an iterable: returns a dict keyed
               by kappa index with ``HealSparseMap`` values.
         """
-
-        # First check if requested kappas are already present, otherwise rebuild all
-        kappas = self.check_maps(ikappas, read=True)
-        if np.isscalar(ikappas):
-            if kappas is not None:
-                return kappas
-        else:
-            if None not in kappas.values():
-                return kappas
-
         # Loop over shells (read once) and accumulate weighted contributions to all kappas:
         # kappa += w * density, with density = shell / nbar - 1 (or shell - nbar for multiple planes)
         mask = self.get_mask(nest=True, padded=True)
@@ -333,8 +306,7 @@ class BornLensingBuilder(LensingBuilder):
 
         kappas = {ikappa: kappa_sum.to_map() for ikappa, kappa_sum in kappa_sums.items()}
         for ikappa, kappa in kappas.items():
-            fname = self.path(ikappa)
-            self._save_map(kappa, fname)
+            self._save_map(kappa, self.path(ikappa))
 
         return kappas[ikappas] if np.isscalar(ikappas) else kappas
 

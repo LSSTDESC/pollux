@@ -326,84 +326,6 @@ class MapBuilder(MapStatistics, ABC):
               map index with ``HealSparseMap`` values.
         """
 
-    def check_maps(self,
-                   imaps: int | Iterable[int] | None = None,
-                   read: bool = False,
-                   fname: str | None = None,
-                   check_finite: bool = False) -> dict[int, bool | hsp.HealSparseMap | None] | bool | hsp.HealSparseMap | None:
-        """Check existence/readability of map files.
-
-        Parameters
-        ----------
-        imaps : int or array_like of int or None, optional
-            Map indices to check (ignored if ``fname`` is provided).
-        read : bool, optional
-            If True, attempt to read the file(s) with HealSparse. When
-            ``read=True`` the function returns loaded maps (or ``None`` for
-            missing/unreadable files) rather than boolean existence flags.
-        fname : str or None, optional
-            If provided, check this single filename instead of using indices.
-        check_finite : bool, optional
-            If True, validates that values on valid pixels are finite and not
-            identically zero (only used when ``read=True``).
-
-        Returns
-        -------
-        dict or bool or hsp.HealSparseMap or None
-            - If ``fname`` is provided: returns a single value:
-                - when ``read=False``: ``True`` if file exists else ``False``;
-                - when ``read=True``: loaded ``HealSparseMap`` on success or
-                  ``None`` on failure.
-            - If ``imaps`` is a single integer: same single-value behavior as
-              above (based on ``read``).
-            - If ``imaps`` is ``None`` or an iterable: returns a **dict**
-              keyed by map index. Values are either booleans (when
-              ``read=False``) or loaded ``HealSparseMap`` objects / ``None``
-              (when ``read=True``).
-
-        Notes
-        -----
-        Use the dict-returning form to obtain loaded maps for further
-        processing; this makes it straightforward to build a unified mapping
-        of loaded/computed maps keyed by index.
-        """
-        if not (imaps is None or fname is None):
-            raise ValueError("Give imaps or fname, not both")
-
-        def check_one(fname: str) -> bool | hsp.HealSparseMap | None:
-            # existence (or map, with read) of one file
-            if os.path.exists(fname):
-                if read:
-                    try:
-                        m = self.io.read_map(fname, nside_coverage=self.nside_c)
-                        if check_finite:
-                            a = m[m.valid_pixels]
-                            if not (np.all(np.isfinite(a)) and np.any(a)):
-                                logger.debug("Map at %s failed the finite check, ignoring cached file.", fname)
-                                return None
-                        logger.debug("Found and loaded map at %s.", fname)
-                        return m
-                    except Exception as e:
-                        warnings.warn(f"Cannot read map at {fname}: {e}.")
-                        return None
-                else:
-                    logger.debug("Found map at %s.", fname)
-                    return True
-            else:
-                logger.debug("Cannot find map at %s.", fname)
-                return None if read else False
-
-        # a single file, or the maps of the given indices
-        if fname is not None:
-            return check_one(fname)
-
-        out = {}
-        for imap in self.tqdm(imaps, desc="[check_maps]"):
-            fname = self.path(imap)
-            out[imap] = check_one(fname)
-
-        return out[imaps] if np.isscalar(imaps) else out
-
     def load_maps(self, imaps: int | Iterable[int] | None = None, **path_kwargs: Any) -> hsp.HealSparseMap | dict[int, hsp.HealSparseMap]:
         """Load one or multiple HealSparse maps from disk.
 
@@ -684,25 +606,44 @@ class MapBuilder(MapStatistics, ABC):
         The dilation is computed at ``padding_nside`` (pixels within ``padding_deg``
         of the footprint, where the C1 apodization of its complement is below 1,
         whatever ``apotype``) and upgraded to ``nside``, so the padding is accurate
-        to about a ``padding_nside`` pixel. It is read from disk if saved by
-        :meth:`compute_padding`.
+        to about a ``padding_nside`` pixel. Saved once for all builders (:meth:`_path_padding`).
         """
-        mask = self.get_mask(nest=True)
         if self.padding_deg is None:
-            return mask
-        fname = self._padding_path('padded_mask')
-        if os.path.exists(fname):
-            padded = np.zeros(self.npix, dtype=bool)
-            padded[self.io.read_map(fname).valid_pixels] = True
-            logger.debug("Found and loaded padded footprint at %s.", fname)
-            return padded
+            return self.get_mask(nest=True)
+        return self.io.cached(self._path_padding('padded_mask'), self._compute_padded_mask, self._read_padding, self._write_padding)
+
+    def _compute_padded_mask(self) -> np.ndarray:
+        # the footprint dilated by padding_deg (NESTED), see _create_padded_mask
+        mask = self.get_mask(nest=True)
         outside_lowres = (hp.ud_grade((~mask).astype(np.float64), self.padding_nside, order_in='NESTED', order_out='RING') > 0.).astype(np.float64)
         apo_lowres = nmt.mask_apodization(outside_lowres, self.padding_deg, apotype='C1')
         padded_lowres = hp.reorder((apo_lowres < 1.).astype(np.float64), r2n=True) > 0.
         return mask | (hp.ud_grade(padded_lowres.astype(np.float64), self.nside, order_in='NESTED', order_out='NESTED') > 0.)
 
-    def _padding_path(self, what: str) -> str:
-        """Return the path of the padded footprint or alm weights saved by :meth:`compute_padding`.
+    def _read_padding(self, fname: str) -> np.ndarray:
+        # padded footprint (bool) or alm weights (float, RING) saved by _write_padding, as a dense map
+        hspmap = self.io.read_map(fname)
+        ipix = hspmap.valid_pixels
+        if hspmap.dtype == bool:
+            dense = np.zeros(self.npix, dtype=bool)
+            dense[ipix] = True
+            return dense
+        dense = np.zeros(self.npix)
+        dense[hp.nest2ring(self.nside, ipix)] = hspmap[ipix]
+        return dense
+
+    def _write_padding(self, fname: str, dense: np.ndarray) -> None:
+        # padded footprint (bool, NESTED) or alm weights (float, RING), on the pixels of the padded footprint
+        if dense.dtype == bool:
+            ipix = np.flatnonzero(dense)
+            values = np.ones(len(ipix), dtype=bool)
+        else:
+            _, ipix = self.get_mask(nest=True, return_ipix=True, padded=True)
+            values = dense[hp.nest2ring(self.nside, ipix)]
+        self.io.write_map(fname, self._make_hspmap(ipix, values, nest=True, dtype=values.dtype), nocompress=self.nocompress)
+
+    def _path_padding(self, what: str) -> str:
+        """Return the path of the padded footprint or alm weights (shared by the builders of a footprint).
 
         Parameters
         ----------
@@ -759,24 +700,22 @@ class MapBuilder(MapStatistics, ABC):
         return mask
 
     def compute_padding(self) -> None:
-        """Compute and save the padded footprint and the alm weights, if not on disk.
+        """Compute and save the padded footprint and the alm weights (with ``padding_deg``).
 
         Notes
         -----
-        Does nothing without ``padding_deg``. The products (:meth:`get_mask` with
-        ``padded=True``, :attr:`_alm_weights`) are then read from disk
-        (:meth:`_padding_path`) instead of recomputed by every builder.
+        They are saved by the first builder that needs them (:meth:`get_mask` with ``padded=True``,
+        :attr:`_alm_weights`), and read by the others (:meth:`_path_padding`): this makes them once, before
+        the builders of the maps.
         """
+        self.get_mask(nest=True, padded=True)
+        self._alm_weights
+
+    def paths_padding(self) -> list[str]:
+        """Return the files saved by :meth:`compute_padding` (none without ``padding_deg``)."""
         if self.padding_deg is None:
-            return
-        _, ipix = self.get_mask(nest=True, return_ipix=True, padded=True)
-        for what in ('padded_mask', 'alm_weights'):
-            fname = self._padding_path(what)
-            if os.path.exists(fname) or (what == 'alm_weights' and self.apotype is None):
-                continue
-            values = np.ones(len(ipix), dtype=bool) if what == 'padded_mask' else self._alm_weights[hp.nest2ring(self.nside, ipix)]
-            hspmap = self._make_hspmap(ipix, values, nest=True, dtype=values.dtype)
-            self.io.write_map(fname, hspmap, nocompress=self.nocompress)
+            return []
+        return [self._path_padding('padded_mask')] + ([self._path_padding('alm_weights')] if self.apotype is not None else [])
 
     @cached_property
     def _alm_weights(self) -> np.ndarray:
@@ -796,32 +735,26 @@ class MapBuilder(MapStatistics, ABC):
         Padding keeps transforms (e.g. shear from convergence, smoothing) from being
         truncated at the footprint edges. The apodization is computed at ``padding_nside``
         and interpolated bilinearly at ``nside`` (avoiding steps at the ``padding_nside``
-        pixel scale). The result is cached, and read from disk if saved by
-        :meth:`compute_padding`.
+        pixel scale). Apodized weights are saved once for all builders (:meth:`_path_padding`).
         """
-        fname = self._padding_path('alm_weights') if self.padding_deg is not None else None
         if self.replicate_octant:
-            weights = np.ones(self.npix)
-        elif self.padding_deg is None or self.apotype is None:
-            weights = self.get_mask(nest=False, padded=True).astype(np.float64)
-        elif os.path.exists(fname):
-            hspmap = self.io.read_map(fname)
-            ipix = hspmap.valid_pixels
-            weights = np.zeros(self.npix)
-            weights[hp.nest2ring(self.nside, ipix)] = hspmap[ipix]
-            logger.debug("Found and loaded alm weights at %s.", fname)
-        else:
-            padded_lowres = (
-                hp.ud_grade(self.get_mask(nest=True, padded=True).astype(np.float64), self.padding_nside, order_in='NESTED', order_out='RING')
-                > 0.).astype(np.float64)
-            apo_lowres = nmt.mask_apodization(padded_lowres, self.padding_deg, apotype=self.apotype)
-            # 1 on the footprint, and the apodization interpolated (bilinearly) in the padding
-            footprint = self.get_mask(nest=False)
-            weights = footprint.astype(np.float64)
-            ipix_padding = np.flatnonzero(self.get_mask(nest=False, padded=True) & ~footprint)
-            for ipix in np.array_split(ipix_padding, max(1, len(ipix_padding) // 10_000_000)):
-                theta, phi = hp.pix2ang(self.nside, ipix)
-                weights[ipix] = np.clip(hp.get_interp_val(apo_lowres, theta, phi), 0., 1.)
+            return np.ones(self.npix)
+        if self.padding_deg is None or self.apotype is None:
+            return self.get_mask(nest=False, padded=True).astype(np.float64)
+        return self.io.cached(self._path_padding('alm_weights'), self._compute_alm_weights, self._read_padding, self._write_padding)
+
+    def _compute_alm_weights(self) -> np.ndarray:
+        # alm weights with padding_deg and apotype (RING), see _alm_weights
+        padded_lowres = (hp.ud_grade(self.get_mask(nest=True, padded=True).astype(np.float64), self.padding_nside, order_in='NESTED', order_out='RING')
+                         > 0.).astype(np.float64)
+        apo_lowres = nmt.mask_apodization(padded_lowres, self.padding_deg, apotype=self.apotype)
+        # 1 on the footprint, and the apodization interpolated (bilinearly) in the padding
+        footprint = self.get_mask(nest=False)
+        weights = footprint.astype(np.float64)
+        ipix_padding = np.flatnonzero(self.get_mask(nest=False, padded=True) & ~footprint)
+        for ipix in np.array_split(ipix_padding, max(1, len(ipix_padding) // 10_000_000)):
+            theta, phi = hp.pix2ang(self.nside, ipix)
+            weights[ipix] = np.clip(hp.get_interp_val(apo_lowres, theta, phi), 0., 1.)
         return weights
 
     def _make_hspmap(self, ipix: np.ndarray | None = None, values: np.ndarray | None = None, nest: bool = False, dtype: Any = None) -> hsp.HealSparseMap:
@@ -890,7 +823,7 @@ class MapBuilder(MapStatistics, ABC):
         return self.field_hspmap(imap).generate_healpix_map(nest=nest)
 
     def compute_alms(self, imaps: int | Iterable[int] | None = None, **map2alm_kwargs: Any) -> np.ndarray | dict[int, np.ndarray]:
-        """Compute spherical harmonic coefficients a_lm from maps.
+        """Compute the spherical harmonic coefficients a_lm of maps, and save them (intermediate files).
 
         Parameters
         ----------
@@ -901,33 +834,51 @@ class MapBuilder(MapStatistics, ABC):
 
         Returns
         -------
-        dict
-            Mapping ``imap -> alm`` (complex ndarray).
+        ndarray or dict
+            The a_lm of ``imaps`` if an int, else ``{imap: alm}``.
 
         Notes
         -----
-        The a_lm are those of :meth:`_alm_field` times the alm weights.
-        Results are cached (intermediate ``alms_{iii}``, or ``alms_octrep_{iii}`` with ``replicate_octant``): a pre-existing file is loaded
-        instead of recomputing, and a freshly computed alm is saved for later calls.
+        The a_lm are those of :meth:`_alm_field` times the alm weights. They are read back with
+        :meth:`load_alms`.
         """
         alms = {}
-        what = 'alms_octrep' if self.replicate_octant else 'alms'
         for imap in self.tqdm(imaps, desc="[compute_alms]"):
-            fname = self.path(imap, what=what, ext='fits')
-            if os.path.exists(fname):
-                try:
-                    alms[imap] = self.io.read_alm(fname)
-                    logger.debug("Found and loaded alms at %s.", fname)
-                    continue
-                except Exception as e:
-                    warnings.warn(f"Cannot read alms at {fname}: {e}.")
-
             weights, _map = self._alm_field(imap)
             alms[imap] = hp.map2alm(_map * weights, **map2alm_kwargs)
-
-            self.io.write_alm(fname, alms[imap])
-
+            self.io.write_alm(self._path_alms(imap), alms[imap])
         return alms[imaps] if np.isscalar(imaps) else alms
+
+    def load_alms(self, imaps: int | Iterable[int] | None = None) -> np.ndarray | dict[int, np.ndarray]:
+        """Load the a_lm saved by :meth:`compute_alms`.
+
+        Parameters
+        ----------
+        imaps : int or array_like of int or None, optional
+            Map indices. If None, uses all maps.
+
+        Returns
+        -------
+        ndarray or dict
+            The a_lm of ``imaps`` if an int, else ``{imap: alm}``.
+
+        Raises
+        ------
+        FileNotFoundError
+            If the a_lm of a map are not saved.
+        """
+        alms = {}
+        for imap in self.iter(imaps):
+            fname = self._path_alms(imap)
+            if not os.path.exists(fname):
+                raise FileNotFoundError(f"No a_lm of map {imap} at {fname}: compute them first (compute_alms).")
+            alms[imap] = self.io.read_alm(fname)
+            logger.debug("Found and loaded alms at %s.", fname)
+        return alms[imaps] if np.isscalar(imaps) else alms
+
+    def _path_alms(self, imap: int) -> str:
+        """Return the file of the a_lm of one map (``alms_octrep`` with ``replicate_octant``)."""
+        return self.path(imap, what='alms_octrep' if self.replicate_octant else 'alms', ext='fits')
 
     def _alm_field(self, imap: int) -> tuple[np.ndarray, np.ndarray]:
         """Return the alm weights and the field prepared for its a_lm (RING ordering): ``map2alm(field * weights)``.
@@ -1004,8 +955,7 @@ class MapBuilder(MapStatistics, ABC):
 
     def compute_maps_from_alms(self,
                                imaps: int | Iterable[int] | None = None,
-                               smooth_Mpc: float | None = None,
-                               lmax: int | None = None) -> hsp.HealSparseMap | dict[int, hsp.HealSparseMap]:
+                               smooth_Mpc: float | None = None) -> hsp.HealSparseMap | dict[int, hsp.HealSparseMap]:
         """Compute field maps from their a_lm, optionally smoothed.
 
         Parameters
@@ -1015,10 +965,8 @@ class MapBuilder(MapStatistics, ABC):
         smooth_Mpc : float or None, optional
             Comoving Gaussian smoothing scale in Mpc (converted to an angle per map,
             see :meth:`_smooth_sigma`). If given, the smoothed maps (pixel window
-            deconvolved) are saved (``what=smoothed_field_what``), or read if
-            already on disk; if None, the maps are only reconstructed in memory.
-        lmax : int or None, optional
-            Maximum multipole of the transforms. Default is ``3*nside - 1``.
+            deconvolved) are saved (``what=smoothed_field_what``); if None, the maps
+            are only reconstructed in memory.
 
         Returns
         -------
@@ -1027,28 +975,21 @@ class MapBuilder(MapStatistics, ABC):
 
         Notes
         -----
-        The a_lm are those of the weighted map (:meth:`compute_alms`), so the maps
-        are the field (with its mean added back, see :meth:`_alm_field_mean`) on
-        the footprint, but tapered in the padding.
+        The a_lm are those saved by :meth:`compute_alms` (of the weighted map, up to their
+        ``lmax``), so the maps are the field (with its mean added back, see
+        :meth:`_alm_field_mean`) on the footprint, but tapered in the padding.
         """
-        if lmax is None:
-            lmax = 3 * self.nside - 1
         _, ipix = self.get_mask(nest=False, return_ipix=True, padded=True)
 
         maps = {}
         for imap in self.tqdm(imaps, desc="[compute_maps_from_alms]"):
-            # smoothed maps are saved, and reused if on disk
-            fname = self.path(imap, what=self.smoothed_field_what, smooth_Mpc=smooth_Mpc) if smooth_Mpc is not None else None
-            if fname is not None and (existing := self.check_maps(read=True, fname=fname)) is not None:
-                maps[imap] = existing
-                continue
-
-            alm = self.compute_alms(imap, pol=False, lmax=lmax)
+            alm = self.load_alms(imap)
+            lmax = hp.Alm.getlmax(len(alm))
             if smooth_Mpc is not None:
                 self._smooth_alms(imap, alm, smooth_Mpc, lmax)
             maps[imap] = self._alm2hspmap(alm, ipix, lmax, mean=self._alm_field_mean(imap))
-            if fname is not None:
-                self._save_map(maps[imap], fname)
+            if smooth_Mpc is not None:
+                self._save_map(maps[imap], self.path(imap, what=self.smoothed_field_what, smooth_Mpc=smooth_Mpc))
 
         return maps[imaps] if np.isscalar(imaps) else maps
 

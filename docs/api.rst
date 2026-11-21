@@ -7,19 +7,27 @@ The Pollux package is organized into the following core modules:
    :maxdepth: 2
 
    modules/reader
+   modules/footprint
    modules/map_builder
    modules/shells
    modules/lensing
+   modules/baryons
    modules/catalog
-   modules/utils
+   modules/ia
+   modules/statistics
    modules/cosmo
+   modules/utils
    modules/io
+   modules/pipeline
 
 Module Descriptions
 -------------------
 
 **Reader** (:mod:`pollux.reader`)
    Interfaces with N-body simulation snapshots (HACC, SLICS) and provides particle data for lightcone construction.
+
+**Footprint** (:mod:`pollux.footprint`)
+   Footprint of the maps: mask, padded mask and weights of the harmonic transforms, shared by the builders.
 
 **Map Builder** (:mod:`pollux.map_builder`)
    Abstract base classes for building HealSparse maps from simulation data, with I/O and spherical harmonic transform support.
@@ -30,16 +38,31 @@ Module Descriptions
 **Lensing** (:mod:`pollux.lensing`)
    Generates weak lensing maps in the Born approximation with tomographic support.
 
+**Baryons** (:mod:`pollux.baryons`)
+   Baryonifies shells with BaryonForge, and computes the matching correction of the matter power spectrum.
+
 **Catalog** (:mod:`pollux.catalog`)
-   Generates tomographic galaxy catalogs from lightcone shells using uniform or clustered sampling methods.
+   Generates tomographic galaxy catalogs from lightcone shells using uniform or clustered sampling methods, measures their statistics and predicts them.
+
+**Statistics** (:mod:`pollux.statistics`)
+   Power spectra and moments of the maps, and two-point statistics of the catalogs, with their predictions and plots
+   (:mod:`pollux.statistics.plotting`): mixins inherited by the map builders and catalogs.
+
+**Intrinsic alignments** (:mod:`pollux.ia`)
+   Catalog augmentor adding intrinsic alignments to the galaxies, from the tidal field of their shell.
 
 **Utils** (:mod:`pollux.utils`)
-   Helper functions for map operations, power spectrum computations, and array manipulations.
+   Helper functions, by theme: numerics (integration, grids, sampling), sky (coordinates, maps of points, masks), NaMaster binnings and FITS tables (reading chosen rows).
 
 **Cosmology** (:mod:`pollux.cosmo`)
-   Fixed cosmologies and cosmological utility functions.
+   Fixed cosmologies, tracers of observable fields and their theory predictions.
 
 **I/O** (:mod:`pollux.io`)
-   Loads and manages Pollux simulation data.
+   Products on disk, without the dependencies of the builders (NaMaster, TreeCorr, BaryonForge, Parsl): their files (:class:`pollux.io.PolluxIO <pollux.io.files.PolluxIO>`, :mod:`pollux.io.files`: paths, configurations and files by format) and ``config.yaml`` (:mod:`pollux.io.config`), the code
+   version of runs (:mod:`pollux.io.code_version`), their index (``python -m pollux.io.index ROOT``) and loader
+   (:class:`pollux.io.PolluxLoader <pollux.io.loader.PolluxLoader>`).
+
+**Pipeline** (:mod:`pollux.pipeline`)
+   Parsl tasks and execution configuration, see :doc:`pipeline`.
 
 

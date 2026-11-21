@@ -1,0 +1,4 @@
+/* notebook figures have a fixed size: keep their aspect ratio when narrowed to the page */
+div.nboutput img {
+    height: auto !important;
+}

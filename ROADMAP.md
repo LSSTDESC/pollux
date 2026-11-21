@@ -7,6 +7,11 @@ Planned technical developments of pollux, with their GitHub issue when there is 
 - Galaxies
   - Separate lens and source catalogs (e.g. maglim-like lenses and metadetect-like sources), each with its own n(z), density and interpolated fields (no shear for lenses): an option for catalogs without the shear and IA augmentors in the pipeline, and a catalog block per sample in the run scripts. With different footprints or masks per sample, the NaMaster workspaces of the Cls must be keyed by the footprints of both fields of a pair, not by one.
   - Sample galaxies from halos with a halo occupation distribution (HOD), as an alternative to the biased sampling of the density field (`HOD.py`, placeholder for now) ([#9](https://github.com/LSSTDESC/pollux/issues/9)).
+  - Mocks on a real shape catalogue, as in DES Y3 ([2403.02314](https://arxiv.org/abs/2403.02314), Sec. 5.4.5;
+    [2307.13860](https://arxiv.org/abs/2307.13860)): per bin, the per-shell shear (and IA) weighted by
+    n(z)[1 + b δ] in each pixel, plus the randomly rotated real shapes as shape noise; needs a reader of data
+    catalogues, a mask from their pixels, nuisances drawn per mock (n(z) samples, m, IA, b), and rotations of the
+    footprint on the full sky for several mocks per simulation.
   - Make the pixel-scale floor of the smoothing (`Tracer.effective_smooth_Mpc`) a parameter.
   - Remove the pixel effects from the catalogs, so that they compare to data at all scales above a recorded resolution:
     - evaluate the fields exactly at the galaxy positions from their a_lm (e.g. `ducc0.sht.experimental.synthesis_general`), instead of the bilinear interpolation of maps, which adds a window of its own;
@@ -38,4 +43,11 @@ Planned technical developments of pollux, with their GitHub issue when there is 
     NaMaster, NumPy, matplotlib and CCL; full paths for inherited methods; private helpers written as code
     (``` ``_noise_cls`` ```) rather than links, as they are not in the API pages.
 - Data products
+  - Objects from the configurations of the products: build the footprint, shell builders, lensing, catalogs and
+    statistics from the `config.yaml` of their products, so that products can be extended (baryon models, catalogs,
+    statistics) after the N-body simulations are deleted. The configurations record almost everything; missing are:
+    - a reader of the recorded simulation (metadata and cosmology of the shells' configuration), without particle files;
+    - the options of the map builders that are not in their configuration (binning, `nside_c`, file format);
+    - the options of the statistics, recorded only as an identifier in their SACC metadata;
+    - the halo catalogs of the simulation, recorded only through the reader (to make new halo catalogs).
   - Register the products in the [DESC data registry](https://github.com/LSSTDESC/dataregistry): a script registering each product directory, with its `config.yaml` (parameters and inputs) and the code version of its run. The products are made in scratch and copied to the registry once validated ([#12](https://github.com/LSSTDESC/pollux/issues/12)).

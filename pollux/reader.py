@@ -1031,52 +1031,55 @@ class SkySimReader(Reader):
         raise NotImplementedError("SkySim outputs are mass sheets (Healpix density maps), not particles.")
 
 
-class MockReader(Reader):
-    """In-memory toy reader for tests and debugging.
+class SyntheticReader(Reader):
+    """Synthetic simulation, for tests and examples: particles drawn uniformly at random in a periodic box.
 
-    This reader creates a fixed set of random particles for each job and returns
-    them without touching disk.
+    The box is split into ``nsplit**3`` cubic sub-volumes, each holding ``nparticles_per_sub`` particles per snapshot,
+    drawn on the fly from a generator seeded by ``(seed, isnapshot, isub)``: the same particles at every read, without
+    any file. With ``nparticles_per_sub=0``, a reader without particles (e.g. for a shell builder of predictions only).
 
     Parameters
     ----------
-    cosmo : pyccl.Cosmology
-        Cosmology object.
+    cosmo : pyccl.Cosmology or None, optional
+        Cosmology. Default is ``pyccl.CosmologyVanillaLCDM()``.
     boxsize : float, optional
-        Box side length in Mpc. Default is 200.
-    nsnapshots : int, optional
-        Number of snapshots. Default is 3.
+        Box side length in Mpc. Default is 500.
+    zsnapshots : array_like, optional
+        Snapshot redshifts, increasing. Default is ``(0.1, 0.3, 0.5)``.
+    zmax : float or None, optional
+        Maximum redshift of the products (above the last snapshot). Default is None.
     nsplit : int, optional
-        Number of splits per dimension (sub-volumes = ``nsplit**3``). Default is 2.
+        Sub-volumes per dimension. Default is 1.
     nparticles_per_sub : int, optional
-        Number of particles per sub-volume. Default is 10.
-    zmax : float, optional
-        Maximum redshift considered. Default is 2.
+        Particles per sub-volume and snapshot. Default is 10000.
     seed : int, optional
         Seed of the particle positions. Default is 0.
+    dtype : data-type, optional
+        Type of the coordinates. Default is float32.
     """
 
     def __init__(
         self,
-        cosmo: pyccl.Cosmology,
-        boxsize: float = 200.0,
-        nsnapshots: int = 3,
-        nsplit: int = 2,
-        nparticles_per_sub: int = 10,
-        zmax: float = 2.0,
+        cosmo: pyccl.Cosmology | None = None,
+        boxsize: float = 500.,
+        zsnapshots: NDArray | tuple = (0.1, 0.3, 0.5),
+        zmax: float | None = None,
+        nsplit: int = 1,
+        nparticles_per_sub: int = 10000,
         seed: int = 0,
+        dtype: Any = np.float32,
     ) -> None:
         self._boxsize = float(boxsize)
-        self.xyzs = np.random.default_rng(seed).uniform(high=self._boxsize, size=(nsplit**3 * nsnapshots, nparticles_per_sub, 3))
-
-        nparticles = nsplit**3 * nparticles_per_sub
-        zsnapshots = np.zeros(nsnapshots)
-        nsubs = nsplit**3
-
-        super().__init__(cosmo, "dummy", "Mpc", nparticles, zsnapshots, zmax, nsubs, dtype=np.float64)
+        self.nsplit = int(nsplit)
+        self.nparticles_per_sub = int(nparticles_per_sub)
+        self.seed = int(seed)
+        cosmo = pyccl.CosmologyVanillaLCDM() if cosmo is None else cosmo
+        super().__init__(cosmo, 'synthetic', 'Mpc', self.nsplit**3 * self.nparticles_per_sub, zsnapshots, zmax, self.nsplit**3, dtype=dtype)
+        self.snapshots = list(range(self.nsnapshots))
 
     @property
     def boxsize(self) -> float:
-        """Mock box side length in Mpc."""
+        """Box side length in Mpc."""
         return self._boxsize
 
     def read_sub(
@@ -1087,93 +1090,43 @@ class MockReader(Reader):
         read_box_edges_only: bool = False,
         extra_variables: list[str] | None = None,
     ) -> tuple[NDArray, NDArray]:
-        """Return mock particles for one job.
+        """Return the particles of one sub-volume of one snapshot, and the vertices of the sub-volume.
 
         Parameters
         ----------
         isnapshot : int
-            Snapshot index (ignored for content selection; kept for API compatibility).
+            Snapshot index.
         isub : int
-            Sub-volume index selecting the returned random sample.
+            Sub-volume index, in ``[0, nsplit**3)``.
         assert_xyz_in_box : bool, optional
-            If True, validate coordinates lie within [0, boxsize].
+            If True, check that the particles are in the box.
         read_box_edges_only : bool, optional
-            If True, return only box edges and an empty particle array.
-        extra_variables : list of str, optional
-            Not supported by this reader.
+            If True, return no particles, only the vertices.
+        extra_variables : list of str or None, optional
+            Not supported (no particle identifiers or properties).
 
         Returns
         -------
         xyz : ndarray
-            Particle positions of shape ``(N, 3)`` in Mpc.
+            Positions, shape ``(nparticles_per_sub, 3)``, in Mpc.
         box_edges : ndarray
-            Cube vertices of the box, shape ``(8, 3)``.
-        """
-        if extra_variables not in (None, []):
-            raise ValueError("MockReader does not support `extra_variables`.")
-
-        cube_nodes = ((np.arange(8)[:, None] & (1 << np.arange(3))) > 0).astype(int)
-        box_edges = cube_nodes * self._boxsize
-
-        if read_box_edges_only:
-            return np.zeros((0, 3), dtype=self.dtype), box_edges.astype(self.dtype)
-
-        xyz = self.xyzs[isub].astype(self.dtype)
-
-        if assert_xyz_in_box:
-            if not (np.all((0.0 <= xyz) & (xyz <= self._boxsize))):
-                raise RuntimeError("Particles outside the box")
-
-        return xyz, box_edges.astype(self.dtype)
-
-
-class DummyReader(Reader):
-    """Degenerate reader with snapshots, but no particles, box (NaN size) or sub-volumes.
-
-    This is mainly used as a placeholder in APIs that require a Reader instance (e.g. a shell builder of
-    predictions only).
-
-    Parameters
-    ----------
-    cosmo : pyccl.Cosmology
-        Cosmology.
-    kind : str
-        Reader kind (used in file names).
-    unit : str
-        Length unit.
-    nsnapshots : int
-        Number of (empty) snapshots, all at redshift 0.
-    """
-
-    def __init__(self, cosmo: pyccl.Cosmology, kind: str, unit: str, nsnapshots: int) -> None:
-        super().__init__(
-            cosmo,
-            kind,
-            unit,
-            nparticles=0,
-            zsnapshots=np.zeros(nsnapshots),
-            zmax=None,
-            nsubs=0,
-            dtype=np.float64,
-        )
-
-    @property
-    def boxsize(self) -> float:
-        """NaN: a dummy reader has no box (nor particle mass)."""
-        return np.nan
-
-    def read_sub(
-        self,
-        isnapshot: int,
-        isub: int,
-        assert_xyz_in_box: bool = False,
-        read_box_edges_only: bool = False,
-        extra_variables: list[str] | None = None,
-    ) -> tuple[NDArray, NDArray]:
-        """Not available: a dummy reader has no particles or sub-volumes.
+            Vertices of the sub-volume, shape ``(8, 3)``.
 
         Raises
         ------
-        NotImplementedError
+        ValueError
+            If ``extra_variables`` are requested.
         """
-        raise NotImplementedError("A DummyReader has no particles.")
+        if extra_variables not in (None, []):
+            raise ValueError("A SyntheticReader has no extra variables.")
+        side = self._boxsize / self.nsplit
+        corner = np.array(np.unravel_index(isub, (self.nsplit,) * 3)) * side
+        cube_nodes = ((np.arange(8)[:, None] & (1 << np.arange(3))) > 0).astype(int)
+        box_edges = (corner + cube_nodes * side).astype(self.dtype)
+        if read_box_edges_only:
+            return np.zeros((0, 3), dtype=self.dtype), box_edges
+        rng = np.random.default_rng([self.seed, isnapshot, isub])
+        xyz = (corner + rng.uniform(high=side, size=(self.nparticles_per_sub, 3))).astype(self.dtype)
+        if assert_xyz_in_box and not np.all((0. <= xyz) & (xyz <= self._boxsize)):
+            raise RuntimeError("Particles outside the box")
+        return xyz, box_edges

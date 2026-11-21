@@ -16,8 +16,9 @@ snapshots kept (``snap_sub_every_n`` keeps one out of ``n``, which sets the thic
 - :class:`~pollux.reader.HACCLightconeReader`: lightcone outputs of HACC;
 - :class:`~pollux.reader.HACCHaloReader`: halo catalogs of HACC (halo properties files);
 - :class:`~pollux.reader.SLICSReader`: snapshots of SLICS;
-- :class:`~pollux.reader.SkySimReader`, and :class:`~pollux.reader.MockReader`,
-  :class:`~pollux.reader.DummyReader` for tests.
+- :class:`~pollux.reader.SkySimReader`;
+- :class:`~pollux.reader.SyntheticReader`: particles drawn uniformly in a box, without files, for tests and examples
+  (none with ``nparticles_per_sub=0``, for a builder of predictions only).
 
 Shell builders
 --------------

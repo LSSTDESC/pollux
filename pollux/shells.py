@@ -34,7 +34,7 @@ from .cosmo import Tracer
 from .map_builder import MapBuilder, MapSum
 from .utils.numerics import arange_endpoint, quad, split_bins
 from .utils.sky import spin2_factor
-from .reader import DummyReader, Reader
+from .reader import Reader
 from .lensing import SnapshotBornLensingBuilder
 
 logger = logging.getLogger(__name__)
@@ -210,7 +210,7 @@ class ShellBuilder(MapBuilder):
             self.replicate_rotflip = {}
             self.apply_replicate_rotflip = False
 
-        # shells deeper than the simulation box (none for a reader without a box, e.g. a DummyReader)
+        # shells deeper than the simulation box
         boxsize = self.reader.boxsize
         logger.info("  - Box size = %.2f Mpc.", boxsize)
         z_edges, depths = self.shell_edges_redshift, np.diff(self.shell_edges_comoving_distance)
@@ -221,10 +221,8 @@ class ShellBuilder(MapBuilder):
                 ''.join(f"Shell {ishell} ({z_edges[ishell]:.2f}<z<{z_edges[ishell + 1]:.2f}) has width {depths[ishell]:.2f} Mpc\n" for ishell in deep))
 
         # configuration of the products (checked against an existing one), then the table of the shells
-        # (a DummyReader has no shell edges)
         self.io.write_config(self.product, self.config())
-        if not isinstance(reader, DummyReader):
-            self.save_info()
+        self.save_info()
 
     def config(self) -> dict:
         """Return the configuration of the products, for their ``config.yaml`` (:func:`pollux.io.config.write_config`).
@@ -1669,13 +1667,10 @@ class SnapshotInterpShellBuilder(ShellBuilder):
         rmin2, rmax2 = chi2_lc[-1], chi2_lc[0]
         boxsize = self.reader.boxsize
 
-        # precompute valid replicas for the non-orphan case before loading particles
+        # precompute valid replicas for the non-orphan case before loading particles; without any, the map is empty, but
+        # the orphans of the sub-volume are still saved below (the orphan shell needs those of all sub-volumes)
         if do_orphan_ishell is None:
             valid_replicas = np.array(self._valid_replicas_sub(ishell, isub), dtype=np.int64).reshape(-1, 3)
-            if len(valid_replicas) == 0:
-                shell = self._make_hspmap()
-                self._write_hspmap(fname, shell)
-                return shell
 
         # read particles
         if do_orphan_ishell is not None:
@@ -1733,6 +1728,11 @@ class SnapshotInterpShellBuilder(ShellBuilder):
             xyz_f = xyz_f[idx_f_in]
 
             logger.debug("Found %d particles in both boxes, %d/%d orphans in initial/final boxes saved.", len(idx_i_in), len(idx_i_out), len(idx_f_out))
+
+            if len(valid_replicas) == 0:
+                shell = self._make_hspmap()
+                self._write_hspmap(fname, shell)
+                return shell
 
         # particle sub-sampling
         xyz_i, xyz_f = self._subsample(ishell, xyz_i, xyz_f)

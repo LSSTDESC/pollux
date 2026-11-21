@@ -546,10 +546,15 @@ class MapStatistics(TwoPointStatistics):
             Fourth-order moments keyed by smoothing scale
             (theta -> (nmaps,nmaps,nmaps,nmaps)).
 
+        Raises
+        ------
+        FileNotFoundError
+            If the a_lm of a map are not saved (:meth:`compute_alms` first).
+
         Notes
         -----
         This method:
-        1) loads a_lm for each map,
+        1) loads the saved a_lm of each map (:meth:`compute_alms`),
         2) resizes them to ``lmax_out = 2*nside_small``,
         3) makes smoothed maps for each ``theta``,
         4) computes raw moments on the masked pixels,
@@ -561,8 +566,8 @@ class MapStatistics(TwoPointStatistics):
         kappa = {}
         lmax_out = 2 * nside_small
 
-        # Mask (downgraded from self.nside to nside_small for moment computation)
-        mask_full = self._create_mask()
+        # footprint (unpadded), downgraded to nside_small: pixels at least half within it
+        mask_full = self.footprint.mask(dtype=np.float64)
         mask = hp.ud_grade(mask_full, nside_small, order_in='NESTED', order_out='NESTED') > 0.5
         ipix = np.where(mask)[0]
 

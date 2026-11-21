@@ -31,7 +31,7 @@ Planned technical developments of pollux, with their GitHub issue when there is 
   - Column-oriented catalog format (Parquet or HDF5), so that reading a few columns or a subsample does not read whole FITS rows.
   - Move what can be to GPUs (spherical harmonic transforms, painting particles on maps, baryonification, catalog sampling).
 - Tests
-  - Unit tests (pytest) on small synthetic inputs (`DummyReader`, low nside), and tests on the simulations run at NERSC only.
+  - Unit tests (pytest) on small synthetic inputs (`SyntheticReader`, low nside; first ones in `tests/`), and tests on the simulations run at NERSC only.
   - Continuous integration with GitHub Actions: unit tests and a strict build of the documentation on each pull request.
 - Documentation
   - Resolve all cross-references (a build with `sphinx -n` lists those that are not links): intersphinx for healpy,

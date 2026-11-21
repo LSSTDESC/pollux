@@ -103,7 +103,8 @@ def _relative(path: str, root_dir: str | None) -> str:
 
 
 def _plain(value: Any) -> Any:
-    """Return parameters as plain YAML types (from numpy scalars and arrays, tuples, dtypes), recursively.
+    """Return parameters as plain YAML types (from numpy scalars and arrays, tuples, dtypes), recursively; NaN and
+    infinite values as None.
 
     Parameters
     ----------
@@ -119,7 +120,9 @@ def _plain(value: Any) -> Any:
     if isinstance(value, (list, tuple, np.ndarray)):
         return [_plain(v) for v in value]
     if isinstance(value, np.generic):
-        return value.item()
+        value = value.item()
+    if isinstance(value, float) and not np.isfinite(value):
+        return None  # NaN would never compare equal to itself when the configuration is checked
     if isinstance(value, (np.dtype, type)):
         return np.dtype(value).name
     return value

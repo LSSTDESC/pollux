@@ -22,6 +22,8 @@ Production of the HACC-HOS-Y1 lightcones (`PR #34 <https://github.com/LSSTDESC/p
   :class:`~pollux.io.files.PolluxIO` holds the root and the options of the objects, and reads and writes the files
   by format.
 - Pipeline tasks decide what to skip; builders and catalogs only compute and write, and read their inputs.
+- :class:`~pollux.reader.SyntheticReader` (particles drawn in a box, for tests) replaces ``MockReader`` and
+  ``DummyReader``; first tests in ``tests/`` (pytest).
 
 Version 0.1
 -----------

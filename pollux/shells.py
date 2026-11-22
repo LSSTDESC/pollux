@@ -30,8 +30,10 @@ from collections.abc import Iterable
 
 from .footprint import Footprint
 from .io import PolluxIO
+from .io.files import atomic_write
 from .cosmo import Tracer
 from .map_builder import MapBuilder, MapSum
+from .utils.healpix import dense_to_hsp
 from .utils.numerics import arange_endpoint, quad, split_bins
 from .utils.sky import spin2_factor
 from .reader import Reader
@@ -98,8 +100,14 @@ class ShellBuilder(MapBuilder):
     io : pollux.io.files.PolluxIO or None, optional
         Files of the shells, if not those of the footprint with the seed (e.g. with the options of a
         baryon model).
+    sub_format : {'healsparse', 'healpix'}, optional
+        Format of the maps of the sub-volumes (intermediate files), binned in the matching ordering so that they are
+        written without conversion: HealSparse maps of the non-empty pixels (NESTED, the default), or the RING pixels
+        and counts of the non-empty pixels (``.npz``, ``ipix`` and ``counts``; full-sky dense maps of each
+        sub-volume would be too large). The shells are written in ``map_format``, converted once when combined if
+        needed.
     **kwargs
-        Forwarded to :class:`pollux.map_builder.MapBuilder`.
+        Forwarded to :class:`pollux.map_builder.MapBuilder` (e.g. ``map_format``).
 
     Notes
     -----
@@ -127,6 +135,7 @@ class ShellBuilder(MapBuilder):
             apply_replicate_rotflip: bool | dict = False,
             subsample_box: dict | None = None,
             io: PolluxIO | None = None,
+            sub_format: str = 'healsparse',
             **kwargs: Any) -> None:
         self.nshells = nshells
         self.reader = reader
@@ -151,9 +160,17 @@ class ShellBuilder(MapBuilder):
         super().__init__(
             nmaps=self.nshells, dtype=dtype, footprint=footprint, io=io, product='halos' if halos else 'shells', sacc_type="galaxy_density_cl", **kwargs)
 
-        # Healpix geometry passed to the pixelization kernels: nside, order, ncap, npix (see _loc2pix)
+        # Healpix geometry passed to the pixelization kernels: nside, order, ncap, npix (see _loc2pix_ring)
         nside = self.nside
         self._healpix_geometry = (nside, hp.nside2order(nside), (nside * nside - nside) << 1, self.npix)
+
+        # sub-volume maps, binned in their ordering: NESTED for HealSparse maps, RING otherwise
+        if sub_format not in self.MAP_FORMATS:
+            raise ValueError(f"sub_format must be one of {self.MAP_FORMATS}, not {sub_format!r}")
+        self.sub_format = sub_format
+        nest = sub_format == 'healsparse'
+        self._vec2pix = _vec2pix_nest if nest else _vec2pix_ring
+        self._worldline2pix = _worldline2pix_nest if nest else _worldline2pix_ring
 
         # Particle subsampling
         if not (subsample_box is None or isinstance(subsample_box, (dict, numbers.Real))):
@@ -222,7 +239,7 @@ class ShellBuilder(MapBuilder):
 
         # configuration of the products (checked against an existing one), then the table of the shells
         self.io.write_config(self.product, self.config())
-        self.save_info()
+        self.write_info()
 
     def config(self) -> dict:
         """Return the configuration of the products, for their ``config.yaml`` (:func:`pollux.io.config.write_config`).
@@ -264,7 +281,14 @@ class ShellBuilder(MapBuilder):
             dtype=self.dtype,
             shell_edges_match=getattr(self, 'shell_edges_match', None),  # None for SnapshotInterpShellBuilder
         )
+        # formats of the files, if not the defaults (the configurations of products made before they were options stay valid)
+        parameters.update({k: getattr(self, k) for k in ('map_format', 'sub_format') if getattr(self, k) != 'healsparse'})
         return dict(product=self.product, parameters=parameters, inputs=[self.footprint.io.dir('footprint')])
+
+    @property
+    def _sub_ext(self) -> str:
+        """Extension of the files of the sub-volume maps: ``'fits'`` for HealSparse maps, ``'npz'`` otherwise."""
+        return 'fits' if self.sub_format == 'healsparse' else 'npz'
 
     # ==================================================================================================================
     # region Shells
@@ -356,7 +380,7 @@ class ShellBuilder(MapBuilder):
             sky_density=[self.sky_density(ishell) for ishell in range(self.nshells)])
         return np.rec.fromarrays([np.asarray(v) for v in columns.values()], names=list(columns))
 
-    def save_info(self) -> None:
+    def write_info(self) -> None:
         """Save the table of the shells (:meth:`info_table`) to ``shells.fits``, unless it exists.
 
         The table follows from the configuration of the products, which :func:`pollux.io.config.write_config`
@@ -756,7 +780,7 @@ class ShellBuilder(MapBuilder):
     # ==================================================================================================================
     # region Maps
 
-    def construct_maps(self, imaps: int | Iterable[int] | None = None, **kwargs: Any) -> hsp.HealSparseMap | dict[int, hsp.HealSparseMap]:
+    def construct_maps(self, imaps: int | Iterable[int] | None = None) -> np.ndarray | hsp.HealSparseMap | dict[int, np.ndarray | hsp.HealSparseMap]:
         """Construct all requested shell maps.
 
         This constructs sub-maps for each (shell, subvolume) and then calls
@@ -766,29 +790,25 @@ class ShellBuilder(MapBuilder):
         ----------
         imaps : int or array_like of int or None, optional
             Shell indices to construct. If None, constructs all shells.
-        **kwargs
-            Forwarded to :meth:`construct_maps_sub`.
 
         Returns
         -------
-        hsp.HealSparseMap or dict
-            - If ``imaps`` is a single int: returns a single combined
-              ``HealSparseMap``.
-            - If ``imaps`` is ``None`` or an iterable: returns a dict keyed
-              by shell index with combined ``HealSparseMap`` values.
+        ndarray or hsp.HealSparseMap, or dict
+            The maps as written (:attr:`~pollux.map_builder.MapBuilder.map_format`): a single map if ``imaps`` is an
+            int, else a dict keyed by map index.
         """
         # first construct shells on simulation subs
         for ishell in self.tqdm(imaps, desc="[construct_maps]"):
             isubs = self.reader.isubs_for_snapshot(ishell)
             for isub in tqdm(isubs, desc=f"[construct_maps: shell {ishell}]", leave=False):
-                self.construct_maps_sub(ishell, isub, **kwargs)
+                self.construct_maps_sub(ishell, isub)
 
         # then combine into final shells
         return self.combine_maps_subs(imaps)
 
     def combine_maps_subs(self,
                           ishells: int | Iterable[int] | None = None,
-                          allow_missing_subs: bool = False) -> hsp.HealSparseMap | dict[int, hsp.HealSparseMap]:
+                          allow_missing_subs: bool = False) -> np.ndarray | hsp.HealSparseMap | dict[int, np.ndarray | hsp.HealSparseMap]:
         """Sum per-subvolume shell maps into final per-shell maps.
 
         Parameters
@@ -802,29 +822,25 @@ class ShellBuilder(MapBuilder):
 
         Returns
         -------
-        hsp.HealSparseMap or dict
-            - If ``ishells`` is a single int: returns a single combined
-              ``HealSparseMap``.
-            - If ``ishells`` is ``None`` or an iterable: returns a dict keyed
-              by shell index with combined ``HealSparseMap`` values.
+        ndarray or hsp.HealSparseMap, or dict
+            The maps as written (:attr:`~pollux.map_builder.MapBuilder.map_format`): a single map if ``ishells`` is
+            an int, else a dict keyed by shell index. The sub-volume maps are summed as stored (:class:`MapSum`).
 
         Notes
         -----
         The maps summed are those of :meth:`_subs` (with the orphan particles for
-        :class:`SnapshotInterpShellBuilder`).
+        :class:`SnapshotInterpShellBuilder`). Every pixel of the padded footprint has a count (zero if empty).
         """
         shells = {}
 
-        mask = self.footprint.mask(nest=True, padded=True)
         for ishell in self.tqdm(ishells, desc="[combine_maps_subs]"):
-            shell_sum = MapSum(mask, self.nside_c, self.dtype)
-            for _, sub_map in self.iter_maps(ishell, isubs=self._subs(ishell), allow_missing=allow_missing_subs, desc=f"[combine_maps_subs: shell {ishell}]"):
-                shell_sum.add(sub_map)
+            shell_sum = MapSum(self.footprint, self.nside_c, self.dtype)
+            subs = self.iter_maps(ishell, isubs=self._subs(ishell), allow_missing=allow_missing_subs, desc=f"[combine_maps_subs: shell {ishell}]", dense=None)
+            for _, sub in subs:
+                shell_sum.add(sub)
             shell = shell_sum.to_map()
 
-            self._write_hspmap(self.path(ishell), shell)
-
-            shells[ishell] = shell
+            shells[ishell] = self._write_map(self.path(ishell), shell)
 
         return shells[ishells] if np.isscalar(ishells) else shells
 
@@ -843,36 +859,50 @@ class ShellBuilder(MapBuilder):
         """
         return list(self.reader.isubs_for_snapshot(ishell))
 
-    def _count_to_shell(self, count: np.ndarray) -> hsp.HealSparseMap:
-        """Convert dense per-pixel particle counts into a HealSparse shell map.
+    def _write_sub(self, fname: str, count: np.ndarray | None) -> hsp.HealSparseMap | tuple[np.ndarray, np.ndarray]:
+        """Write the map of a sub-volume from its particle counts, in :attr:`sub_format`.
 
         Parameters
         ----------
-        count : ndarray of int
-            Dense RING-ordered array of length ``self.npix`` holding the number of
-            particles per pixel (e.g. accumulated with :func:`_count_pix`).
+        fname : str
+            File (:meth:`path` with ``sub``).
+        count : ndarray of int or None
+            Dense array of length ``self.npix`` holding the number of particles per pixel, in the ordering of the
+            sub-volume maps (NESTED for HealSparse maps, RING otherwise; e.g. accumulated with :func:`_count_pix`),
+            modified in place (zero outside the padded footprint); None without particle in the shell.
 
         Returns
         -------
-        hsp.HealSparseMap
-            Shell map of dtype ``self.dtype`` whose valid pixels are the non-empty
-            pixels of ``count`` inside the padded footprint.
+        hsp.HealSparseMap or tuple
+            HealSparse map of dtype ``self.dtype``, or RING pixel-value pair ``(ipix, counts)`` (int32 counts, written
+            as ``ipix`` and ``counts`` in a ``.npz`` file), on the non-empty pixels inside the padded footprint.
 
         Notes
         -----
-        The footprint mask is applied here, on non-empty pixels only, which is
+        The footprint mask is applied here, on the counts, which is
         equivalent to (and cheaper than) filtering every particle hit.
         """
-        uipix = np.flatnonzero(count)
-        # drop out-of-footprint pixels (equivalent to filtering every particle)
-        if not self.footprint.fullsky:
-            uipix = uipix[self.footprint.mask(nest=False, padded=True)[uipix]]
-        c = count[uipix]
-        logger.debug("Found %d particles in the shell.", int(c.sum(dtype=np.int64)))
-        return self._make_hspmap(hp.ring2nest(self.nside, uipix), c, nest=True)
+        nest = self.sub_format == 'healsparse'
+        if count is not None:
+            # drop out-of-footprint pixels (equivalent to filtering every particle)
+            if not self.footprint.fullsky:
+                count[~self.footprint.mask(nest=nest, padded=True)] = 0
+            logger.debug("Found %d particles in the shell.", int(count.sum(dtype=np.int64)))
+        if nest:
+            if count is None:
+                sub = hsp.HealSparseMap.make_empty(self.nside_c, self.nside, dtype=self.dtype)
+            else:
+                sub = dense_to_hsp(count, self.nside_c, nest=True, valid=count > 0, dtype=self.dtype)
+            self.io.write_map(fname, sub, nocompress=self.nocompress)
+        else:
+            ipix = np.zeros(0, dtype=np.int64) if count is None else np.flatnonzero(count)
+            sub = (ipix.astype(np.int32 if self.npix < 2**31 else np.int64), np.zeros(0, dtype=np.int32) if count is None else count[ipix])
+            with atomic_write(fname) as tmp, open(tmp, 'wb') as f:
+                np.savez(f, ipix=sub[0], counts=sub[1])
+        return sub
 
-    def field_hspmap(self, ishell: int, smooth_Mpc: float | None = None) -> hsp.HealSparseMap:
-        """Return the density contrast of one shell as a HealSparse map.
+    def field_map(self, ishell: int, smooth_Mpc: float | None = None) -> np.ndarray:
+        """Return the density contrast of one shell as a dense RING map.
 
         Parameters
         ----------
@@ -884,20 +914,14 @@ class ShellBuilder(MapBuilder):
 
         Returns
         -------
-        hsp.HealSparseMap
+        ndarray
             Density contrast relative to the cosmic mean, on the padded footprint:
-            ``shell_count / pixel_density - 1`` on pixels containing particles, and
-            -1 on empty pixels.
+            ``shell_count / pixel_density - 1`` (-1 on empty pixels), ``hp.UNSEEN`` outside.
         """
         if smooth_Mpc is not None:
-            return super().field_hspmap(ishell, smooth_Mpc)
-        shell = self.load_maps(ishell)
-        ipix = self.footprint.ipix(nest=True, padded=True)
-        # -1 (no particle) on the padded footprint, then the density contrast where there are particles
-        density = self._make_hspmap(ipix, np.full(len(ipix), -1.), nest=True)
-        spix = shell.valid_pixels
-        density.update_values_pix(spix, (shell[spix] / self.pixel_density(ishell) - 1.).astype(self.dtype), nest=True)
-        return density
+            return super().field_map(ishell, smooth_Mpc)
+        shell = self.read_maps(ishell, dense=True)
+        return self._to_dense(shell / self.pixel_density(ishell) - 1.)
 
     # endregion
 
@@ -907,7 +931,7 @@ class ShellBuilder(MapBuilder):
     def compute_tidal_tensor_maps(self,
                                   ishells: int | Iterable[int] | None = None,
                                   smooth_Mpc: float | None = None,
-                                  save_field_map: bool = True) -> list[hsp.HealSparseMap] | dict[int, list[hsp.HealSparseMap]]:
+                                  save_field_map: bool = True) -> list[np.ndarray | hsp.HealSparseMap] | dict[int, list[np.ndarray | hsp.HealSparseMap]]:
         r"""Compute tidal tensor component maps from shell density maps.
 
         For each shell, computes a spin-2 transform of the E-mode a_lm of the
@@ -936,10 +960,9 @@ class ShellBuilder(MapBuilder):
         Returns
         -------
         list or dict
-            - If ``ishells`` is a single int: returns a list ``[t11, t22, t12]`` as HealSparse maps.
-            - If ``ishells`` is ``None`` or an iterable: returns a dict keyed by shell index
-              with list values ``[t11, t22, t12]``. Also writes maps to disk as
-              ``what='t11'/'t22'/'t12'`` or with ``_{smooth_Mpc}Mpc`` suffix if smoothing is applied.
+            ``[t11, t22, t12]`` as written (:attr:`~pollux.map_builder.MapBuilder.map_format`, as ``what='t11'``,
+            ``'t22'``, ``'t12'``, in ``smoothed/{smooth_Mpc}Mpc/`` if smoothed) if ``ishells`` is an int, else a dict
+            of them keyed by shell index.
 
         Notes
         -----
@@ -954,30 +977,26 @@ class ShellBuilder(MapBuilder):
         the transverse part of the traceless tidal tensor :math:`s_{ij} = (\partial_i \partial_j / \nabla^2 - \delta_{ij} / 3)\,
         \delta`, for a shell with no line-of-sight component: :math:`t_{11} + t_{22} = \delta / 3`.
         """
-        ipix = self.footprint.ipix(nest=False, padded=True)
         whats = ['t11', 't22', 't12']
         save_field_map = save_field_map and smooth_Mpc is not None
 
         ts = {}
         for ishell in self.tqdm(ishells, desc="[compute_tidal_tensor]"):
-            alm = self.load_alms(ishell)
+            alm = self.read_alms(ishell)
             lmax = hp.Alm.getlmax(len(alm))
 
             if smooth_Mpc is not None:
                 # smoothed density, from the a_lm smoothed in place (reused for the tidal field below)
                 self._smooth_alms(ishell, alm, smooth_Mpc, lmax)
-                density_hspmap = self._field_from_alms(ishell, alm)
+                density = self._field_from_alms(ishell, alm)
                 if save_field_map:
-                    self._write_hspmap(self.path(ishell, what=self.smoothed_field_what, smooth_Mpc=smooth_Mpc), density_hspmap)
-                density = density_hspmap.get_values_pix(ipix, nest=False)
+                    self._write_map(self.path(ishell, what=self.smoothed_field_what, smooth_Mpc=smooth_Mpc), density)
             else:
-                density = self.field_hspmap(ishell).generate_healpix_map(nest=False)[ipix]
+                density = self.field_map(ishell)
 
             # traceless tidal field (d_i d_j / laplacian) delta: E-mode a_lm with the factor of the shear from the
             # convergence (same sign convention as the shear maps)
             Q, U = hp.alm2map_spin((hp.almxfl(alm, spin2_factor(lmax)), np.zeros_like(alm)), self.nside, spin=2, lmax=lmax)
-            Q = Q[ipix]
-            U = U[ipix]
 
             # In 2D cartesian, s11(k)+s22(k)=delta(k)
             # In the spherical polarization framework, we have:
@@ -992,12 +1011,11 @@ class ShellBuilder(MapBuilder):
             # t12 = U
             vals = [density / 6. + Q / 2., density / 6. - Q / 2., U]  # t11, t22, t12
 
+            del Q, U
             ts[ishell] = []
             for what, val in zip(whats, vals, strict=True):
-                hspmap = self._make_hspmap(ipix, val)
-                tensor_fname = self.path(ishell, what=what, smooth_Mpc=smooth_Mpc)
-                self._write_hspmap(tensor_fname, hspmap)
-                ts[ishell].append(hspmap)
+                t = self._to_dense(val)
+                ts[ishell].append(self._write_map(self.path(ishell, what=what, smooth_Mpc=smooth_Mpc), t))
 
         return ts[ishells] if np.isscalar(ishells) else ts
 
@@ -1105,7 +1123,7 @@ class SnapshotShellBuilder(ShellBuilder):
     # ==================================================================================================================
     # region Maps
 
-    def construct_maps_sub(self, ishell: int, isub: int, ijob: int | None = None) -> hsp.HealSparseMap:
+    def construct_maps_sub(self, ishell: int, isub: int, ijob: int | None = None) -> hsp.HealSparseMap | tuple[np.ndarray, np.ndarray]:
         """Construct a single shell map for one snapshot/sub-volume.
 
         Parameters
@@ -1119,8 +1137,8 @@ class SnapshotShellBuilder(ShellBuilder):
 
         Returns
         -------
-        hsp.HealSparseMap
-            Constructed HealSparse shell map for this sub-volume.
+        hsp.HealSparseMap or tuple
+            Map of this sub-volume (:meth:`_write_sub`).
 
         Notes
         -----
@@ -1166,21 +1184,19 @@ class SnapshotShellBuilder(ShellBuilder):
                 if self.apply_replicate_rotflip:
                     xyz_work = _rotflip(self.replicate_rotflip[ix, iy, iz], xyz, boxsize).astype(dtype)
 
-                # bin particles into healpix pixels
-                _vec2pix(
+                # bin particles into healpix pixels (in the ordering of the sub-volume maps)
+                self._vec2pix(
                     ipix, *self._healpix_geometry, xyz_work[:, 0], xyz_work[:, 1], xyz_work[:, 2], shift[0, 0], shift[0, 1], shift[0, 2], rmin2, rmax2,
                     self.footprint.octant)
 
                 # scatter-add (out-of-shell particles have ipix = -1 and are skipped)
                 _count_pix(count, ipix, buf)
 
-            shell = self._count_to_shell(count)
+            shell = self._write_sub(fname, count)
             del count, ipix, buf
         else:
             logger.debug("No valid replica — skipping particle load.")
-            shell = self._make_hspmap()
-
-        self._write_hspmap(fname, shell)
+            shell = self._write_sub(fname, None)
 
         return shell
 
@@ -1342,8 +1358,8 @@ class SnapshotShellBuilder(ShellBuilder):
 
         return idx, ra, dec, r
 
-    def load_catalogs(self, ishells: int | Iterable[int] | None = None, variables: list[str] | None = None) -> dict:
-        """Load previously constructed per-shell catalogs as concatenated arrays.
+    def read_catalogs(self, ishells: int | Iterable[int] | None = None, variables: list[str] | None = None) -> dict:
+        """Read previously constructed per-shell catalogs as concatenated arrays.
 
         Parameters
         ----------
@@ -1367,7 +1383,7 @@ class SnapshotShellBuilder(ShellBuilder):
         """
         out = {}
 
-        for ishell in self.tqdm(ishells, desc="[load_catalogs]"):
+        for ishell in self.tqdm(ishells, desc="[read_catalogs]"):
             fname = self.path(ishell, what='catalog')
             with self.io.read_table(fname) as hdul:
                 columns = hdul[1].columns.names
@@ -1389,7 +1405,7 @@ class SnapshotShellBuilder(ShellBuilder):
         """Read variables not stored in the catalog directly from the reader.
 
         Helper for callers (e.g. :class:`~pollux.baryons.BaryonifiedShellBuilder`)
-        that already have the catalog-native columns from :meth:`load_catalogs`
+        that already have the catalog-native columns from :meth:`read_catalogs`
         and only need to fetch the remaining ``variables`` (e.g. halo
         properties not saved via ``extra_columns``) from the original
         simulation files.
@@ -1494,7 +1510,7 @@ class LightconeShellBuilder(ShellBuilder):
 
         super().__init__(reader.nsnapshots, reader, footprint, io=io, **kwargs)
 
-    def construct_maps_sub(self, ishell: int, isub: int, ijob: int | None = None) -> hsp.HealSparseMap:
+    def construct_maps_sub(self, ishell: int, isub: int, ijob: int | None = None) -> hsp.HealSparseMap | tuple[np.ndarray, np.ndarray]:
         """Construct a single shell map for one lightcone sub-volume.
 
         Parameters
@@ -1508,8 +1524,8 @@ class LightconeShellBuilder(ShellBuilder):
 
         Returns
         -------
-        hsp.HealSparseMap
-            Constructed HealSparse shell map for this sub-volume.
+        hsp.HealSparseMap or tuple
+            Map of this sub-volume (:meth:`_write_sub`).
         """
         if ijob is not None:
             ishell, isub = self.reader.job_args(ijob)
@@ -1553,17 +1569,15 @@ class LightconeShellBuilder(ShellBuilder):
         # bin particles into healpix pixels
         ipix = np.empty(len(xyz), dtype=np.int32 if self.npix < 2**31 else np.int64)
         buf = np.empty_like(ipix)
-        _vec2pix(
+        self._vec2pix(
             ipix, *self._healpix_geometry, xyz_work[:, 0], xyz_work[:, 1], xyz_work[:, 2], shift[0, 0], shift[0, 1], shift[0, 2], rmin2, rmax2,
             self.footprint.octant)
 
         count = np.zeros(self.npix, dtype=np.int32)  # per-pixel counts: int32 is enough
         # scatter-add (out-of-shell particles have ipix = -1 and are skipped)
         _count_pix(count, ipix, buf)
-        shell = self._count_to_shell(count)
+        shell = self._write_sub(fname, count)
         del count, ipix, buf
-
-        self._write_hspmap(fname, shell)
 
         return shell
 
@@ -1625,7 +1639,11 @@ class SnapshotInterpShellBuilder(ShellBuilder):
         self.construct_maps_sub(None, None, do_orphan_ishell=ishell)
         return [*super()._subs(ishell), 'orphan']
 
-    def construct_maps_sub(self, ishell: int, isub: int, ijob: int | None = None, do_orphan_ishell: int | None = None) -> hsp.HealSparseMap:
+    def construct_maps_sub(self,
+                           ishell: int,
+                           isub: int,
+                           ijob: int | None = None,
+                           do_orphan_ishell: int | None = None) -> hsp.HealSparseMap | tuple[np.ndarray, np.ndarray]:
         """Construct one interpolated lightcone shell map for a sub-volume.
 
         Parameters
@@ -1642,14 +1660,14 @@ class SnapshotInterpShellBuilder(ShellBuilder):
 
         Returns
         -------
-        hsp.HealSparseMap
-            Constructed HealSparse shell map.
+        hsp.HealSparseMap or tuple
+            Map of this sub-volume (:meth:`_write_sub`).
 
         Notes
         -----
         The lightcone is approximated by a tabulated chi(a) curve between the two
         snapshots, and particle worldlines (linear in a) are intersected with it
-        to determine sky positions via :func:`_worldline2pix`.
+        to determine sky positions via :func:`_worldline2pix_ring` (or ``_nest``).
         """
         if ijob is not None:
             ishell, isub = self.reader.job_args(ijob)
@@ -1730,9 +1748,7 @@ class SnapshotInterpShellBuilder(ShellBuilder):
             logger.debug("Found %d particles in both boxes, %d/%d orphans in initial/final boxes saved.", len(idx_i_in), len(idx_i_out), len(idx_f_out))
 
             if len(valid_replicas) == 0:
-                shell = self._make_hspmap()
-                self._write_hspmap(fname, shell)
-                return shell
+                return self._write_sub(fname, None)
 
         # particle sub-sampling
         xyz_i, xyz_f = self._subsample(ishell, xyz_i, xyz_f)
@@ -1762,17 +1778,15 @@ class SnapshotInterpShellBuilder(ShellBuilder):
                 xyz_f_work = _rotflip(self.replicate_rotflip[ix, iy, iz], xyz_f, boxsize).astype(dtype)
 
             # bin particles into healpix pixels
-            _worldline2pix(
+            self._worldline2pix(
                 ipix, *self._healpix_geometry, a_lc, chi2_lc, xyz_i_work[:, 0], xyz_i_work[:, 1], xyz_i_work[:, 2], xyz_f_work[:, 0], xyz_f_work[:, 1],
                 xyz_f_work[:, 2], shift[0, 0], shift[0, 1], shift[0, 2], rmin2, rmax2, self.footprint.octant)
 
             # scatter-add (out-of-shell particles have ipix = -1 and are skipped)
             _count_pix(count, ipix, buf)
 
-        shell = self._count_to_shell(count)
+        shell = self._write_sub(fname, count)
         del count, ipix, buf
-
-        self._write_hspmap(fname, shell)
 
         return shell
 
@@ -2024,8 +2038,8 @@ inv_halfpi = 2. / np.pi
 
 
 @numba.njit
-def _loc2pix(nside: int, order: int, ncap: int, npix: int, z: float, phi: float, sth: float) -> int:
-    """Convert (z, phi) on the unit sphere to a Healpix pixel index (RING-like).
+def _loc2pix_ring(nside: int, order: int, ncap: int, npix: int, z: float, phi: float, sth: float) -> int:
+    """Convert (z, phi) on the unit sphere to a RING Healpix pixel index.
 
     Parameters
     ----------
@@ -2052,7 +2066,8 @@ def _loc2pix(nside: int, order: int, ncap: int, npix: int, z: float, phi: float,
     Notes
     -----
     This is a Python/Numba translation of the Healpix ``loc2pix`` logic used by
-    ``vec2pix``. It is used internally to avoid calling healpy in tight loops.
+    ``vec2pix`` (RING branch of ``T_Healpix_Base::loc2pix`` in HEALPix C++). It is used internally to avoid calling
+    healpy in tight loops.
     """
     za = np.abs(z)
     tt = phi * inv_halfpi % 4.
@@ -2094,77 +2109,198 @@ def _loc2pix(nside: int, order: int, ncap: int, npix: int, z: float, phi: float,
             return npix - 2 * ir * (ir + 1) + ip
 
 
-@numba.njit
-def _vec2pix_kernel(
-        nside: int, order: int, ncap: int, npix: int, x: float, y: float, z: float, shiftx: float, shifty: float, shiftz: float, rmin2: float, rmax2: float,
-        octant: bool) -> int:
-    """Convert one shifted Cartesian position to a Healpix pixel index with cuts.
+@numba.njit(inline='always')
+def _spread_bits(v: int) -> int:
+    """Interleave the bits of an integer with zeros: bit ``i`` goes to bit ``2 i``.
 
     Parameters
     ----------
-    nside, order, ncap, npix : int
-        Healpix geometry parameters.
-    x, y, z : float
-        Particle position in box coordinates.
-    shiftx, shifty, shiftz : float
-        Replicate translation applied before binning.
-    rmin2, rmax2 : float
-        Shell radial cuts (squared).
-    octant : bool
-        If True, require x>=0, y>=0, z>=0 after shifting.
+    v : int
+        Integer below 2**32 (a pixel coordinate within a base pixel).
 
     Returns
     -------
     int
-        Pixel index, or -1 if the point is rejected by cuts.
     """
-    # apply shift
-    tmpx = x + shiftx
-    tmpy = y + shifty
-    tmpz = z + shiftz
-
-    # get radius and remove particles out of shell
-    r2 = tmpx**2 + tmpy**2 + tmpz**2
-    if r2 < rmin2 or r2 >= rmax2:
-        return -1
-
-    # remove particles out of octant if octant
-    if octant:  # check if particle out of octant
-        if (tmpx < 0.) or (tmpy < 0.) or (tmpz < 0.):
-            return -1
-
-    # get longitude (phi), altitude (nz) and distance to z-axis (sth) of particle projected on the unit sphere
-    phi = np.arctan2(tmpy, tmpx)
-    xl = 1. / np.sqrt(r2)
-    nz = tmpz * xl
-    sth = np.sqrt(tmpx**2 + tmpy**2) * xl
-
-    return _loc2pix(nside, order, ncap, npix, nz, phi, sth)
+    v = (v | (v << 16)) & 0x0000FFFF0000FFFF
+    v = (v | (v << 8)) & 0x00FF00FF00FF00FF
+    v = (v | (v << 4)) & 0x0F0F0F0F0F0F0F0F
+    v = (v | (v << 2)) & 0x3333333333333333
+    v = (v | (v << 1)) & 0x5555555555555555
+    return v
 
 
-@numba.njit(parallel=True)
-def _vec2pix(
-        ipix: np.ndarray, nside: int, order: int, ncap: int, npix: int, x: np.ndarray, y: np.ndarray, z: np.ndarray, shiftx: float, shifty: float,
-        shiftz: float, rmin2: float, rmax2: float, octant: bool) -> None:
-    """Vectorized/parallel version of :func:`_vec2pix_kernel`, filling ``ipix`` in place.
+@numba.njit(inline='always')
+def _xyf2nest(order: int, ix: int, iy: int, face: int) -> int:
+    """Return the NESTED index of a pixel from its coordinates within its base pixel (``xyf2nest`` in HEALPix C++).
 
     Parameters
     ----------
-    ipix : ndarray of int
-        Output pixel indices, same length as ``x``, with -1 for rejected particles.
-    nside, order, ncap, npix : int
-        Healpix geometry parameters (see :func:`_loc2pix`).
-    x, y, z : ndarray
-        Particle positions in box coordinates (1D arrays of equal length).
-    shiftx, shifty, shiftz : float
-        Replicate translation applied before binning.
-    rmin2, rmax2 : float
-        Shell radial cuts (squared).
-    octant : bool
-        If True, require x>=0, y>=0, z>=0 after shifting.
+    order : int
+        Healpix order = log2(nside).
+    ix, iy : int
+        Coordinates of the pixel within its base pixel, in ``[0, nside)``.
+    face : int
+        Base pixel, in ``[0, 12)``.
+
+    Returns
+    -------
+    int
+        NESTED pixel index.
     """
-    for i in numba.prange(len(x)):
-        ipix[i] = _vec2pix_kernel(nside, order, ncap, npix, x[i], y[i], z[i], shiftx, shifty, shiftz, rmin2, rmax2, octant)
+    return (face << (2 * order)) + _spread_bits(ix) + (_spread_bits(iy) << 1)
+
+
+@numba.njit
+def _loc2pix_nest(nside: int, order: int, ncap: int, npix: int, z: float, phi: float, sth: float) -> int:
+    """Convert (z, phi) on the unit sphere to a NESTED Healpix pixel index.
+
+    Parameters
+    ----------
+    nside, order, ncap, npix : int
+        Healpix geometry parameters (see :func:`_loc2pix_ring`; ``ncap`` and ``npix`` are unused).
+    z : float
+        Cosine of colatitude (= cos(theta)).
+    phi : float
+        Longitude angle in radians.
+    sth : float
+        sin(theta) (distance to z-axis on the unit sphere).
+
+    Returns
+    -------
+    int
+        Pixel index.
+
+    Notes
+    -----
+    Translation of the NESTED branch of ``T_Healpix_Base::loc2pix`` in HEALPix C++, as :func:`_loc2pix_ring` for
+    the RING branch; checked identical to ``healpy.vec2pix(nest=True)``.
+    """
+    za = np.abs(z)
+    tt = phi * inv_halfpi % 4.
+    if za <= 2. / 3.:  # equatorial region
+        temp1 = nside * (0.5 + tt)
+        temp2 = nside * z * 0.75
+        jp = int(temp1 - temp2)  # index of ascending edge line
+        jm = int(temp1 + temp2)  # index of descending edge line
+        ifp = jp >> order  # in {0,4}
+        ifm = jm >> order
+        if ifp == ifm:
+            face = ifp | 4
+        elif ifp < ifm:
+            face = ifp
+        else:
+            face = ifm + 8
+        ix = jm & (nside - 1)
+        iy = nside - (jp & (nside - 1)) - 1
+        return _xyf2nest(order, ix, iy, face)
+
+    else:  # polar caps
+        ntt = min(3, int(tt))
+        tp = tt - ntt
+        if za < 0.99:
+            tmp = nside * np.sqrt(3 * (1 - za))
+        else:
+            tmp = nside * sth / np.sqrt((1. + za) / 3.)
+
+        jp = min(int(tp * tmp), nside - 1)  # increasing edge line index (bounded for points too close to the boundary)
+        jm = min(int((1. - tp) * tmp), nside - 1)  # decreasing edge line index
+        if z > 0:
+            return _xyf2nest(order, nside - jm - 1, nside - jp - 1, ntt)
+        return _xyf2nest(order, jp, jm, ntt + 8)
+
+
+def _make_vec2pix(loc2pix):
+    """Return the pixelization kernels of particle positions for one ordering.
+
+    Parameters
+    ----------
+    loc2pix : numba function
+        :func:`_loc2pix_ring` or :func:`_loc2pix_nest`.
+
+    Returns
+    -------
+    (kernel, vec2pix)
+        The kernel of one position and its parallel version (``_vec2pix_kernel_{ring,nest}`` and
+        ``_vec2pix_{ring,nest}``).
+    """
+
+    @numba.njit
+    def _vec2pix_kernel(
+            nside: int, order: int, ncap: int, npix: int, x: float, y: float, z: float, shiftx: float, shifty: float, shiftz: float, rmin2: float, rmax2: float,
+            octant: bool) -> int:
+        """Convert one shifted Cartesian position to a Healpix pixel index with cuts.
+
+        Parameters
+        ----------
+        nside, order, ncap, npix : int
+            Healpix geometry parameters.
+        x, y, z : float
+            Particle position in box coordinates.
+        shiftx, shifty, shiftz : float
+            Replicate translation applied before binning.
+        rmin2, rmax2 : float
+            Shell radial cuts (squared).
+        octant : bool
+            If True, require x>=0, y>=0, z>=0 after shifting.
+
+        Returns
+        -------
+        int
+            Pixel index, or -1 if the point is rejected by cuts.
+        """
+        # apply shift
+        tmpx = x + shiftx
+        tmpy = y + shifty
+        tmpz = z + shiftz
+
+        # get radius and remove particles out of shell
+        r2 = tmpx**2 + tmpy**2 + tmpz**2
+        if r2 < rmin2 or r2 >= rmax2:
+            return -1
+
+        # remove particles out of octant if octant
+        if octant:  # check if particle out of octant
+            if (tmpx < 0.) or (tmpy < 0.) or (tmpz < 0.):
+                return -1
+
+        # get longitude (phi), altitude (nz) and distance to z-axis (sth) of particle projected on the unit sphere
+        phi = np.arctan2(tmpy, tmpx)
+        xl = 1. / np.sqrt(r2)
+        nz = tmpz * xl
+        sth = np.sqrt(tmpx**2 + tmpy**2) * xl
+
+        return loc2pix(nside, order, ncap, npix, nz, phi, sth)
+
+    @numba.njit(parallel=True)
+    def _vec2pix(
+            ipix: np.ndarray, nside: int, order: int, ncap: int, npix: int, x: np.ndarray, y: np.ndarray, z: np.ndarray, shiftx: float, shifty: float,
+            shiftz: float, rmin2: float, rmax2: float, octant: bool) -> None:
+        """Vectorized/parallel version of :func:`_vec2pix_kernel`, filling ``ipix`` in place.
+
+        Parameters
+        ----------
+        ipix : ndarray of int
+            Output pixel indices, same length as ``x``, with -1 for rejected particles.
+        nside, order, ncap, npix : int
+            Healpix geometry parameters (see :func:`_loc2pix_ring`).
+        x, y, z : ndarray
+            Particle positions in box coordinates (1D arrays of equal length).
+        shiftx, shifty, shiftz : float
+            Replicate translation applied before binning.
+        rmin2, rmax2 : float
+            Shell radial cuts (squared).
+        octant : bool
+            If True, require x>=0, y>=0, z>=0 after shifting.
+        """
+        for i in numba.prange(len(x)):
+            ipix[i] = _vec2pix_kernel(nside, order, ncap, npix, x[i], y[i], z[i], shiftx, shifty, shiftz, rmin2, rmax2, octant)
+
+    return _vec2pix_kernel, _vec2pix
+
+
+_vec2pix_kernel_ring, _vec2pix_ring = _make_vec2pix(_loc2pix_ring)
+_vec2pix_kernel_nest, _vec2pix_nest = _make_vec2pix(_loc2pix_nest)
 
 
 @numba.njit
@@ -2296,113 +2432,132 @@ def _intersect_lightcone(chi2_i: float, chi2_f: float, a: np.ndarray, chi2: np.n
             y_last = y_new
 
 
-@numba.njit
-def _worldline2pix_kernel(
-        nside: int, order: int, ncap: int, npix: int, a_lc: np.ndarray, chi2_lc: np.ndarray, x_i: float, y_i: float, z_i: float, x_f: float, y_f: float,
-        z_f: float, shiftx: float, shifty: float, shiftz: float, rmin2: float, rmax2: float, octant: bool) -> int:
-    """Compute the Healpix pixel of a particle/lightcone intersection (single).
+def _make_worldline2pix(loc2pix):
+    """Return the pixelization kernels of particle worldlines for one ordering (as :func:`_make_vec2pix`).
 
     Parameters
     ----------
-    nside, order, ncap, npix : int
-        Healpix geometry parameters (see :func:`_loc2pix`).
-    a_lc : ndarray
-        Scale factor samples defining the lightcone along the snapshot interval.
-    chi2_lc : ndarray
-        Squared comoving distances chi(a)^2 along the same samples.
-    x_i, y_i, z_i, x_f, y_f, z_f : float
-        Initial and final particle positions.
-    shiftx, shifty, shiftz : float
-        Replicate translation.
-    rmin2, rmax2 : float
-        Shell radial cuts (squared).
-    octant : bool
-        If True, require x>=0, y>=0, z>=0 after shifting.
+    loc2pix : numba function
+        :func:`_loc2pix_ring` or :func:`_loc2pix_nest`.
 
     Returns
     -------
-    int
-        Pixel index, or -1 if rejected.
+    (kernel, worldline2pix)
+        ``_worldline2pix_kernel_{ring,nest}`` and ``_worldline2pix_{ring,nest}``.
     """
-    # apply shift
-    tmpx_i = x_i + shiftx
-    tmpy_i = y_i + shifty
-    tmpz_i = z_i + shiftz
 
-    tmpx_f = x_f + shiftx
-    tmpy_f = y_f + shifty
-    tmpz_f = z_f + shiftz
+    @numba.njit
+    def _worldline2pix_kernel(
+            nside: int, order: int, ncap: int, npix: int, a_lc: np.ndarray, chi2_lc: np.ndarray, x_i: float, y_i: float, z_i: float, x_f: float, y_f: float,
+            z_f: float, shiftx: float, shifty: float, shiftz: float, rmin2: float, rmax2: float, octant: bool) -> int:
+        """Compute the Healpix pixel of a particle/lightcone intersection (single).
 
-    # get radius and remove particles out of shell
-    r2_i = tmpx_i**2 + tmpy_i**2 + tmpz_i**2
-    r2_f = tmpx_f**2 + tmpy_f**2 + tmpz_f**2
-    if r2_f < rmin2 or r2_i >= rmax2:  # it is enough to test initial/final radii as it cannot evolve faster than light
-        return -1
+        Parameters
+        ----------
+        nside, order, ncap, npix : int
+            Healpix geometry parameters (see :func:`_loc2pix_ring`).
+        a_lc : ndarray
+            Scale factor samples defining the lightcone along the snapshot interval.
+        chi2_lc : ndarray
+            Squared comoving distances chi(a)^2 along the same samples.
+        x_i, y_i, z_i, x_f, y_f, z_f : float
+            Initial and final particle positions.
+        shiftx, shifty, shiftz : float
+            Replicate translation.
+        rmin2, rmax2 : float
+            Shell radial cuts (squared).
+        octant : bool
+            If True, require x>=0, y>=0, z>=0 after shifting.
 
-    # remove particles out of octant if octant
-    if octant:  # check if particle out of octant
-        if (tmpx_i < 0. and tmpx_f < 0.) or (tmpy_i < 0. and tmpy_f < 0.) or (tmpz_i < 0. and tmpz_f < 0.):
+        Returns
+        -------
+        int
+            Pixel index, or -1 if rejected.
+        """
+        # apply shift
+        tmpx_i = x_i + shiftx
+        tmpy_i = y_i + shifty
+        tmpz_i = z_i + shiftz
+
+        tmpx_f = x_f + shiftx
+        tmpy_f = y_f + shifty
+        tmpz_f = z_f + shiftz
+
+        # get radius and remove particles out of shell
+        r2_i = tmpx_i**2 + tmpy_i**2 + tmpz_i**2
+        r2_f = tmpx_f**2 + tmpy_f**2 + tmpz_f**2
+        if r2_f < rmin2 or r2_i >= rmax2:  # it is enough to test initial/final radii as it cannot evolve faster than light
             return -1
 
-    # find intersection of particle wordline and lightcone (ie find scale factor when particle comoving radius intersects the comoving radial distance function)
-    a_int = _intersect_lightcone(r2_i, r2_f, a_lc, chi2_lc)
+        # remove particles out of octant if octant
+        if octant:  # check if particle out of octant
+            if (tmpx_i < 0. and tmpx_f < 0.) or (tmpy_i < 0. and tmpy_f < 0.) or (tmpz_i < 0. and tmpz_f < 0.):
+                return -1
 
-    a_i = a_lc[0]
-    a_f = a_lc[-1]
+        # find intersection of particle wordline and lightcone (ie find scale factor when particle comoving radius intersects the comoving radial distance function)
+        a_int = _intersect_lightcone(r2_i, r2_f, a_lc, chi2_lc)
 
-    assert a_i <= a_int and a_int < a_f
+        a_i = a_lc[0]
+        a_f = a_lc[-1]
 
-    a_ratio = (a_int - a_i) / (a_f - a_i)
-    tmpx = tmpx_i + (tmpx_f - tmpx_i) * a_ratio
-    tmpy = tmpy_i + (tmpy_f - tmpy_i) * a_ratio
-    tmpz = tmpz_i + (tmpz_f - tmpz_i) * a_ratio
+        assert a_i <= a_int and a_int < a_f
 
-    # remove particles that intersect lightcone out of shell
-    r2 = tmpx**2 + tmpy**2 + tmpz**2
-    if r2 < rmin2 or r2 >= rmax2:
-        return -1
+        a_ratio = (a_int - a_i) / (a_f - a_i)
+        tmpx = tmpx_i + (tmpx_f - tmpx_i) * a_ratio
+        tmpy = tmpy_i + (tmpy_f - tmpy_i) * a_ratio
+        tmpz = tmpz_i + (tmpz_f - tmpz_i) * a_ratio
 
-    # remove particles out of octant if octant
-    if octant:  # check if particle out of octant
-        if (tmpx < 0.) or (tmpy < 0.) or (tmpz < 0.):
+        # remove particles that intersect lightcone out of shell
+        r2 = tmpx**2 + tmpy**2 + tmpz**2
+        if r2 < rmin2 or r2 >= rmax2:
             return -1
 
-    # get longitude (phi), altitude (nz) and distance to z-axis (sth) of particle projected on the unit sphere
-    phi = np.arctan2(tmpy, tmpx)
-    xl = 1. / np.sqrt(r2)
-    nz = tmpz * xl
-    sth = np.sqrt(tmpx**2 + tmpy**2) * xl
+        # remove particles out of octant if octant
+        if octant:  # check if particle out of octant
+            if (tmpx < 0.) or (tmpy < 0.) or (tmpz < 0.):
+                return -1
 
-    return _loc2pix(nside, order, ncap, npix, nz, phi, sth)
+        # get longitude (phi), altitude (nz) and distance to z-axis (sth) of particle projected on the unit sphere
+        phi = np.arctan2(tmpy, tmpx)
+        xl = 1. / np.sqrt(r2)
+        nz = tmpz * xl
+        sth = np.sqrt(tmpx**2 + tmpy**2) * xl
+
+        return loc2pix(nside, order, ncap, npix, nz, phi, sth)
+
+    @numba.njit(parallel=True)
+    def _worldline2pix(
+            ipix: np.ndarray, nside: int, order: int, ncap: int, npix: int, a_lc: np.ndarray, chi2_lc: np.ndarray, x_i: np.ndarray, y_i: np.ndarray,
+            z_i: np.ndarray, x_f: np.ndarray, y_f: np.ndarray, z_f: np.ndarray, shiftx: float, shifty: float, shiftz: float, rmin2: float, rmax2: float,
+            octant: bool) -> None:
+        """Parallel version of :func:`_worldline2pix_kernel`, filling ``ipix`` in place.
+
+        Parameters
+        ----------
+        ipix : ndarray of int
+            Output pixel indices, same length as ``x_i``, with -1 for rejected particles.
+        nside, order, ncap, npix : int
+            Healpix geometry parameters (see :func:`_loc2pix_ring`).
+        a_lc, chi2_lc : ndarray
+            Lightcone samples, see :func:`_worldline2pix_kernel`.
+        x_i, y_i, z_i, x_f, y_f, z_f : ndarray
+            Initial and final particle positions (1D arrays of equal length).
+        shiftx, shifty, shiftz : float
+            Replicate translation.
+        rmin2, rmax2 : float
+            Shell radial cuts (squared).
+        octant : bool
+            If True, require x>=0, y>=0, z>=0 after shifting.
+        """
+        for i in numba.prange(len(x_i)):
+            ipix[i] = _worldline2pix_kernel(
+                nside, order, ncap, npix, a_lc, chi2_lc, x_i[i], y_i[i], z_i[i], x_f[i], y_f[i], z_f[i], shiftx, shifty, shiftz, rmin2, rmax2, octant)
+
+    return _worldline2pix_kernel, _worldline2pix
 
 
-@numba.njit(parallel=True)
-def _worldline2pix(
-        ipix: np.ndarray, nside: int, order: int, ncap: int, npix: int, a_lc: np.ndarray, chi2_lc: np.ndarray, x_i: np.ndarray, y_i: np.ndarray,
-        z_i: np.ndarray, x_f: np.ndarray, y_f: np.ndarray, z_f: np.ndarray, shiftx: float, shifty: float, shiftz: float, rmin2: float, rmax2: float,
-        octant: bool) -> None:
-    """Parallel version of :func:`_worldline2pix_kernel`, filling ``ipix`` in place.
-
-    Parameters
-    ----------
-    ipix : ndarray of int
-        Output pixel indices, same length as ``x_i``, with -1 for rejected particles.
-    nside, order, ncap, npix : int
-        Healpix geometry parameters (see :func:`_loc2pix`).
-    a_lc, chi2_lc : ndarray
-        Lightcone samples, see :func:`_worldline2pix_kernel`.
-    x_i, y_i, z_i, x_f, y_f, z_f : ndarray
-        Initial and final particle positions (1D arrays of equal length).
-    shiftx, shifty, shiftz : float
-        Replicate translation.
-    rmin2, rmax2 : float
-        Shell radial cuts (squared).
-    octant : bool
-        If True, require x>=0, y>=0, z>=0 after shifting.
-    """
-    for i in numba.prange(len(x_i)):
-        ipix[i] = _worldline2pix_kernel(
-            nside, order, ncap, npix, a_lc, chi2_lc, x_i[i], y_i[i], z_i[i], x_f[i], y_f[i], z_f[i], shiftx, shifty, shiftz, rmin2, rmax2, octant)
+_worldline2pix_kernel_ring, _worldline2pix_ring = _make_worldline2pix(_loc2pix_ring)
+_worldline2pix_kernel_nest, _worldline2pix_nest = _make_worldline2pix(_loc2pix_nest)
 
 
 @numba.njit(parallel=True)
@@ -2418,7 +2573,7 @@ def _count_pix(count: np.ndarray, ipix: np.ndarray, buf: np.ndarray, nranges: in
     count : ndarray of int
         Dense per-pixel count array, updated in place.
     ipix : ndarray of int
-        Pixel index of each particle (e.g. from :func:`_vec2pix`), with -1 marking
+        Pixel index of each particle (e.g. from :func:`_vec2pix_ring`), with -1 marking
         rejected particles, which are skipped.
     buf : ndarray of int
         Work array, at least as long as ``ipix``, with a dtype able to hold pixel indices.

@@ -288,10 +288,10 @@ def compute_shell_cls(reader_dict, shell_dict, baryon_dict=None, inputs=[]):
     if _done([builder.path(what='cls', ext='fits')], options_id=params_id):
         return
     cls_out = {}
-    for ell, cl in _load_pairs(inputs):
+    for ell, cl in _read_pairs(inputs):
         k = list(cl.keys())[0]
         cls_out[k] = cl[k]
-    builder._save_cls(ell, cls_out, metadata={'options_id': params_id})
+    builder._write_cls(ell, cls_out, metadata={'options_id': params_id})
 
 
 @python_app(executors=['highmem'])
@@ -325,10 +325,10 @@ def compute_kappa_cls(reader_dict, shell_dict, lensing_dict, baryon_dict=None, i
     if _done([lensing.path(what='cls', ext='fits')], options_id=params_id):
         return
     cls_out = {}
-    for ell, cl in _load_pairs(inputs):
+    for ell, cl in _read_pairs(inputs):
         k = list(cl.keys())[0]
         cls_out[k] = cl[k]
-    lensing._save_cls(ell, cls_out, metadata={'options_id': params_id})
+    lensing._write_cls(ell, cls_out, metadata={'options_id': params_id})
 
 
 @python_app(executors=['highmem'])
@@ -375,11 +375,11 @@ def compute_catalog_2pt(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_
     if _done([catalog._path_stat('2pt', shapes)], options_id=params_id):
         return
     theta_out, xi_out, dxi_out = {}, {}, {}
-    for theta, xi, dxi in _load_pairs(inputs):
+    for theta, xi, dxi in _read_pairs(inputs):
         for out, res in ((theta_out, theta), (xi_out, xi), (dxi_out, dxi)):
             for data_type, pairs in res.items():
                 out.setdefault(data_type, {}).update(pairs)
-    catalog._save_2pt(theta_out, xi_out, dxi=dxi_out, shapes=shapes, metadata={'options_id': params_id})
+    catalog._write_2pt(theta_out, xi_out, dxi=dxi_out, shapes=shapes, metadata={'options_id': params_id})
 
 
 @python_app(executors=['default'])
@@ -449,10 +449,10 @@ def compute_catalog_cls(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_
     if _done([catalog._path_stat('cls', shapes)], options_id=params_id):
         return
     cls_out = {}
-    for ell, cl in _load_pairs(inputs):
+    for ell, cl in _read_pairs(inputs):
         for data_type, pairs in cl.items():
             cls_out.setdefault(data_type, {}).update(pairs)
-    catalog._save_cls(ell, cls_out, shapes=shapes, metadata={'options_id': params_id})
+    catalog._write_cls(ell, cls_out, shapes=shapes, metadata={'options_id': params_id})
 
 
 @python_app(executors=['default'])
@@ -606,7 +606,7 @@ def _compute_pair(fname, compute):
     return fname
 
 
-def _load_pairs(fnames):
+def _read_pairs(fnames):
     """Results of the bin pairs saved by _compute_pair (None for tasks skipped because their product exists)."""
     from pollux.io import PolluxIO
     for fname in fnames:

@@ -32,7 +32,7 @@ def code_version() -> dict[str, str | bool | None]:
     return dict(commit=commit and commit.strip(), branch=branch and branch.strip(), dirty=bool(status))
 
 
-def save_code_version(out_dir: str, files: Iterable[str] = (), require_clean: bool = False) -> str:
+def write_code_version(out_dir: str, files: Iterable[str] = (), require_clean: bool = False) -> str:
     """Record the code and environment of a run in a new ``{out_dir}/code_version/{date}`` folder.
 
     Each call has its own folder, so that resuming a run keeps the record of the earlier

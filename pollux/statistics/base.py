@@ -18,14 +18,14 @@ class TwoPointStatistics(ABC):
     """Base of :class:`~pollux.statistics.maps.MapStatistics` and :class:`~pollux.statistics.catalogs.CatalogStatistics`.
 
     Statistics are saved as SACC files of ``{data_type: {(i, j): values}}``, with the SACC tracers of the legs
-    ``i`` and ``j`` of each data type (:meth:`_save_sacc`). Bandpower windows are saved apart from their NaMaster
+    ``i`` and ``j`` of each data type (:meth:`_write_sacc`). Bandpower windows are saved apart from their NaMaster
     workspace.
     """
 
     # ==================================================================================================================
     # region SACC
 
-    def _save_sacc(
+    def _write_sacc(
             self,
             fname: str,
             values: dict[str, dict[tuple[int, int], np.ndarray]],
@@ -78,8 +78,8 @@ class TwoPointStatistics(ABC):
         return fname
 
     @staticmethod
-    def _load_sacc(fname: str, return_dict: bool = False, return_errors: bool = False) -> sacc.Sacc | tuple:
-        """Load statistics saved by :meth:`_save_sacc`.
+    def _read_sacc(fname: str, return_dict: bool = False, return_errors: bool = False) -> sacc.Sacc | tuple:
+        """Read statistics saved by :meth:`_write_sacc`.
 
         Parameters
         ----------

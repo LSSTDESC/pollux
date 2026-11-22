@@ -237,7 +237,7 @@ class CatalogStatistics(TwoPointStatistics):
         return tracers
 
     def _sacc_legs(self, legs: dict[str, tuple[str, str]]) -> dict[str, tuple[list, list]]:
-        """Return the SACC tracers of the legs of each data type, from their roles (for :meth:`_save_sacc`).
+        """Return the SACC tracers of the legs of each data type, from their roles (for :meth:`_write_sacc`).
 
         Parameters
         ----------
@@ -426,7 +426,7 @@ class CatalogStatistics(TwoPointStatistics):
         area = ipix_mask.size * hp.nside2pixarea(builder.nside)
         # columns of the two shear components, each a sum of columns ('+', see compute_alms)
         cols1, cols2 = (c.split('+') for c in shear_cols)
-        cat = self.load_catalogs(
+        cat = self.read_catalogs(
             ibin, subsample=subsample, seed=seed, columns=['ra', 'dec', *cols1, *cols2], remove_mean=cols1 + cols2 if remove_mean else None)
         positions = [cat['ra'], cat['dec']]
         weights_gal = np.ones(cat['ra'].size)
@@ -470,7 +470,7 @@ class CatalogStatistics(TwoPointStatistics):
         return fields
 
     def _ngal_used(self, ibin: int, subsample: float | None) -> int:
-        """Return the number of galaxies of a bin used by the statistics (all, or the subsample read by :meth:`load_catalogs`).
+        """Return the number of galaxies of a bin used by the statistics (all, or the subsample read by :meth:`read_catalogs`).
 
         Parameters
         ----------
@@ -779,7 +779,7 @@ class CatalogStatistics(TwoPointStatistics):
             Seed for the random catalogs' RNG. Default is the shell builder's seed.
         save : bool, optional
             If True (default), save the spectra to a SACC FITS file via
-            :meth:`_save_cls`, at ``cat_cls[_{shapes}].fits`` of the catalogs.
+            :meth:`_write_cls`, at ``cat_cls[_{shapes}].fits`` of the catalogs.
         use_precomputed_alms : bool, optional
             If True (default), the fields of each bin come from :meth:`compute_alms`: read from their
             intermediate files, or computed and saved. If False, they are computed and not saved.
@@ -848,11 +848,11 @@ class CatalogStatistics(TwoPointStatistics):
                     cl.setdefault(data_type, {})[i, j] = c[self._SACC_TYPE_COMPONENT_CLS[data_type]]
 
         if save:
-            self._save_cls(ell, cl, shapes=shapes)
+            self._write_cls(ell, cl, shapes=shapes)
 
         return ell, cl
 
-    def _save_cls(self, ell: np.ndarray, cl: dict, shapes: str = 'shear', metadata: dict | None = None) -> str:
+    def _write_cls(self, ell: np.ndarray, cl: dict, shapes: str = 'shear', metadata: dict | None = None) -> str:
         """Save catalog-based angular power spectra to a SACC FITS file (:meth:`_path_stat`).
 
         The catalog's density and shear fields share the same underlying n(z)
@@ -879,10 +879,10 @@ class CatalogStatistics(TwoPointStatistics):
         str
             Path to the saved SACC FITS file.
         """
-        return self._save_sacc(self._path_stat('cls', shapes), cl, ell, self._sacc_legs(self._SACC_TYPE_LEGS_CLS), metadata=metadata)
+        return self._write_sacc(self._path_stat('cls', shapes), cl, ell, self._sacc_legs(self._SACC_TYPE_LEGS_CLS), metadata=metadata)
 
-    def load_cls(self, return_dict: bool = False, return_errors: bool = False, shapes: str = 'shear') -> sacc.Sacc | tuple:
-        """Load catalog-based angular power spectra previously saved by :meth:`_save_cls`.
+    def read_cls(self, return_dict: bool = False, return_errors: bool = False, shapes: str = 'shear') -> sacc.Sacc | tuple:
+        """Read catalog-based angular power spectra previously saved by :meth:`_write_cls`.
 
         Parameters
         ----------
@@ -906,7 +906,7 @@ class CatalogStatistics(TwoPointStatistics):
             have computed all of them), with no dependency on ``self.lensing``
             beyond the file path.
         """
-        res = self._load_sacc(self._path_stat('cls', shapes), return_dict=return_dict, return_errors=return_errors)
+        res = self._read_sacc(self._path_stat('cls', shapes), return_dict=return_dict, return_errors=return_errors)
         if not return_dict:
             return res
         ell = next(e for pairs in res[0].values() for e in pairs.values())
@@ -1126,7 +1126,7 @@ class CatalogStatistics(TwoPointStatistics):
         os.makedirs(plot_dir, exist_ok=True)
 
         # measured spectra, and their prediction for the statistics found
-        ell, cl = self.load_cls(return_dict=True, shapes=shapes)
+        ell, cl = self.read_cls(return_dict=True, shapes=shapes)
         what = [stat for stat, types in self._STAT_TYPES_CLS.items() if types[0] in cl]
         need_errors = error_bars or 'diff_over_error' in modes
         _, cl_th, *dcl = self.predict_cls(what=what, error_bars=need_errors, shapes=shapes, **predict_kwargs)
@@ -1271,7 +1271,7 @@ class CatalogStatistics(TwoPointStatistics):
             False (return a single array, taken from the first pair computed).
         save : bool, optional
             If True (default), save the correlation functions to a SACC FITS
-            file via :meth:`_save_2pt`, at ``cat_2pt[_{shapes}].fits`` of the catalogs
+            file via :meth:`_write_2pt`, at ``cat_2pt[_{shapes}].fits`` of the catalogs
             (``cat_2pt_{shapes}.fits`` for shapes other than ``'shear'``).
 
         Returns
@@ -1314,7 +1314,7 @@ class CatalogStatistics(TwoPointStatistics):
         shared_cat_rand = None
         for ibin in self.lensing.tqdm(ibins, desc="[compute_2pt] building catalogs"):
             columns = cols1 + cols2
-            cat = self.load_catalogs(ibin, subsample=subsample, seed=seed, columns=['ra', 'dec', *columns], remove_mean=columns if remove_mean else None)
+            cat = self.read_catalogs(ibin, subsample=subsample, seed=seed, columns=['ra', 'dec', *columns], remove_mean=columns if remove_mean else None)
 
             # galaxies, with their shapes if needed (sum of the columns; TreeCorr's g2 convention is flipped)
             gal_kwargs = dict(ra=cat['ra'], dec=cat['dec'], ra_units='deg', dec_units='deg')
@@ -1402,7 +1402,7 @@ class CatalogStatistics(TwoPointStatistics):
                     theta = theta_t[i, j]
 
         if save:
-            self._save_2pt(theta_pairs, xi, dxi=dxi, shapes=shapes)
+            self._write_2pt(theta_pairs, xi, dxi=dxi, shapes=shapes)
 
         theta_out = theta_pairs if theta_per_pair else theta
 
@@ -1411,10 +1411,10 @@ class CatalogStatistics(TwoPointStatistics):
         else:
             return theta_out, xi
 
-    def _save_2pt(self, theta: dict, xi: dict, dxi: dict | None = None, shapes: str = 'shear', metadata: dict | None = None) -> str:
+    def _write_2pt(self, theta: dict, xi: dict, dxi: dict | None = None, shapes: str = 'shear', metadata: dict | None = None) -> str:
         """Save catalog-based real-space two-point functions to a SACC FITS file (:meth:`_path_stat`).
 
-        Mirrors :meth:`_save_cls`: the catalog's density and shear fields
+        Mirrors :meth:`_write_cls`: the catalog's density and shear fields
         share the same underlying n(z) per bin but are registered under
         distinct tracer names (``density_{i}`` vs. the lensing builder's
         ``kappa_{i}``).
@@ -1443,11 +1443,11 @@ class CatalogStatistics(TwoPointStatistics):
         str
             Path to the saved SACC FITS file.
         """
-        return self._save_sacc(
+        return self._write_sacc(
             self._path_stat('2pt', shapes), xi, theta, self._sacc_legs(self._SACC_TYPE_LEGS_2PT), coord='theta', errors=dxi, metadata=metadata)
 
-    def load_2pt(self, return_dict: bool = False, return_errors: bool = False, shapes: str = 'shear') -> sacc.Sacc | tuple:
-        """Load catalog-based two-point functions previously saved by :meth:`_save_2pt`.
+    def read_2pt(self, return_dict: bool = False, return_errors: bool = False, shapes: str = 'shear') -> sacc.Sacc | tuple:
+        """Read catalog-based two-point functions previously saved by :meth:`_write_2pt`.
 
         Parameters
         ----------
@@ -1471,7 +1471,7 @@ class CatalogStatistics(TwoPointStatistics):
             the file (:meth:`compute_2pt` may not have computed all of them),
             with no dependency on ``self.lensing`` beyond the file path.
         """
-        return self._load_sacc(self._path_stat('2pt', shapes), return_dict=return_dict, return_errors=return_errors)
+        return self._read_sacc(self._path_stat('2pt', shapes), return_dict=return_dict, return_errors=return_errors)
 
     def predict_2pt(self, theta: dict, nell: int = 500, *, shapes: str = 'shear', pixel_window: bool = True) -> dict:
         """Predict the catalog two-point correlation functions.
@@ -1482,7 +1482,7 @@ class CatalogStatistics(TwoPointStatistics):
         ----------
         theta : dict
             Angular separations in arcmin keyed by SACC data type, then by ``(i, j)``
-            (as returned by :meth:`load_2pt` or :meth:`compute_2pt` with ``theta_per_pair=True``).
+            (as returned by :meth:`read_2pt` or :meth:`compute_2pt` with ``theta_per_pair=True``).
         nell : int, optional
             Number of log-spaced multipoles up to the bandpower ``lmax`` used for the Hankel transforms.
         shapes : {'shear', 'ia', 'shear_plus_ia', 'observed'}, optional
@@ -1564,11 +1564,11 @@ class CatalogStatistics(TwoPointStatistics):
         colors = {st.galaxy_shear_xi_plus: 'dodgerblue', st.galaxy_shear_xi_minus: 'orange', st.galaxy_shearDensity_xi_t: 'red', st.galaxy_density_xi: 'green'}
 
         # measurements and predictions (and those of the reference catalog)
-        theta, xi, dxi = self.load_2pt(return_dict=True, return_errors=True, shapes=shapes)
+        theta, xi, dxi = self.read_2pt(return_dict=True, return_errors=True, shapes=shapes)
         xi_th = self.predict_2pt(theta, shapes=shapes)
         xi_ref, xi_th_ref = {}, {}
         if reference is not None:
-            _, xi_ref = reference.load_2pt(return_dict=True, shapes=shapes)
+            _, xi_ref = reference.read_2pt(return_dict=True, shapes=shapes)
             xi_th_ref = reference.predict_2pt(theta, shapes=shapes)
             modes = (*modes, 'ratio_to_reference')
 
@@ -1591,8 +1591,8 @@ class CatalogStatistics(TwoPointStatistics):
 
         # GI = (shear + IA) - shear - IA, from the same galaxies (data) and from the predictions at the same theta
         if shapes == 'ia' and all(os.path.exists(self._path_stat('2pt', s)) for s in ('shear', 'shear_plus_ia')):
-            _, xi_tot = self.load_2pt(return_dict=True, shapes='shear_plus_ia')
-            _, xi_g = self.load_2pt(return_dict=True, shapes='shear')
+            _, xi_tot = self.read_2pt(return_dict=True, shapes='shear_plus_ia')
+            _, xi_g = self.read_2pt(return_dict=True, shapes='shear')
             th_tot, th_g = self.predict_2pt(theta, shapes='shear_plus_ia'), self.predict_2pt(theta, shapes='shear')
             gi = {}
             for t in shear_types:

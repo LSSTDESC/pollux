@@ -11,7 +11,7 @@ Power spectra of maps
 Map builders (shells, convergence) measure angular power spectra with NaMaster:
 
 - :meth:`~pollux.map_builder.MapBuilder.compute_alms` computes the spherical harmonics of the maps, on the padded
-  and apodized footprint if any (see :doc:`shells`), and saves them (read by :meth:`~pollux.map_builder.MapBuilder.load_alms`);
+  and apodized footprint if any (see :doc:`shells`), and saves them (read by :meth:`~pollux.map_builder.MapBuilder.read_alms`);
 - :meth:`~pollux.statistics.maps.MapStatistics.compute_cls` computes the decoupled bandpowers of pairs of maps
   (``pairs``, or all with ``auto_only``), with the binning ``b`` (by default 20 bandpowers log-spaced from ℓ = 8 to 2 ``nside``) and a NaMaster
   workspace saved with the footprint;

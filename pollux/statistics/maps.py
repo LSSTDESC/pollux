@@ -107,12 +107,12 @@ class MapStatistics(TwoPointStatistics):
             previous_pair = (-1, -1)
             for i, j in self.tqdm(pairs, desc="[compute_cls]"):
                 if not i == previous_pair[0]:
-                    almi = self.load_alms(i)
+                    almi = self.read_alms(i)
                 if i == j:
                     almj = almi
                 else:
                     if not j == previous_pair[1]:
-                        almj = self.load_alms(j)
+                        almj = self.read_alms(j)
                 pcl = hp.alm2cl(almi, almj)
                 cl[i, j] = wsp.decouple_cell([pcl])[0]
                 previous_pair = (i, j)
@@ -129,7 +129,7 @@ class MapStatistics(TwoPointStatistics):
         ell = b.get_effective_ells()
 
         if save:
-            self._save_cls(ell, cl)
+            self._write_cls(ell, cl)
 
         return ell, cl
 
@@ -234,7 +234,7 @@ class MapStatistics(TwoPointStatistics):
         """
         return self._saved_bpws(self._path_wsp, lambda: self.wsp)
 
-    def _save_cls(self, ell: np.ndarray, cl: dict[tuple[int, int], np.ndarray], metadata: dict | None = None) -> str:
+    def _write_cls(self, ell: np.ndarray, cl: dict[tuple[int, int], np.ndarray], metadata: dict | None = None) -> str:
         """Save angular power spectra to a SACC FITS file (``cls.fits`` of the product).
 
         Parameters
@@ -254,10 +254,10 @@ class MapStatistics(TwoPointStatistics):
             Path to the saved SACC FITS file.
         """
         tracers = [t.sacc() for t in self.tracers]
-        return self._save_sacc(self.io.path(self.product, 'cls'), {self.sacc_type: cl}, ell, {self.sacc_type: (tracers, tracers)}, metadata=metadata)
+        return self._write_sacc(self.io.path(self.product, 'cls'), {self.sacc_type: cl}, ell, {self.sacc_type: (tracers, tracers)}, metadata=metadata)
 
-    def load_cls(self, return_dict: bool = False, return_errors: bool = False) -> sacc.Sacc | tuple:
-        """Load saved angular power spectra.
+    def read_cls(self, return_dict: bool = False, return_errors: bool = False) -> sacc.Sacc | tuple:
+        """Read saved angular power spectra.
 
         Parameters
         ----------
@@ -280,7 +280,7 @@ class MapStatistics(TwoPointStatistics):
         FileNotFoundError
             If the SACC file does not exist.
         """
-        res = self._load_sacc(self.io.path(self.product, 'cls'), return_dict=return_dict, return_errors=return_errors)
+        res = self._read_sacc(self.io.path(self.product, 'cls'), return_dict=return_dict, return_errors=return_errors)
         if not return_dict:
             return res
         ell, cl, *errors = (r.get(self.sacc_type, {}) for r in res)
@@ -498,7 +498,7 @@ class MapStatistics(TwoPointStatistics):
         need_errors = error_bars or 'diff_over_error' in modes
         ell, cl_th, *dcl = self.predict_cls(error_bars=need_errors, **predict_kwargs)
         dcl = dcl[0] if need_errors else None
-        cl = self.load_cls(return_dict=True)[1]
+        cl = self.read_cls(return_dict=True)[1]
         for mode in modes:
             plot_pairs(
                 ell,
@@ -576,7 +576,7 @@ class MapStatistics(TwoPointStatistics):
             kappa[imap] = {}
 
             # read the alm's
-            alm = self.load_alms(imap)
+            alm = self.read_alms(imap)
             lmax = hp.Alm.getlmax(len(alm))
             alm = hp.sphtfunc.resize_alm(alm, lmax=lmax, mmax=lmax, lmax_out=lmax_out, mmax_out=lmax_out)
 
@@ -617,8 +617,8 @@ class MapStatistics(TwoPointStatistics):
 
         return theta_smooth, moments['second_moment'], moments['third_moment'], moments['fourth_moment']
 
-    def load_map_moments(self) -> tuple[np.ndarray, dict, dict, dict]:
-        """Load previously saved 2nd/3rd/4th moments of smoothed maps.
+    def read_map_moments(self) -> tuple[np.ndarray, dict, dict, dict]:
+        """Read previously saved 2nd/3rd/4th moments of smoothed maps.
 
         Returns
         -------
@@ -664,26 +664,20 @@ class MapStatistics(TwoPointStatistics):
         Notes
         -----
         Maps are generated full-sky and then restricted to the padded footprint
-        (like the maps they stand for) before writing as HealSparse maps.
+        (like the maps they stand for) before writing (in the builder's ``map_format``).
         """
         imaps = list(self.iter(imaps))
 
         # Compute theory Cl's
         _, cls = self.predict_cls(binning='unbinned', auto_only=auto_only, ell=np.arange(3 * self.nside))
 
-        ipix = self.footprint.ipix(nest=False, padded=True)
-
         if auto_only:
             for imap in self.tqdm(imaps, desc="[generate_gaussian_maps]"):
                 # Generate full-sky Gaussian map
                 out = nmt.utils.synfast_spherical(self.nside, [cls[imap, imap]], spin_arr=[0], seed=seed)[0]
 
-                # Store in HealSparse map
-                hspmap = self._make_hspmap(ipix, out[ipix])
-
-                # Save map
-                fname = self.path(imap)
-                self._write_hspmap(fname, hspmap)
+                # Save map, on the padded footprint
+                self._write_map(self.path(imap), self._to_dense(out))
 
         else:
             # Generate full-sky Gaussian map
@@ -691,11 +685,7 @@ class MapStatistics(TwoPointStatistics):
             outs = nmt.utils.synfast_spherical(self.nside, [cls[p] for p in pairs], spin_arr=[0] * len(imaps), seed=seed)
 
             for imap, out in zip(imaps, outs, strict=True):
-                # Store in HealSparse map
-                hspmap = self._make_hspmap(ipix, out[ipix])
-
-                # Save map
-                fname = self.path(imap)
-                self._write_hspmap(fname, hspmap)
+                # Save map, on the padded footprint
+                self._write_map(self.path(imap), self._to_dense(out))
 
     # endregion

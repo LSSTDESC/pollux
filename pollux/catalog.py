@@ -23,7 +23,8 @@ from astropy.io import fits
 from .io.code_version import code_version
 from .utils.numerics import quad, sample_pdf
 from .utils.fits import read_fits_rows
-from .utils.sky import generate_radec_in_pix, radec2thetaphi
+from .utils.healpix import interpolate_pos, values_pos
+from .utils.sky import generate_radec_in_pix
 from .statistics.catalogs import CatalogStatistics
 
 if TYPE_CHECKING:
@@ -311,7 +312,7 @@ class CatalogGenerator(CatalogStatistics, ABC):
                 augmentor.augment_catalog(self.cosmo, catalog[ibin], **self.augmentor_kwargs[ibin])
 
         # Save it!
-        self._save_catalogs(catalog, ibins=ibins, ishell=ishell)
+        self._write_catalogs(catalog, ibins=ibins, ishell=ishell)
 
     @abstractmethod
     def _generate_galaxies(self, catalog: dict[int, dict[str, np.ndarray]], ibins: int | Iterable[int] | None = None, ishells: list[int] | None = None) -> None:
@@ -421,16 +422,16 @@ class CatalogGenerator(CatalogStatistics, ABC):
                 map_high = None
                 for ishell in self.lensing.shell_builder.tqdm(None, desc=f"[generate] interpolating maps {k}"):
                     map_low = map_high
-                    map_high = self._load_interp_map(k, ishell)
+                    map_high = self._read_interp_map(k, ishell)
                     self._interpolate_shell(catalog, k, ishell, map_low, map_high, ibins=ibins)
             else:
                 for ishell in ishells:
-                    map_low = self._load_interp_map(k, ishell - 1) if ishell > 0 and k not in self.SHELL_FIELDS else None
-                    map_high = self._load_interp_map(k, ishell)
+                    map_low = self._read_interp_map(k, ishell - 1) if ishell > 0 and k not in self.SHELL_FIELDS else None
+                    map_high = self._read_interp_map(k, ishell)
                     self._interpolate_shell(catalog, k, ishell, map_low, map_high, ibins=ibins)
 
-    def _load_interp_map(self, k: str, ishell: int) -> hsp.HealSparseMap:
-        """Load the map of field ``k`` for one shell.
+    def _read_interp_map(self, k: str, ishell: int) -> np.ndarray | hsp.HealSparseMap:
+        """Read the map of field ``k`` for one shell, in the format of its file (dense RING or HealSparse).
 
         Parameters
         ----------
@@ -441,23 +442,24 @@ class CatalogGenerator(CatalogStatistics, ABC):
 
         Returns
         -------
-        hsp.HealSparseMap
-            Map of field ``k``, smoothed as given by ``smooth_fields`` and ``smooth_Mpc``.
+        ndarray or hsp.HealSparseMap
+            Map of field ``k``, smoothed as given by ``smooth_fields`` and ``smooth_Mpc``; the unsmoothed density
+            contrast is computed from the counts of the shell (dense RING map).
         """
         smooth_Mpc = self.smoothing[k][ishell]
         # density and tidal field from the shells, convergence and shear from the lensing builder of each shell
         builder = self.lensing.shell_builder if k in self.SHELL_FIELDS else self.snap_lensing
-        if k in ('density', 'kappa'):
-            return builder.field_hspmap(ishell, smooth_Mpc)
-        return builder.load_maps(ishell, what=k, smooth_Mpc=smooth_Mpc)
+        if k == 'density' and smooth_Mpc is None:
+            return builder.field_map(ishell)
+        return builder.read_maps(ishell, what=None if k == 'kappa' else k, smooth_Mpc=smooth_Mpc, dense=None)
 
     def _interpolate_shell(
             self,
             catalog: dict[int, dict[str, np.ndarray]],
             k: str,
             ishell: int,
-            map_low: hsp.HealSparseMap | None,
-            map_high: hsp.HealSparseMap,
+            map_low: np.ndarray | hsp.HealSparseMap | None,
+            map_high: np.ndarray | hsp.HealSparseMap,
             ibins: int | Iterable[int] | None = None) -> None:
         """Interpolate field ``k`` at the positions of the galaxies of one shell.
 
@@ -469,8 +471,8 @@ class CatalogGenerator(CatalogStatistics, ABC):
             Field name.
         ishell : int
             Shell index.
-        map_low, map_high : hsp.HealSparseMap or None
-            Maps of field ``k`` for shells ``ishell - 1`` and ``ishell``; ``map_low``
+        map_low, map_high : ndarray or hsp.HealSparseMap or None
+            Maps of field ``k`` (dense RING or HealSparse) for shells ``ishell - 1`` and ``ishell``; ``map_low``
             is unused for ``ishell == 0`` and for :attr:`SHELL_FIELDS`.
         ibins : int or array_like of int or None, optional
             Tomographic-bin indices to process.
@@ -488,18 +490,9 @@ class CatalogGenerator(CatalogStatistics, ABC):
                 if k in self.SHELL_FIELDS:
                     # no interpolation between shells for fields averaged over the shell (density, tidal field)
                     if self.interp_method == 'bilinear':
-                        catalog[ibin][k][w] = map_high.interpolate_pos(
-                            ra,
-                            dec,
-                            allow_partial=True,
-                        )
+                        catalog[ibin][k][w] = interpolate_pos(map_high, ra, dec, allow_partial=True)
                     else:
-                        idx = hp.ang2pix(
-                            self.nside,
-                            *radec2thetaphi(ra, dec),
-                            nest=True,
-                        )
-                        catalog[ibin][k][w] = map_high[idx]
+                        catalog[ibin][k][w] = values_pos(map_high, ra, dec)
                 else:
                     # prepare for interpolation
                     dchi = (catalog[ibin]['chi'][w] - chi_low)  # distance
@@ -507,24 +500,25 @@ class CatalogGenerator(CatalogStatistics, ABC):
                     # interpolation between shells and (optionnally) accross pixels
                     if self.interp_method == 'bilinear':
                         if ishell == 0:
-                            catalog[ibin][k][w] = dchi * map_high.interpolate_pos(ra, dec, allow_partial=True) / (chi_high - chi_low)
+                            catalog[ibin][k][w] = dchi * interpolate_pos(map_high, ra, dec, allow_partial=True) / (chi_high - chi_low)
                         else:
-                            map_low_interp = map_low.interpolate_pos(ra, dec, allow_partial=True)
-                            map_high_interp = map_high.interpolate_pos(ra, dec, allow_partial=True)
+                            map_low_interp = interpolate_pos(map_low, ra, dec, allow_partial=True)
+                            map_high_interp = interpolate_pos(map_high, ra, dec, allow_partial=True)
                             catalog[ibin][k][w] = map_low_interp + dchi * (map_high_interp - map_low_interp) / (chi_high - chi_low)
                     else:
-                        idx = hp.ang2pix(self.nside, *radec2thetaphi(ra, dec), nest=True)
+                        high = values_pos(map_high, ra, dec)
                         if ishell == 0:
-                            catalog[ibin][k][w] = dchi * map_high[idx] / (chi_high - chi_low)
+                            catalog[ibin][k][w] = dchi * high / (chi_high - chi_low)
                         else:
-                            catalog[ibin][k][w] = map_low[idx] + dchi * (map_high[idx] - map_low[idx]) / (chi_high - chi_low)
+                            low = values_pos(map_low, ra, dec)
+                            catalog[ibin][k][w] = low + dchi * (high - low) / (chi_high - chi_low)
 
     # endregion
 
     # ==================================================================================================================
     # region Catalogs
 
-    def _save_catalogs(self, catalog: dict[int, dict[str, np.ndarray]], ibins: int | Iterable[int] | None = None, ishell: int | None = None) -> None:
+    def _write_catalogs(self, catalog: dict[int, dict[str, np.ndarray]], ibins: int | Iterable[int] | None = None, ishell: int | None = None) -> None:
         """Write per-bin catalogs to FITS files.
 
         Parameters
@@ -582,7 +576,7 @@ class CatalogGenerator(CatalogStatistics, ABC):
             hdul = [fits.PrimaryHDU(), fits.BinTableHDU(data=np.concatenate(shells), header=header)]
             self.io.write_table(self.path(ibin), hdul)
 
-    def load_catalogs(
+    def read_catalogs(
             self,
             ibins: int | Iterable[int] | None = None,
             return_header: bool = False,
@@ -590,7 +584,7 @@ class CatalogGenerator(CatalogStatistics, ABC):
             seed: int | None = None,
             columns: list[str] | None = None,
             remove_mean: list[str] | None = None) -> np.ndarray | dict[int, np.ndarray] | tuple:
-        """Load saved FITS catalog(s) for one or more tomographic bins.
+        """Read saved FITS catalog(s) for one or more tomographic bins.
 
         Parameters
         ----------
@@ -632,7 +626,7 @@ class CatalogGenerator(CatalogStatistics, ABC):
         # read the requested columns of each bin, optionally a random subsample of its rows
         headers = {}
         tables = {}
-        for ibin in self.lensing.tqdm(ibins, desc="[load_catalogs]"):
+        for ibin in self.lensing.tqdm(ibins, desc="[read_catalogs]"):
             fname = self.path(ibin, ext='fits')
             headers[ibin] = fits.getheader(fname, ext=1)
             if subsample is None:
@@ -934,8 +928,10 @@ class CatalogClusteredMultinomial(CatalogClustered):
             Tomographic-bin indices to process.
         """
         # density contrast used to place galaxies ('positions' smoothing)
-        ipix_mask = self.snap_lensing.shell_builder.footprint.ipix()
-        density_masked = self.lensing.shell_builder.field_hspmap(ishell, self.smoothing['positions'][ishell]).get_values_pix(ipix_mask)
+        footprint = self.lensing.shell_builder.footprint
+        ipix_mask = footprint.ipix()
+        density = self.lensing.shell_builder.field_map(ishell, self.smoothing['positions'][ishell])
+        density_masked = density[footprint.ipix(nest=False)]  # in the order of ipix_mask: RING index of each NESTED pixel
 
         # Loop over tomographic bins
         for ibin in self.lensing.tqdm(ibins, leave=False):
@@ -1063,8 +1059,10 @@ class CatalogClusteredPoisson(CatalogClustered):
             Tomographic-bin indices to process.
         """
         # density contrast used to place galaxies ('positions' smoothing)
-        ipix_mask = self.snap_lensing.shell_builder.footprint.ipix()
-        density_masked = self.lensing.shell_builder.field_hspmap(ishell, self.smoothing['positions'][ishell]).get_values_pix(ipix_mask)
+        footprint = self.lensing.shell_builder.footprint
+        ipix_mask = footprint.ipix()
+        density = self.lensing.shell_builder.field_map(ishell, self.smoothing['positions'][ishell])
+        density_masked = density[footprint.ipix(nest=False)]  # in the order of ipix_mask: RING index of each NESTED pixel
 
         # Loop over tomographic bins
         for ibin in self.lensing.tqdm(ibins, leave=False):

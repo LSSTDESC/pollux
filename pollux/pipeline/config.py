@@ -138,7 +138,7 @@ class GracePeriodSlurmProvider(SlurmProvider):
                 job['status'] = JobStatus(JobState.PENDING, stdout_path=job['status'].stdout_path, stderr_path=job['status'].stderr_path)
 
 
-def load_run_config(path):
+def read_run_config(path):
     """Read the YAML configuration of a run, expanding environment variables (e.g. ``$PSCRATCH``) in its top-level paths.
 
     Parameters

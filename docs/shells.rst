@@ -2,8 +2,14 @@ Shells
 ======
 
 A shell is a range of comoving distance from the observer. Shell builders (:mod:`pollux.shells`) bin the
-particles of a simulation into one HEALPix map per shell, stored as a sparse map (healsparse), from which the other
-products follow.
+particles of a simulation into one HEALPix map per shell, from which the other products follow.
+
+Maps are stored as HealSparse maps (NESTED, the default), or as dense full-sky HEALPix maps in RING ordering
+(``map_format='healpix'``, ``.npy`` files, faster to read and write). They are computed as dense RING maps, as the
+spherical harmonic transforms need them, and converted only when written or read in the other format. The maps of
+the sub-volumes have their own format (``sub_format``): HealSparse maps of the non-empty pixels, or their RING pixels
+and counts (``.npz``); the particles are binned in the matching ordering, so that they are written without
+conversion.
 
 Readers
 -------
@@ -80,7 +86,7 @@ Derived maps
 
 From the count maps, builders derive:
 
-- the density contrast relative to the cosmic mean (``field_hspmap``);
+- the density contrast relative to the cosmic mean (``field_map``);
 - spherical harmonics (``compute_alms``), and maps smoothed by a Gaussian of fixed comoving scale
   (``compute_maps_from_alms(smooth_Mpc=...)``);
 - the tidal field ``t11``, ``t22``, ``t12`` of each shell, transverse to the line of sight (``t11`` and ``t22``

@@ -37,7 +37,7 @@ def test_shells(tmp_path):
     builder = make_builder(tmp_path)
     assert builder.nmaps == 3
     builder.construct_maps()
-    maps = [builder.load_maps(ishell) for ishell in range(builder.nmaps)]
+    maps = [builder.read_maps(ishell) for ishell in range(builder.nmaps)]
     for m in maps:
         values = m[m.valid_pixels]
         assert m.valid_pixels.size > 0 and np.all(np.isfinite(values)) and np.all(values >= 0)
@@ -45,7 +45,7 @@ def test_shells(tmp_path):
     # the same products, read by another builder of the same options
     again = make_builder(tmp_path)
     for ishell, m in enumerate(maps):
-        assert np.array_equal(again.load_maps(ishell)[m.valid_pixels], m[m.valid_pixels])
+        assert np.array_equal(again.read_maps(ishell)[m.valid_pixels], m[m.valid_pixels])
 
     # other options on the same products: refused
     with pytest.raises(ValueError):

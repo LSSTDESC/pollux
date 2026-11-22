@@ -21,7 +21,9 @@ class PolluxLoader(PolluxIO):
 
     No ``pollux`` builder is created, so the products can be read with the I/O dependencies only. Any file
     can also be read with the generic readers of :class:`~pollux.io.files.PolluxIO` (e.g.
-    ``loader.read_map(loader.path('kappa', 'gamma1', 'bin3'))``).
+    ``loader.read_map(loader.path('kappa', 'gamma1', 'bin3'))``). Maps are read from HealSparse files, or from the
+    dense RING files of products made with ``map_format='healpix'`` (:meth:`read_map`), and a_lm from FITS or
+    ``.npz`` files (:meth:`read_alm`).
 
     Parameters
     ----------
@@ -80,10 +82,54 @@ class PolluxLoader(PolluxIO):
                 self.nzs = list(self.read_npy(self.path('kappa', 'nzs', ext='npy'), allow_pickle=True))
 
     # ==================================================================================================================
+    # region Formats
+
+    def read_map(self, fname: str, nside_coverage: int | None = None, dense: bool = False) -> hsp.HealSparseMap | np.ndarray:
+        """Read a map: the HealSparse file ``fname``, or the dense RING ``.npy`` file of the same name.
+
+        Parameters
+        ----------
+        fname : str
+            File (e.g. from :meth:`path`, with the default extension).
+        nside_coverage : int or None, optional
+            Coverage resolution of the HealSparse map (default: that of the file, 32 for a dense file).
+        dense : bool, optional
+            Return a dense RING map instead of a HealSparse map. Default is False.
+
+        Returns
+        -------
+        hsp.HealSparseMap or ndarray
+        """
+        from ..utils.healpix import dense_to_hsp, hsp_to_dense  # conversions (ducc0) only when needed
+        npy = os.path.splitext(fname)[0] + '.npy'
+        if fname.endswith('.npy') or (not os.path.exists(fname) and os.path.exists(npy)):
+            m = self.read_npy(npy)
+            return m if dense else dense_to_hsp(m, nside_coverage or 32)
+        m = super().read_map(fname, nside_coverage=nside_coverage)
+        return hsp_to_dense(m) if dense else m
+
+    def read_alm(self, fname: str) -> np.ndarray:
+        """Read a_lm: the file ``fname``, or the ``.npz`` file of the same name.
+
+        Parameters
+        ----------
+        fname : str
+            File.
+
+        Returns
+        -------
+        ndarray
+        """
+        npz = os.path.splitext(fname)[0] + '.npz'
+        return super().read_alm(npz if not os.path.exists(fname) and os.path.exists(npz) else fname)
+
+    # endregion
+
+    # ==================================================================================================================
     # region Shells
 
-    def load_shell(self, ishell: int, density: bool = False) -> hsp.HealSparseMap:
-        """Load the particle counts of one shell, or its density contrast.
+    def read_shell(self, ishell: int, density: bool = False) -> hsp.HealSparseMap:
+        """Read the particle counts of one shell, or its density contrast.
 
         Parameters
         ----------
@@ -99,8 +145,8 @@ class PolluxLoader(PolluxIO):
         shell = self.read_map(self.path('shells', 'shell', self.SHELL_INDEX.format(ishell)))
         return shell / self.shell_info['pixel_density'][ishell] - 1. if density else shell
 
-    def load_shell_alms(self, ishell: int) -> np.ndarray:
-        """Load the a_lm of one shell (intermediate file).
+    def read_shell_alms(self, ishell: int) -> np.ndarray:
+        """Read the a_lm of one shell (intermediate file).
 
         Parameters
         ----------
@@ -113,8 +159,8 @@ class PolluxLoader(PolluxIO):
         """
         return self.read_alm(self.path('shells', 'alms', self.SHELL_INDEX.format(ishell), intermediate=True))
 
-    def load_shell_cls(self) -> sacc.Sacc:
-        """Load the measured angular power spectra of the shells.
+    def read_shell_cls(self) -> sacc.Sacc:
+        """Read the measured angular power spectra of the shells.
 
         Returns
         -------
@@ -122,8 +168,8 @@ class PolluxLoader(PolluxIO):
         """
         return self.read_sacc(self.path('shells', 'cls'))
 
-    def load_density(self, ishell: int, smooth_Mpc: float | None = None) -> hsp.HealSparseMap:
-        """Load the density contrast of one shell, smoothed or not.
+    def read_density(self, ishell: int, smooth_Mpc: float | None = None) -> hsp.HealSparseMap:
+        """Read the density contrast of one shell, smoothed or not.
 
         Parameters
         ----------
@@ -137,11 +183,11 @@ class PolluxLoader(PolluxIO):
         hsp.HealSparseMap
         """
         if smooth_Mpc is None:
-            return self.load_shell(ishell, density=True)
+            return self.read_shell(ishell, density=True)
         return self.read_map(self.path('shells', 'density', self.SHELL_INDEX.format(ishell), smooth_Mpc=smooth_Mpc))
 
-    def load_tidal(self, ishell: int, smooth_Mpc: float | None = None) -> tuple[hsp.HealSparseMap, hsp.HealSparseMap, hsp.HealSparseMap]:
-        """Load the components of the tidal field of one shell.
+    def read_tidal(self, ishell: int, smooth_Mpc: float | None = None) -> tuple[hsp.HealSparseMap, hsp.HealSparseMap, hsp.HealSparseMap]:
+        """Read the components of the tidal field of one shell.
 
         Parameters
         ----------
@@ -157,8 +203,8 @@ class PolluxLoader(PolluxIO):
         """
         return tuple(self.read_map(self.path('shells', what, self.SHELL_INDEX.format(ishell), smooth_Mpc=smooth_Mpc)) for what in ('t11', 't22', 't12'))
 
-    def load_haloes(self, ishell: int) -> dict[str, np.ndarray]:
-        """Load the halo catalog of one shell, shared by all baryon models.
+    def read_haloes(self, ishell: int) -> dict[str, np.ndarray]:
+        """Read the halo catalog of one shell, shared by all baryon models.
 
         Parameters
         ----------
@@ -179,8 +225,8 @@ class PolluxLoader(PolluxIO):
     # ==================================================================================================================
     # region Convergence
 
-    def load_kappa(self, ikappa: int, smooth_Mpc: float | None = None) -> hsp.HealSparseMap:
-        """Load one convergence map.
+    def read_kappa(self, ikappa: int, smooth_Mpc: float | None = None) -> hsp.HealSparseMap:
+        """Read one convergence map.
 
         Parameters
         ----------
@@ -211,8 +257,8 @@ class PolluxLoader(PolluxIO):
             raise ValueError('nz must be set to reach the convergence, shear and catalog products.')
         return (self.SHELL_INDEX if self.options['nz'] == 'snapshots' else self.BIN_INDEX).format(ikappa)
 
-    def load_kappa_alms(self, ikappa: int) -> np.ndarray:
-        """Load the a_lm of one convergence map (intermediate file).
+    def read_kappa_alms(self, ikappa: int) -> np.ndarray:
+        """Read the a_lm of one convergence map (intermediate file).
 
         Parameters
         ----------
@@ -225,8 +271,8 @@ class PolluxLoader(PolluxIO):
         """
         return self.read_alm(self.path('kappa', 'alms', self._kappa_index(ikappa), intermediate=True))
 
-    def load_shear(self, ikappa: int, smooth_Mpc: float | None = None) -> tuple[hsp.HealSparseMap, hsp.HealSparseMap]:
-        """Load the shear maps of one tomographic bin (or shell).
+    def read_shear(self, ikappa: int, smooth_Mpc: float | None = None) -> tuple[hsp.HealSparseMap, hsp.HealSparseMap]:
+        """Read the shear maps of one tomographic bin (or shell).
 
         Parameters
         ----------
@@ -242,8 +288,8 @@ class PolluxLoader(PolluxIO):
         """
         return tuple(self.read_map(self.path('kappa', what, self._kappa_index(ikappa), smooth_Mpc=smooth_Mpc)) for what in ('gamma1', 'gamma2'))
 
-    def load_kappa_cls(self) -> sacc.Sacc:
-        """Load the measured angular power spectra of the convergence maps.
+    def read_kappa_cls(self) -> sacc.Sacc:
+        """Read the measured angular power spectra of the convergence maps.
 
         Returns
         -------
@@ -256,7 +302,7 @@ class PolluxLoader(PolluxIO):
     # ==================================================================================================================
     # region Catalogs
 
-    def load_catalog(self, ibin: int) -> fits.HDUList:
+    def read_catalog(self, ibin: int) -> fits.HDUList:
         """Open the source catalog of one tomographic bin.
 
         Parameters
@@ -267,12 +313,12 @@ class PolluxLoader(PolluxIO):
         Returns
         -------
         astropy.io.fits.HDUList
-            To close, e.g. ``with loader.load_catalog(ibin) as hdul:``.
+            To close, e.g. ``with loader.read_catalog(ibin) as hdul:``.
         """
         return self.read_table(self.path('catalogs', 'cat', self.BIN_INDEX.format(ibin)))
 
-    def load_catalog_2pt(self, shapes: str = 'shear') -> sacc.Sacc:
-        """Load the measured two-point functions of the catalogs (``cat_2pt[_{shapes}].fits``).
+    def read_catalog_2pt(self, shapes: str = 'shear') -> sacc.Sacc:
+        """Read the measured two-point functions of the catalogs (``cat_2pt[_{shapes}].fits``).
 
         Parameters
         ----------
@@ -285,8 +331,8 @@ class PolluxLoader(PolluxIO):
         """
         return self.read_sacc(self.path('catalogs', *self.catalog_stat_name('2pt', shapes)))
 
-    def load_catalog_cls(self, shapes: str = 'shear') -> sacc.Sacc:
-        """Load the measured angular power spectra of the catalogs (``cat_cls[_{shapes}].fits``).
+    def read_catalog_cls(self, shapes: str = 'shear') -> sacc.Sacc:
+        """Read the measured angular power spectra of the catalogs (``cat_cls[_{shapes}].fits``).
 
         Parameters
         ----------

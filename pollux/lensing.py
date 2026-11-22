@@ -47,7 +47,7 @@ class LensingBuilder(MapBuilder):
         Output dtype for kappa and shear maps.
     **kwargs
         Forwarded to :class:`pollux.map_builder.MapBuilder`. The footprint is that of
-        ``shell_builder``, and monopole removal defaults to its own.
+        ``shell_builder``, and monopole removal and the format of the maps (``map_format``) default to its own.
     """
 
     def __init__(self, shell_builder: ShellBuilder, nzs: str | list, tag: str | None = None, dtype: np.dtype = np.float32, **kwargs: Any) -> None:
@@ -62,6 +62,7 @@ class LensingBuilder(MapBuilder):
         self.nkappas = self.shell_builder.nshells if nzs == 'snapshots' else len(nzs)
 
         kwargs.setdefault('remove_monopole', shell_builder.remove_monopole)
+        kwargs.setdefault('map_format', shell_builder.map_format)
         super().__init__(
             nmaps=self.nkappas,
             dtype=dtype,
@@ -78,7 +79,7 @@ class LensingBuilder(MapBuilder):
         # configuration of the products (checked against an existing one), and the n(z)
         self.io.write_config(self.product, self.config())
         if nzs != 'snapshots':
-            self._save_nzs()
+            self._write_nzs()
 
     def config(self) -> dict:
         """Return the configuration of the products, for their ``config.yaml`` (:func:`pollux.io.config.write_config`).
@@ -97,9 +98,11 @@ class LensingBuilder(MapBuilder):
             nz_values = [np.asarray(nz(zz), dtype=float).tolist() if callable(nz) else [np.asarray(a, dtype=float).tolist() for a in nz] for nz in self.nzs]
             nz_parameters = dict(nbins=self.nkappas, sha1=hashlib.sha1(repr(nz_values).encode()).hexdigest())
         parameters = dict(builder=type(self).__name__, nzs=nz_parameters)
+        if self.map_format != 'healsparse':  # recorded if not the default (configurations made before stay valid)
+            parameters['map_format'] = self.map_format
         return dict(product='kappa', parameters=parameters, inputs=[self.shell_builder.save_dir])
 
-    def _save_nzs(self) -> None:
+    def _write_nzs(self) -> None:
         """Save the redshift distributions, unless saved already.
 
         Distributions tabulated on a common redshift grid are saved as text (``nzs.txt``: columns z, then
@@ -123,7 +126,7 @@ class LensingBuilder(MapBuilder):
     def compute_shear_maps(self,
                            ikappas: int | Iterable[int] | None = None,
                            smooth_Mpc: float | None = None,
-                           save_field_map: bool = True) -> list[hsp.HealSparseMap] | dict[int, list[hsp.HealSparseMap]]:
+                           save_field_map: bool = True) -> list[np.ndarray | hsp.HealSparseMap] | dict[int, list[np.ndarray | hsp.HealSparseMap]]:
         """Compute shear (gamma1, gamma2) maps from the a_lm of convergence maps (saved by :meth:`compute_alms`).
 
         Parameters
@@ -143,22 +146,22 @@ class LensingBuilder(MapBuilder):
         Returns
         -------
         list or dict
-            - If ``ikappas`` is a single int: returns a list ``[gamma1_map, gamma2_map]`` as HealSparse maps.
+            - If ``ikappas`` is a single int: returns a list ``[gamma1_map, gamma2_map]``, as written
+              (:attr:`~pollux.map_builder.MapBuilder.map_format`).
             - If ``ikappas`` is ``None`` or an iterable: returns a dict keyed by kappa index
               with list values ``[gamma1_map, gamma2_map]``. Also writes maps to disk.
         """
-        ipix = self.footprint.ipix(nest=False, padded=True)
         save_field_map = save_field_map and smooth_Mpc is not None
 
         gammas = {}
         for ikappa in self.tqdm(ikappas, desc="[compute_shear_maps]"):
             # harmonic coefficients of the convergence map, smoothed in place if requested (and the smoothed convergence saved)
-            klm = self.load_alms(ikappa)
+            klm = self.read_alms(ikappa)
             lmax = hp.Alm.getlmax(len(klm))
             if smooth_Mpc is not None:
                 self._smooth_alms(ikappa, klm, smooth_Mpc, lmax)
                 if save_field_map:
-                    self._write_hspmap(self.path(ikappa, what=self.smoothed_field_what, smooth_Mpc=smooth_Mpc), self._field_from_alms(ikappa, klm))
+                    self._write_map(self.path(ikappa, what=self.smoothed_field_what, smooth_Mpc=smooth_Mpc), self._field_from_alms(ikappa, klm))
 
             # E-mode of the shear from the convergence
             glm_E = hp.almxfl(klm, spin2_factor(lmax))
@@ -166,13 +169,12 @@ class LensingBuilder(MapBuilder):
             # Generate shear map (ring-ordered)
             g1, g2 = hp.sphtfunc.alm2map_spin([glm_E, np.zeros_like(glm_E)], nside=self.nside, spin=2, lmax=lmax)
 
-            gamma1 = self._make_hspmap(ipix, g1[ipix])
-            gamma2 = self._make_hspmap(ipix, g2[ipix])
+            gamma1 = self._to_dense(g1)
+            gamma2 = self._to_dense(g2)
+            del g1, g2
 
-            gamma1_fname = self.path(ikappa, what='gamma1', smooth_Mpc=smooth_Mpc)
-            gamma2_fname = self.path(ikappa, what='gamma2', smooth_Mpc=smooth_Mpc)
-            self._write_hspmap(gamma1_fname, gamma1)
-            self._write_hspmap(gamma2_fname, gamma2)
+            gamma1 = self._write_map(self.path(ikappa, what='gamma1', smooth_Mpc=smooth_Mpc), gamma1)
+            gamma2 = self._write_map(self.path(ikappa, what='gamma2', smooth_Mpc=smooth_Mpc), gamma2)
 
             gammas[ikappa] = [gamma1, gamma2]
 
@@ -300,31 +302,30 @@ class BornLensingBuilder(LensingBuilder):
     # ==================================================================================================================
     # region Convergence
 
-    def construct_maps(self, ikappas: int | Iterable[int] | None = None) -> hsp.HealSparseMap | dict[int, hsp.HealSparseMap]:
+    def construct_maps(self, imaps: int | Iterable[int] | None = None) -> np.ndarray | hsp.HealSparseMap | dict[int, np.ndarray | hsp.HealSparseMap]:
         """Construct and save convergence maps by summing weighted shells.
 
         Parameters
         ----------
-        ikappas : int or array_like of int or None, optional
+        imaps : int or array_like of int or None, optional
             Indices of convergence maps to build. If None, build all.
 
         Returns
         -------
-        hsp.HealSparseMap or dict
-            - If ``ikappas`` is a single int: returns a single ``HealSparseMap``.
-            - If ``ikappas`` is ``None`` or an iterable: returns a dict keyed
-              by kappa index with ``HealSparseMap`` values.
+        ndarray or hsp.HealSparseMap, or dict
+            The maps as written (:attr:`~pollux.map_builder.MapBuilder.map_format`): a single map if ``imaps`` is an
+            int, else a dict keyed by map index. The shells are summed as stored
+            (:class:`~pollux.map_builder.MapSum`).
         """
         # Loop over shells (read once) and accumulate weighted contributions to all kappas:
         # kappa += w * density, with density = shell / nbar - 1 (or shell - nbar for multiple planes)
-        mask = self.footprint.mask(nest=True, padded=True)
-        kappa_sums = {ikappa: MapSum(mask, self.nside_c, self.dtype) for ikappa in self.iter(ikappas)}
+        kappa_sums = {ikappa: MapSum(self.footprint, self.nside_c, self.dtype) for ikappa in self.iter(imaps)}
 
         # only read shells contributing to at least one requested kappa
         weights = {ishell: {ikappa: self.compute_weight(ishell, ikappa) for ikappa in kappa_sums} for ishell in range(self.nshells)}
         ishells = [ishell for ishell, ws in weights.items() if any(w != 0. for w in ws.values())]
 
-        for ishell, shell in self.shell_builder.iter_maps(ishells, desc="[construct_maps]"):
+        for ishell, shell in self.shell_builder.iter_maps(ishells, desc="[construct_maps]", dense=None):
             if self.nbar_from_maps:
                 s = shell[:]
                 nbar = np.mean(s[s > 0.])
@@ -341,11 +342,8 @@ class BornLensingBuilder(LensingBuilder):
                 else:
                     kappa_sum.add(shell, scale=w / nbar, offset=-w)
 
-        kappas = {ikappa: kappa_sum.to_map() for ikappa, kappa_sum in kappa_sums.items()}
-        for ikappa, kappa in kappas.items():
-            self._write_hspmap(self.path(ikappa), kappa)
-
-        return kappas[ikappas] if np.isscalar(ikappas) else kappas
+        kappas = {ikappa: self._write_map(self.path(ikappa), kappa_sum.to_map()) for ikappa, kappa_sum in kappa_sums.items()}
+        return kappas[imaps] if np.isscalar(imaps) else kappas
 
     def compute_weight(self, ishell: int, ikappa: int) -> float:
         r"""Compute the shell weight contributing to a given convergence map.

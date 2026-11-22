@@ -110,7 +110,8 @@ class BaryonifiedShellBuilder(ShellBuilder):
             apply_replicate_rotflip=(shell_builder.replicate_rotflip if shell_builder.apply_replicate_rotflip else False),
             subsample_box=shell_builder.subsample_box,
             nside_c=shell_builder.nside_c,
-            save_format=shell_builder.save_format,
+            map_format=shell_builder.map_format,
+            sub_format=shell_builder.sub_format,
             b=shell_builder.b,
             remove_monopole=shell_builder.remove_monopole,
             nocompress=shell_builder.nocompress,
@@ -155,23 +156,19 @@ class BaryonifiedShellBuilder(ShellBuilder):
     # ==================================================================================================================
     # region Maps
 
-    def construct_maps(
-        self,
-        ishells: int | Iterable[int] | None = None,
-    ) -> hsp.HealSparseMap | dict[int, hsp.HealSparseMap]:
+    def construct_maps(self, imaps: int | Iterable[int] | None = None) -> np.ndarray | hsp.HealSparseMap | dict[int, np.ndarray | hsp.HealSparseMap]:
         """Baryonify shell count maps using the halo catalogs.
 
         Parameters
         ----------
-        ishells : int or array_like of int or None, optional
+        imaps : int or array_like of int or None, optional
             Shell indices to process. If None, processes all shells.
 
         Returns
         -------
-        hsp.HealSparseMap or dict
-            - If ``ishells`` is a single int: returns the baryonified shell map.
-            - If ``ishells`` is ``None`` or an iterable: returns a dict keyed by
-              shell index with baryonified shell maps.
+        ndarray or hsp.HealSparseMap, or dict
+            The maps as written (:attr:`~pollux.map_builder.MapBuilder.map_format`): a single map if ``imaps`` is an
+            int, else a dict keyed by map index.
 
         Notes
         -----
@@ -180,17 +177,16 @@ class BaryonifiedShellBuilder(ShellBuilder):
         """
         shells = {}
 
-        ipix = self.footprint.ipix(nest=False, padded=True)
-        for ishell in self.tqdm(ishells, desc="[construct_maps]"):
+        for ishell in self.tqdm(imaps, desc="[construct_maps]"):
             self._setup_interpolator(ishell)
 
-            # Load the shell, turn into count map (in RING ordering), and set unseen/empty pixels to 0.
-            count = self.shell_builder_ref.load_maps(ishell).generate_healpix_map(nest=False)
+            # Load the shell as a count map (in RING ordering), and set unseen/empty pixels to 0.
+            count = self.shell_builder_ref.read_maps(ishell, dense=True)
             count[count == hp.UNSEEN] = 0.
             lightcone_shell = bfg.utils.LightconeShell(map=count, cosmo=self.cosmo_dict)
 
             # Halo masses of the shell, in Msun
-            halos = self.halo_builder.load_catalogs(ishell, variables=['ra', 'dec', 'z', self.mass_name])
+            halos = self.halo_builder.read_catalogs(ishell, variables=['ra', 'dec', 'z', self.mass_name])
             M = halos[self.mass_name] / self.cosmo['h'] if self.mass_unit == 'Msun_over_h' else halos[self.mass_name]
 
             keep = M > self.M_min
@@ -203,13 +199,10 @@ class BaryonifiedShellBuilder(ShellBuilder):
                 # No halos above M_min in this shell
                 baryonified_count = count
 
-            # Save the baryonified map
-            shell = self._make_hspmap(ipix, baryonified_count[ipix])
-            self._write_hspmap(self.path(ishell), shell)
+            # Save the baryonified map, on the padded footprint
+            shells[ishell] = self._write_map(self.path(ishell), self._to_dense(baryonified_count))
 
-            shells[ishell] = shell
-
-        return shells[ishells] if np.isscalar(ishells) else shells
+        return shells[imaps] if np.isscalar(imaps) else shells
 
     def _setup_interpolator(self, ishell: int) -> None:
         """(Re)build the interpolator of the baryonification model for one shell.

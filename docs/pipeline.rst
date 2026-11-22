@@ -36,11 +36,11 @@ Writing a run
 
 A run script:
 
-1. reads its configuration (:func:`~pollux.pipeline.config.load_run_config`, which expands environment variables
+1. reads its configuration (:func:`~pollux.pipeline.config.read_run_config`, which expands environment variables
    such as ``$PSCRATCH`` in its paths), and builds the dictionaries of the tasks from it;
 2. creates a reader and a shell builder in the main process, for what the tasks need to know in advance (number of
    sub-volumes, of shells, smoothing scales per shell from :meth:`~pollux.cosmo.Theory.lognormal_smoothing`);
-3. records its code version (:func:`~pollux.io.code_version.save_code_version`, see below);
+3. records its code version (:func:`~pollux.io.code_version.write_code_version`, see below);
 4. loads the Parsl configuration (:func:`~pollux.pipeline.config.get_config`) and creates the futures of all
    tasks, chained by their ``inputs``;
 5. waits for the futures. A failed task makes the tasks depending on it fail, but not the others: catching the
@@ -71,7 +71,7 @@ Resuming
 Tasks skip the products already on disk, and every file is written to a temporary name then renamed, so that an
 interrupted task leaves no partial file. Only tasks skip: the methods of the builders and catalogs compute and write
 their products when called, and read their inputs, raising if one is missing (e.g. the a_lm of
-:meth:`~pollux.map_builder.MapBuilder.load_alms`, made by :meth:`~pollux.map_builder.MapBuilder.compute_alms`). Statistics are computed per bin pair, each pair saved as an intermediate
+:meth:`~pollux.map_builder.MapBuilder.read_alms`, made by :meth:`~pollux.map_builder.MapBuilder.compute_alms`). Statistics are computed per bin pair, each pair saved as an intermediate
 file (in a folder named by an identifier of the binning and options of the statistic), then combined: tasks skip
 the pairs already saved, and the statistics already combined, but always redraw the plots. Launching a run again therefore resumes it. For the same reason, a product
 must be moved away (or the run given a new output directory) to be recomputed. A product whose ``config.yaml``
@@ -83,7 +83,7 @@ with other options raises an error.
 Code version
 ------------
 
-:func:`pollux.io.code_version.save_code_version` records each run in a new folder ``code_version/{date}`` of its
+:func:`pollux.io.code_version.write_code_version` records each run in a new folder ``code_version/{date}`` of its
 output directory: git commit and state of pollux, date, host and command, lists of installed Python and conda
 packages, and copies of the run script and configuration. With ``require_clean=True``, it refuses to run if pollux
 has uncommitted changes.

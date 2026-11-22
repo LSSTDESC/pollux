@@ -30,10 +30,14 @@ seed, the baryon builder its tag, the lensing builder its n(z), the catalogs the
 
   - ``dmb/{tag}/``: the same products for the baryon model ``tag``;
   - ``halos/``: halo catalogs, shared by all baryon models;
-  - ``intermediate/``: files needed only to make or resume the products (sub-volume maps, spherical harmonics,
+  - ``intermediate/``: files needed only to make or resume the products (sub-volume maps, spherical harmonics
+    with the mean removed from their field, ``alms_{iii}.npz``, or ``.fits`` for runs before this format,
     catalogs of each shell, catalog fields and workspaces of the catalog Cls, statistics of each bin pair), at the
     same relative paths;
   - ``code_version/``: the records of the runs (see :doc:`pipeline`).
+
+Maps are HealSparse files (``.fits``) by default, or dense RING maps (``.npy``) for builders with
+``map_format='healpix'`` (and ``.npz`` sub-volume maps with ``sub_format='healpix'``), see :doc:`shells`.
 
 The root directory of a run is up to the user: its footprint is checked like the other products (below), so a root
 directory never mixes footprints.
@@ -60,11 +64,14 @@ builders, so that it only needs the I/O dependencies (numpy, healpy, healsparse,
     dmo = PolluxLoader('/path/to/outputs/simulation/nside2048', seed=0, catalog_tag='b2')
     dmb = PolluxLoader('/path/to/outputs/simulation/nside2048', seed=0, baryon_tag='S19', catalog_tag='b2')
 
-    density = dmo.load_density(30)              # density contrast of shell 30
-    kappa = dmb.load_kappa(4)                   # convergence of tomographic bin 4
-    gamma1, gamma2 = dmb.load_shear(4)
-    cls = dmb.load_kappa_cls()                  # SACC
-    xi = dmb.load_catalog_2pt(shapes='ia')      # SACC of the 2pt functions of the intrinsic alignments
+    density = dmo.read_density(30)              # density contrast of shell 30
+    kappa = dmb.read_kappa(4)                   # convergence of tomographic bin 4
+    gamma1, gamma2 = dmb.read_shear(4)
+    cls = dmb.read_kappa_cls()                  # SACC
+    xi = dmb.read_catalog_2pt(shapes='ia')      # SACC of the 2pt functions of the intrinsic alignments
+
+Maps are read as HealSparse maps from the files of either format (``map_format``), or as dense RING maps with
+``loader.read_map(fname, dense=True)``.
 
 The ``nz`` of the loader names the redshift distributions of the convergence maps and catalogs (``'SRDv1_nz'`` by
 default), and ``loader.footprint`` holds the parameters of the footprint (its ``config.yaml``). The loader is a
@@ -75,5 +82,5 @@ readers by format (``read_map``, ``read_alm``, ``read_table``, ``read_sacc``, ``
 
     gamma1 = dmb.read_map(dmb.path('kappa', 'gamma1', 'bin4'))                     # seed0/dmb/S19/kappa/SRDv1_nz/gamma1_bin4.fits
     density = dmo.read_map(dmo.path('shells', 'density', '030', smooth_Mpc=2.))    # seed0/dmo/shells/smoothed/2Mpc/density_030.fits
-    alm = dmo.read_alm(dmo.path('shells', 'alms', '030', intermediate=True))       # seed0/intermediate/dmo/shells/alms_030.fits
+    alm = dmo.read_alm(dmo.path('shells', 'alms', '030', intermediate=True))       # seed0/intermediate/dmo/shells/alms_030.npz (or .fits)
     config = dmb.read_config('catalogs')                                          # config.yaml of the catalogs

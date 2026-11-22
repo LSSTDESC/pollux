@@ -1976,10 +1976,11 @@ def _query_replica_ipix(corners: np.ndarray, nside: int, nest: bool = True) -> n
 
     Projects the 8 box corners onto the unit sphere, builds a CCW-ordered
     convex hull in a local tangent plane, and calls :func:`healpy.query_polygon`
-    with ``inclusive=True``.  If the polygon spans more than a hemisphere or
-    the centroid is near the origin (box contains the observer), ``None`` is
-    returned to signal that the replica overlaps every pixel unconditionally,
-    without materializing the full pixel array.
+    with ``inclusive=True``.  If the polygon spans more than a hemisphere, the
+    centroid is near the origin (box contains the observer), or a corner is at
+    the observer (it sees the box in a whole solid angle around that corner),
+    ``None`` is returned to signal that the replica overlaps every pixel
+    unconditionally, without materializing the full pixel array.
 
     Parameters
     ----------
@@ -1996,8 +1997,11 @@ def _query_replica_ipix(corners: np.ndarray, nside: int, nest: bool = True) -> n
         Pixel indices overlapping the replica footprint, or ``None`` if the
         replica is guaranteed to overlap every pixel (full-sky fallback).
     """
-    # Project corners onto the unit sphere
-    unit = corners / np.linalg.norm(corners, axis=1, keepdims=True)
+    # Project corners onto the unit sphere; a corner at the observer has no direction (the observer is on the box)
+    norms = np.linalg.norm(corners, axis=1, keepdims=True)
+    if np.any(norms <= 1e-10 * norms.max()):
+        return None
+    unit = corners / norms
 
     # Build a tangent-plane frame at the centroid of the projected corners
     c = unit.mean(axis=0)

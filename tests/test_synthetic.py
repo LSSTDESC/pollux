@@ -66,3 +66,14 @@ def test_footprint_config(tmp_path):
     pollux.Footprint(NSIDE, io, mask='octant', padding_deg=10.)
     with pytest.raises(ValueError):
         pollux.Footprint(NSIDE, io, mask='octant', padding_deg=5.)
+
+
+def test_octant_corner_at_observer(tmp_path):
+    # without isometry, a corner of the box is at the observer: its replicas are kept for every pixel (no NaN direction)
+    reader = make_reader()
+    footprint = pollux.Footprint(NSIDE, pollux.PolluxIO(str(tmp_path)), mask='octant', padding_deg=10.)
+    builder = pollux.shells.SnapshotShellBuilder(reader, footprint, seed=0)
+    builder.construct_maps()
+    m = builder.read_maps(0)
+    assert m.valid_pixels.size > 0 and np.all(m[m.valid_pixels] >= 0)
+    assert pollux.shells._query_replica_ipix(np.array([[0., 0., 0.], *np.random.default_rng(0).uniform(1., 2., (7, 3))]), NSIDE) is None

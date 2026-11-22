@@ -71,7 +71,7 @@ def run(root, map_format='healsparse', sub_format='healsparse', octant=False):
     """Shells, their a_lm, density and tidal maps, and convergence and shear maps per shell."""
     reader = pollux.SyntheticReader(boxsize=200., zsnapshots=(0.02, 0.04, 0.06), nparticles_per_sub=20000)
     footprint = pollux.Footprint(NSIDE, pollux.PolluxIO(str(root)), **(dict(mask='octant', padding_deg=10.) if octant else {}))
-    # random isometry of the box (as in production): with a box corner on the observer, the octant fails (_query_replica_ipix)
+    # random isometry of the box, as in production
     builder = pollux.shells.SnapshotShellBuilder(reader, footprint, seed=0, apply_grid_isometry=True, map_format=map_format, sub_format=sub_format)
     written = [builder.construct_maps()]
     builder.compute_alms()

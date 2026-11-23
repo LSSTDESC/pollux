@@ -19,7 +19,6 @@ import pyccl
 import pymaster as nmt
 import sacc
 import treecorr
-from astropy.io import fits
 
 from ..cosmo import Tracer, TracerSum
 from ..utils.binning import binning_id
@@ -483,7 +482,7 @@ class CatalogStatistics(TwoPointStatistics):
         -------
         int
         """
-        nrows = fits.getheader(self.path(ibin, ext='fits'), ext=1)['NAXIS2']
+        nrows = self.io.read_columns_info(self.path(ibin))[0]
         return nrows if subsample is None else int(subsample * nrows)
 
     # endregion

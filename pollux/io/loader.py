@@ -302,8 +302,9 @@ class PolluxLoader(PolluxIO):
     # ==================================================================================================================
     # region Catalogs
 
-    def read_catalog(self, ibin: int) -> fits.HDUList:
-        """Open the source catalog of one tomographic bin.
+    def path_catalog(self, ibin: int) -> str:
+        """Return the file of the source catalog of one tomographic bin: HDF5 (``cat_bin{b}.hdf5``), or FITS for catalogs
+        made with ``catalog_format='fits'``.
 
         Parameters
         ----------
@@ -312,10 +313,30 @@ class PolluxLoader(PolluxIO):
 
         Returns
         -------
-        astropy.io.fits.HDUList
-            To close, e.g. ``with loader.read_catalog(ibin) as hdul:``.
+        str
         """
-        return self.read_table(self.path('catalogs', 'cat', self.BIN_INDEX.format(ibin)))
+        hdf5 = self.path('catalogs', 'cat', self.BIN_INDEX.format(ibin), ext='hdf5')
+        return hdf5 if os.path.exists(hdf5) else self.path('catalogs', 'cat', self.BIN_INDEX.format(ibin))
+
+    def read_catalog(self, ibin: int, columns: list[str] | None = None, rows: np.ndarray | None = None) -> dict[str, np.ndarray]:
+        """Read columns of the source catalog of one tomographic bin (:meth:`~pollux.io.files.PolluxIO.read_columns`).
+
+        Parameters
+        ----------
+        ibin : int
+            Tomographic bin.
+        columns : list of str or None, optional
+            Columns to read. Default is all of them (the catalogs are tens of GB at nside 8192).
+        rows : ndarray of int or None, optional
+            Sorted indices of the rows to read (e.g. a random subsample). Default is all of them.
+
+        Returns
+        -------
+        dict
+            Arrays by column name. The number of galaxies, the columns and the metadata are given by
+            ``read_columns_info(path_catalog(ibin))``.
+        """
+        return self.read_columns(self.path_catalog(ibin), columns, rows)
 
     def read_catalog_2pt(self, shapes: str = 'shear') -> sacc.Sacc:
         """Read the measured two-point functions of the catalogs (``cat_2pt[_{shapes}].fits``).

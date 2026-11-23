@@ -3,8 +3,9 @@ Catalogs
 
 Catalog generators (:mod:`pollux.catalog`) draw tomographic source catalogs from the shells and lensing maps: for
 each tomographic bin of a lensing builder, galaxies get a redshift, a position, the fields interpolated there, and
-the columns added by augmentors (intrinsic alignments, observed shapes). Each bin is saved as a FITS catalog
-``cat_bin{i}.fits``.
+the columns added by augmentors (intrinsic alignments, observed shapes). Each bin is saved as an HDF5 catalog
+``cat_bin{i}.hdf5``, readable by TXPipe (below), or as a FITS table ``cat_bin{i}.fits`` with
+``catalog_format='fits'``.
 
 Sampling
 --------
@@ -93,5 +94,25 @@ Columns and headers
 -------------------
 
 Catalogs have ``ra``, ``dec``, ``z``, the comoving distance ``chi``, the interpolated fields and the augmentor
-columns. Their headers record the options of the generator and the code version (``POLLUXV``, the git
-commit, and ``DIRTY`` for uncommitted changes).
+columns, in float32. Their metadata (attributes of the HDF5 ``catalog`` group, or FITS header) record the galaxy
+densities and bias, and the code version (``POLLUXV``, the git commit, and ``DIRTY`` for uncommitted changes).
+``read_catalogs`` reads columns of either format, and random subsamples of their rows.
+
+TXPipe
+------
+
+The HDF5 catalogs can be read by `TXPipe <https://github.com/LSSTDESC/TXPipe>`_, the DESC pipeline of 3x2pt
+measurements, as its *binned* catalogs (the inputs of its 2pt stages, after its selection and calibration). Each
+``cat_bin{i}.hdf5`` holds:
+
+- the ``catalog`` group: all the columns, with the metadata as attributes;
+- ``shear/bin_{i}``: ``ra``, ``dec``, ``g1`` and ``g2``, and ``weight``. The shapes are the observed ones
+  (``e1_obs``, ``e2_obs``, with shape noise and the intrinsic alignments), else the reduced shear, else the shear;
+- ``lens/bin_{i}``: ``ra``, ``dec``, ``comoving_distance`` and ``weight``.
+
+These datasets are links to those of the ``catalog`` group, so they cost no space, and the weights are 1 (a dataset
+never written, read as its fill value). ``binned_catalog.hdf5``, next to the bins, gathers them with external links:
+it is both the ``binned_shear_catalog`` and the ``binned_lens_catalog`` of TXPipe. The same galaxies are both the
+sources and the lenses, as in the catalog statistics of pollux.
+
+TXPipe's 2pt stages also need the n(z) of the bins (QP files) and random catalogs: they are not written yet.

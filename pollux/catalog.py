@@ -17,12 +17,9 @@ import numpy as np
 import healpy as hp
 import pyccl
 import pymaster as nmt
-import fitsio
-from astropy.io import fits
 
 from .io.code_version import code_version
 from .utils.numerics import quad, sample_pdf
-from .utils.fits import read_fits_rows
 from .utils.healpix import interpolate_pos, values_pos
 from .utils.sky import generate_radec_in_pix
 from .statistics.catalogs import CatalogStatistics
@@ -81,6 +78,12 @@ class CatalogGenerator(CatalogStatistics, ABC):
         builder's binning (see :attr:`b`).
     cls_lmax_mask : int or None, optional
         Maximum multipole of the fields' masks (at least the ``lmax`` of :attr:`b`). Default is that ``lmax``.
+    catalog_format : {'hdf5', 'fits'}, optional
+        Format of the catalog files (:meth:`pollux.io.files.PolluxIO.write_columns`). ``'hdf5'`` (default): the columns
+        in a ``catalog`` group, with each bin also laid out as a bin of TXPipe's binned shear and lens catalogs
+        (``shear/bin_{b}``, ``lens/bin_{b}``, linking the columns without copying them), gathered in
+        ``binned_catalog.hdf5``, the ``binned_shear_catalog`` and ``binned_lens_catalog`` of TXPipe. ``'fits'``: a
+        FITS table per bin.
 
     Attributes
     ----------
@@ -88,9 +91,9 @@ class CatalogGenerator(CatalogStatistics, ABC):
         Number of galaxies drawn per tomographic bin over the footprint (``nbar`` times its area).
     nbar_per_pix : ndarray
         Mean expected counts per pixel per tomographic bin.
-    header_dict : dict
-        FITS header keyword/value pairs stored in the output catalogs, including the
-        code version: ``POLLUXV`` (git commit) and ``DIRTY`` (uncommitted changes).
+    metadata : dict
+        Metadata stored in the catalog files (FITS header keywords, or HDF5 attributes): galaxy densities and
+        bias, and the code version, ``POLLUXV`` (git commit) and ``DIRTY`` (uncommitted changes).
     """
 
     # fields that can be interpolated at the galaxies
@@ -101,6 +104,8 @@ class CatalogGenerator(CatalogStatistics, ABC):
     _STREAM_Z, _STREAM_POS, _STREAM_COUNTS = 0, 1, 2
     # fields made together by the builders, which must share their smoothing
     _SMOOTHED_TOGETHER = (('t11', 't22', 't12'), ('gamma1', 'gamma2'))
+    # formats of the catalog files
+    CATALOG_FORMATS = ('hdf5', 'fits')
 
     def __init__(
         self,
@@ -115,9 +120,13 @@ class CatalogGenerator(CatalogStatistics, ABC):
         augmentors: list | None = None,
         cls_b: nmt.NmtBin | None = None,
         cls_lmax_mask: int | None = None,
+        catalog_format: str = 'hdf5',
     ) -> None:
         self.lensing = lensing
         self.tag = tag
+        if catalog_format not in self.CATALOG_FORMATS:
+            raise ValueError(f"catalog_format must be one of {self.CATALOG_FORMATS}, got {catalog_format!r}")
+        self.catalog_format = catalog_format
         self.nbar_input = nbar_input
         if interp_method not in ('bilinear', 'nearest'):
             raise ValueError(f"interp_method must be 'bilinear' or 'nearest', got {interp_method!r}")
@@ -169,9 +178,9 @@ class CatalogGenerator(CatalogStatistics, ABC):
         self.Ngal = (self.nbar * area_arcmin).astype(int)
         self.area_pix = hp.nside2pixarea(self.nside, degrees=False) * (180. * 60. / np.pi)**2
         self.nbar_per_pix = self.nbar * self.area_pix
-        self.header_dict = {f'NBAR_{i}': n for i, n in enumerate(self.nbar)}
+        self.metadata = {f'NBAR_{i}': n for i, n in enumerate(self.nbar)}
         version = code_version()  # code that produced the catalogs
-        self.header_dict.update(POLLUXV=(version['commit'] or 'unknown')[:12], DIRTY=version['dirty'])
+        self.metadata.update(POLLUXV=(version['commit'] or 'unknown')[:12], DIRTY=version['dirty'])
 
         logger.info("*** Catalog (%s) ***", self.tag if self.tag is not None else 'default')
         logger.info("  - Catalog class = %s.", self.__class__.__name__)
@@ -205,18 +214,28 @@ class CatalogGenerator(CatalogStatistics, ABC):
             smoothing=self.smoothing,
             augmentors=augmentors,
         )
+        if self.catalog_format != 'fits':  # recorded unless FITS, the format of the catalogs made before it was an option
+            parameters['catalog_format'] = self.catalog_format
         inputs = [self.lensing.save_dir, self.snap_lensing.save_dir, shell_builder.save_dir]
         return dict(product='catalogs', parameters=parameters, inputs=inputs)
 
-    def path(self, ibin: int, ext: str = 'fits', ishell: int | None = None) -> str:
+    @property
+    def columns(self) -> list[str]:
+        """Columns of the catalogs: positions, redshift and distance, interpolated fields, and those of the augmentors."""
+        columns = ['ra', 'dec', 'z', 'chi', *self.interp_fields]
+        for augmentor in self.augmentors:
+            columns += augmentor.new_columns
+        return columns
+
+    def path(self, ibin: int, ext: str | None = None, ishell: int | None = None) -> str:
         """Return the path for the saved catalog of one tomographic bin.
 
         Parameters
         ----------
         ibin : int
             Tomographic-bin index.
-        ext : str, optional
-            File extension without the leading dot. Default is ``'fits'``.
+        ext : str or None, optional
+            File extension without the leading dot. Default is that of :attr:`catalog_format` (``'hdf5'`` or ``'fits'``).
         ishell : int or None, optional
             If given, path of the catalog of shell ``ishell`` (:meth:`generate` with ``ishell``).
 
@@ -227,9 +246,15 @@ class CatalogGenerator(CatalogStatistics, ABC):
             ``catalogs/{nz}/{tag}`` directory of the maps' products (see :mod:`pollux.io.files`), or
             ``{intermediate}/shells/cat_bin{ibin}_{ishell:03d}.{ext}`` for the catalog of one shell.
         """
+        ext = ext or self.catalog_format
         if ishell is None:
             return self.io.path('catalogs', 'cat', self.io.BIN_INDEX.format(ibin), ext=ext)
         return self.io.path('catalogs', 'cat', self.io.BIN_INDEX.format(ibin), self.io.SHELL_INDEX.format(ishell), ext=ext, intermediate=True, folder='shells')
+
+    @property
+    def path_txpipe(self) -> str:
+        """File gathering the bins as TXPipe's binned shear and lens catalogs (HDF5 catalogs, see ``catalog_format``)."""
+        return self.io.path('catalogs', 'binned_catalog', ext='hdf5')
 
     @classmethod
     def smoothing_scales(cls, smooth_fields: tuple[str, ...], smooth_Mpc: float | np.ndarray | dict | None, nshells: int) -> dict[str, tuple]:
@@ -295,7 +320,7 @@ class CatalogGenerator(CatalogStatistics, ABC):
         1) draw galaxies (positions/redshifts and shell membership),
         2) interpolate requested fields from maps,
         3) apply the augmentors,
-        4) save one FITS file per tomographic bin.
+        4) write one file per tomographic bin (``catalog_format``).
         """
         catalog = {ibin: {} for ibin in self.lensing.iter(ibins)}
         ishells = None if ishell is None else [ishell]
@@ -519,40 +544,50 @@ class CatalogGenerator(CatalogStatistics, ABC):
     # region Catalogs
 
     def _write_catalogs(self, catalog: dict[int, dict[str, np.ndarray]], ibins: int | Iterable[int] | None = None, ishell: int | None = None) -> None:
-        """Write per-bin catalogs to FITS files.
+        """Write the catalogs of tomographic bins (:meth:`_write_bin`).
 
         Parameters
         ----------
         catalog : dict
-            Per-bin outputs containing ``'ra'``, ``'dec'``, ``'z'``, ``'chi'`` and
-            any fields listed in ``self.interp_fields``.
+            Per-bin outputs containing the :attr:`columns`.
         ibins : int or array_like of int or None, optional
             Tomographic-bin indices to save.
         ishell : int or None, optional
             If given, save as the catalogs of shell ``ishell`` (one per bin).
         """
-        columns = list(self.interp_fields)
-        for augmentor in self.augmentors:
-            columns += augmentor.new_columns
-        if ishell is not None:
-            os.makedirs(os.path.dirname(self.path(0, ishell=ishell)), exist_ok=True)
-
         for ibin in self.lensing.tqdm(ibins, desc="[generate] saving", leave=False):
+            self._write_bin(ibin, {k: np.asarray(catalog[ibin][k], dtype=np.float32) for k in self.columns}, ishell=ishell)
 
-            ra = fits.Column(name='ra', format='E', array=catalog[ibin]['ra'])
-            dec = fits.Column(name='dec', format='E', array=catalog[ibin]['dec'])
-            z = fits.Column(name='z', format='E', array=catalog[ibin]['z'])
-            chi = fits.Column(name='chi', format='E', array=catalog[ibin]['chi'])
+    def _write_bin(self, ibin: int, columns: dict[str, np.ndarray], ishell: int | None = None) -> None:
+        """Write the catalog of one tomographic bin, or of one shell, with the :attr:`metadata`.
 
-            interp_colums = [fits.Column(name=k, format='E', array=catalog[ibin][k]) for k in columns]
+        In HDF5, the catalog of a bin is also a bin of TXPipe's binned catalogs, gathered (all bins, written or not
+        yet) in :attr:`path_txpipe`.
 
-            header = fits.Header()
-            for k, v in self.header_dict.items():
-                header[k] = v
+        Parameters
+        ----------
+        ibin : int
+            Tomographic bin.
+        columns : dict
+            Arrays by column name (float32).
+        ishell : int or None, optional
+            If given, the catalog of shell ``ishell`` (intermediate file).
+        """
+        txpipe = (ibin, self._txpipe_shapes) if ishell is None else None
+        self.io.write_columns(self.path(ibin, ishell=ishell), columns, self.metadata, txpipe=txpipe)
+        if txpipe is not None and self.catalog_format == 'hdf5':
+            kinds = ('shear', 'lens') if self._txpipe_shapes is not None else ('lens',)
+            self.io.write_txpipe_binned(self.path_txpipe, {i: os.path.basename(self.path(i)) for i in self.lensing.iter()}, kinds=kinds)
 
-            hdul = [fits.PrimaryHDU(), fits.BinTableHDU.from_columns([ra, dec, z, chi] + interp_colums, header)]
-
-            self.io.write_table(self.path(ibin, ext='fits', ishell=ishell), hdul)
+    @property
+    def _txpipe_shapes(self) -> tuple[str, str] | None:
+        """Columns of the shapes that TXPipe correlates (``g1``, ``g2`` of its shear catalogs): the observed shapes, else
+        the reduced shear, else the shear, or None for catalogs without shapes (lenses only)."""
+        columns = self.columns
+        for shapes in (('e1_obs', 'e2_obs'), ('g1', 'g2'), ('gamma1', 'gamma2')):
+            if set(shapes) <= set(columns):
+                return shapes
+        return None
 
     def merge_shell_catalogs(self, ibins: int | Iterable[int] | None = None) -> None:
         """Merge the catalogs of the shells (:meth:`generate` with ``ishell``, saved in ``shells/``) into one catalog per bin.
@@ -569,29 +604,25 @@ class CatalogGenerator(CatalogStatistics, ABC):
         all shells at once.
         """
         for ibin in self.lensing.tqdm(ibins, desc="[merge_shell_catalogs]", leave=False):
-            shells = [fits.getdata(self.path(ibin, ishell=ishell), 1) for ishell in range(self.nshells)]
-            header = fits.Header()
-            for k, v in self.header_dict.items():
-                header[k] = v
-            hdul = [fits.PrimaryHDU(), fits.BinTableHDU(data=np.concatenate(shells), header=header)]
-            self.io.write_table(self.path(ibin), hdul)
+            shells = [self.io.read_columns(self.path(ibin, ishell=ishell)) for ishell in range(self.nshells)]
+            self._write_bin(ibin, {k: np.concatenate([shell[k] for shell in shells]) for k in shells[0]})
 
     def read_catalogs(
             self,
             ibins: int | Iterable[int] | None = None,
-            return_header: bool = False,
+            return_metadata: bool = False,
             subsample: float | None = None,
             seed: int | None = None,
             columns: list[str] | None = None,
-            remove_mean: list[str] | None = None) -> np.ndarray | dict[int, np.ndarray] | tuple:
-        """Read saved FITS catalog(s) for one or more tomographic bins.
+            remove_mean: list[str] | None = None) -> dict | tuple[dict, dict]:
+        """Read the catalogs of one or more tomographic bins, in either format.
 
         Parameters
         ----------
         ibins : int or array_like of int or None, optional
             Tomographic-bin indices to load. If None, loads all bins.
-        return_header : bool, optional
-            If True, also return the FITS header(s).
+        return_metadata : bool, optional
+            If True, also return the metadata of the files (:meth:`pollux.io.files.PolluxIO.read_columns_info`).
         subsample : float or None, optional
             If not None, randomly draw (without replacement, seeded by
             ``seed + ibin``) this fraction of galaxies from each loaded
@@ -609,53 +640,32 @@ class CatalogGenerator(CatalogStatistics, ABC):
 
         Returns
         -------
-        header : astropy.io.fits.Header or dict, optional
-            Only if ``return_header=True``. FITS header from the binary table
-            HDU if ``ibins`` is a single int, otherwise a dict keyed by bin index.
-        table : numpy.ndarray or dict
-            Structured array (native byte order) if ``ibins`` is a single int,
-            otherwise a dict keyed by bin index.
-
-        Notes
-        -----
-        Only the requested columns are read (with ``fitsio``), and with ``subsample`` only the
-        selected rows are kept, read in large contiguous blocks (see :func:`~pollux.utils.fits.read_fits_rows`).
+        metadata : dict, optional
+            Only if ``return_metadata=True``: of the bin if ``ibins`` is a single int, otherwise a dict keyed by bin index.
+        catalog : dict
+            Arrays by column name if ``ibins`` is a single int, otherwise a dict of them keyed by bin index.
         """
+        if subsample is not None and not 0.0 < subsample < 1.0:
+            raise ValueError('subsample must satisfy 0 < subsample < 1')
         seed = self.lensing.shell_builder.seed if seed is None else seed
 
         # read the requested columns of each bin, optionally a random subsample of its rows
-        headers = {}
-        tables = {}
+        metadata, catalogs = {}, {}
         for ibin in self.lensing.tqdm(ibins, desc="[read_catalogs]"):
-            fname = self.path(ibin, ext='fits')
-            headers[ibin] = fits.getheader(fname, ext=1)
-            if subsample is None:
-                table = fitsio.read(fname, ext=1, columns=columns)
-            else:
-                # random rows (galaxies are stored in shell order, so a stride would not be a fair sample)
-                if not 0.0 < subsample < 1.0:
-                    raise ValueError('subsample must satisfy 0 < subsample < 1')
-                nrows = headers[ibin]['NAXIS2']
-                rows = np.sort(np.random.default_rng(seed + ibin).choice(nrows, size=int(subsample * nrows), replace=False))
-                table = read_fits_rows(fname, rows, columns)
-            # native byte order (FITS is big-endian), for numpy operations
-            table = table.astype(table.dtype.newbyteorder('='))
+            fname = self.path(ibin)
+            nrows, _, metadata[ibin] = self.io.read_columns_info(fname)
+            # random rows (galaxies are stored in shell order, so a stride would not be a fair sample)
+            rows = None if subsample is None else np.sort(np.random.default_rng(seed + ibin).choice(nrows, size=int(subsample * nrows), replace=False))
+            catalog = self.io.read_columns(fname, columns, rows)
             # e.g. remove the mean shear of the bin
             for col in remove_mean or []:
-                table[col] -= table[col].mean()
-            tables[ibin] = table
+                catalog[col] -= catalog[col].mean()
+            catalogs[ibin] = catalog
             logger.debug("Found and loaded catalog at %s.", fname)
 
-        # a single table for a single bin, else dicts keyed by bin
         if np.isscalar(ibins):
-            header, table = headers[ibins], tables[ibins]
-        else:
-            header, table = headers, tables
-
-        if return_header:
-            return header, table
-        else:
-            return table
+            metadata, catalogs = metadata[ibins], catalogs[ibins]
+        return (metadata, catalogs) if return_metadata else catalogs
 
     # endregion
 
@@ -760,6 +770,8 @@ class CatalogClustered(CatalogGenerator):
         List of augmentors applied after map interpolation. Default is empty list.
     cls_b, cls_lmax_mask : optional
         Binning of the catalog angular power spectra, see :class:`CatalogGenerator`.
+    catalog_format : {'hdf5', 'fits'}, optional
+        Format of the catalog files, see :class:`CatalogGenerator`.
     """
 
     BIAS_MODELS = ('linear', 'power_law')
@@ -779,6 +791,7 @@ class CatalogClustered(CatalogGenerator):
         augmentors: list | None = None,
         cls_b: nmt.NmtBin | None = None,
         cls_lmax_mask: int | None = None,
+        catalog_format: str = 'hdf5',
     ) -> None:
         # bias of the galaxies, a scalar or one per bin, set before the generator's configuration is written
         if bias is None:
@@ -804,8 +817,9 @@ class CatalogClustered(CatalogGenerator):
             augmentors=augmentors,
             cls_b=cls_b,
             cls_lmax_mask=cls_lmax_mask,
+            catalog_format=catalog_format,
         )
-        self.header_dict['BIASMOD'] = bias_model
+        self.metadata['BIASMOD'] = bias_model
 
         # Store bias values in augmentor kwargs
         for ibin in self.lensing.iter():
@@ -813,7 +827,7 @@ class CatalogClustered(CatalogGenerator):
 
         # Store bias values in header dict
         for i, b in enumerate(self.bias):
-            self.header_dict[f'BIAS_{i}'] = b
+            self.metadata[f'BIAS_{i}'] = b
 
     def _density_weight(self, density: np.ndarray, ibin: int, ishell: int) -> np.ndarray:
         r"""Return the relative galaxy density per pixel of the bias model (``bias_model``).

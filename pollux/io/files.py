@@ -12,8 +12,9 @@ whose ``config.yaml`` is checked like those of the other products), for any numb
                                     (density_{iii}, t11_{iii}, t22_{iii}, t12_{iii})
             kappa/snapshots/        kappa_{iii}, gamma1_{iii}, gamma2_{iii} (one source plane per shell)
             kappa/{nz}/             kappa_bin{b}, gamma1_bin{b}, gamma2_bin{b}, nzs.txt, smoothed/{s}Mpc/
-            catalogs/{nz}/{tag}/    cat_bin{b}.fits, cat_2pt[_{shapes}].fits, cat_cls[_{shapes}].fits (shapes:
-                                    ia, shear_plus_ia, observed)
+            catalogs/{nz}/{tag}/    cat_bin{b}.hdf5 (or .fits), binned_catalog.hdf5 (the bins, for TXPipe),
+                                    cat_2pt[_{shapes}].fits, cat_cls[_{shapes}].fits (shapes: ia,
+                                    shear_plus_ia, observed)
         dmb/{tag}/                  baryonified products, with the same subtree as dmo/
         intermediate/               files needed only to make or resume the products (sub-volume maps, a_lm,
                                     partial catalogs, workspaces, statistics of each bin pair), at the same
@@ -37,6 +38,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from typing import Any
 
+import fitsio
 import healpy as hp
 import healsparse as hsp
 import numpy as np
@@ -46,6 +48,8 @@ from astropy.io import fits
 logger = logging.getLogger(__name__)
 
 INTERMEDIATE = 'intermediate'
+# group of the columns of the catalogs in HDF5 files (next to TXPipe's groups, see PolluxIO.write_columns)
+CATALOG_GROUP = 'catalog'
 
 
 class PolluxIO:
@@ -58,8 +62,8 @@ class PolluxIO:
     The object holds only the root directory and options: the directory of each product is a template of
     :attr:`PRODUCTS`, filled with the options that each object adds for its products (:meth:`with_options`).
 
-    Files are written and read by format (``write_map`` and ``read_map``, ``_alm``, ``_table``, ``_sacc``,
-    ``_npy``, ``_wsp``, ``_pickle``), writes being atomic (:func:`atomic_write`): readers and resumed runs never see a
+    Files are written and read by format (``write_map`` and ``read_map``, ``_alm``, ``_table``, ``_columns``,
+    ``_sacc``, ``_npy``, ``_wsp``, ``_pickle``), writes being atomic (:func:`atomic_write`): readers and resumed runs never see a
     partial file.
 
     Parameters
@@ -370,6 +374,146 @@ class PolluxIO:
             hdus = [fits.PrimaryHDU()] + list(hdus)
         with atomic_write(fname) as tmp:
             fits.HDUList(hdus).writeto(tmp, overwrite=True)
+        logger.debug("Saved to file %s.", fname)
+
+    @staticmethod
+    def read_columns(fname: str, columns: list[str] | None = None, rows: np.ndarray | None = None) -> dict[str, np.ndarray]:
+        """Read columns of a catalog: the table of a FITS file, or the ``catalog`` group of an HDF5 file (:meth:`write_columns`).
+
+        Parameters
+        ----------
+        fname : str
+            File: HDF5 if its extension is ``.hdf5``, FITS otherwise.
+        columns : list of str or None, optional
+            Columns to read. Default is all of them.
+        rows : ndarray of int or None, optional
+            Sorted indices of the rows to read (e.g. a random subsample). Default is all of them.
+
+        Returns
+        -------
+        dict
+            Arrays by column name, in native byte order.
+
+        Notes
+        -----
+        HDF5 columns are read whole, then their rows selected: much faster than reading scattered rows. FITS rows are
+        read in large contiguous blocks (:func:`~pollux.utils.fits.read_fits_rows`).
+        """
+        if fname.endswith('.hdf5'):
+            import h5py
+            with h5py.File(fname, 'r', locking=False) as f:
+                group = f[CATALOG_GROUP]
+                return {k: group[k][:] if rows is None else group[k][:][rows] for k in (list(group) if columns is None else columns)}
+        from ..utils.fits import read_fits_rows
+        table = fitsio.read(fname, ext=1, columns=columns) if rows is None else read_fits_rows(fname, rows, columns)
+        return {k: table[k].astype(table[k].dtype.newbyteorder('=')) for k in table.dtype.names}
+
+    @staticmethod
+    def read_columns_info(fname: str) -> tuple[int, list[str], dict]:
+        """Return the number of rows, the columns and the metadata of a catalog (:meth:`read_columns`), without its data.
+
+        Parameters
+        ----------
+        fname : str
+            File.
+
+        Returns
+        -------
+        nrows : int
+        columns : list of str
+        metadata : dict
+            Attributes of the ``catalog`` group (HDF5), or header of the table (FITS).
+        """
+        if fname.endswith('.hdf5'):
+            import h5py
+            with h5py.File(fname, 'r', locking=False) as f:
+                group = f[CATALOG_GROUP]
+                return group['ra'].shape[0], list(group), dict(group.attrs)
+        header = fits.getheader(fname, ext=1)
+        return header['NAXIS2'], [header[f'TTYPE{i + 1}'] for i in range(header['TFIELDS'])], dict(header)
+
+    @staticmethod
+    def write_columns(
+            fname: str, columns: dict[str, np.ndarray], metadata: dict | None = None, txpipe: tuple[int, tuple[str, str] | None] | None = None) -> None:
+        """Write the columns of a catalog, with its metadata, as a FITS table or an HDF5 file (by the extension of ``fname``).
+
+        An HDF5 file holds the columns in a ``catalog`` group (in their order, chunked by rows, with the metadata as its
+        attributes), and with ``txpipe`` also the groups of a tomographic bin of TXPipe's binned catalogs, whose
+        datasets link those of the catalog without copying them:
+
+        - ``shear/bin_{b}``: ``ra``, ``dec``, ``g1``, ``g2`` (the shear columns given), and ``weight``;
+        - ``lens/bin_{b}``: ``ra``, ``dec``, ``comoving_distance`` (``chi``), and ``weight``.
+
+        Each has the attributes ``nbin = 1`` and ``bin_0 = b`` that TXPipe reads; the weights are 1, as a dataset
+        never written (its fill value, without storage). :meth:`write_txpipe_binned` gathers the bins in one file.
+
+        Parameters
+        ----------
+        fname : str
+            File: HDF5 if its extension is ``.hdf5``, FITS otherwise.
+        columns : dict
+            Arrays by column name, of equal lengths, including ``ra``, ``dec`` and (for ``txpipe``) ``chi``.
+        metadata : dict or None, optional
+            Header keywords (FITS) or attributes (HDF5).
+        txpipe : (int, (str, str) or None) or None, optional
+            HDF5 only: the tomographic bin, and the columns of the shapes TXPipe correlates (``g1``, ``g2``), or None
+            for a lens sample only.
+        """
+        metadata = metadata or {}
+        if not fname.endswith('.hdf5'):
+            header = fits.Header()
+            for k, v in metadata.items():
+                header[k] = v
+            table = np.rec.fromarrays(list(columns.values()), names=list(columns))
+            PolluxIO.write_table(fname, [fits.BinTableHDU(data=table, header=header)])
+            return
+        import h5py
+        n = len(columns['ra'])
+        chunks = (min(n, 1 << 20),) if n else None
+        with atomic_write(fname) as tmp, h5py.File(tmp, 'w', locking=False) as f:
+            group = f.create_group(CATALOG_GROUP, track_order=True)
+            group.attrs.update(metadata)
+            for k, v in columns.items():
+                group.create_dataset(k, data=v, chunks=chunks)
+            if txpipe is not None:
+                ibin, shear = txpipe
+                views = {'lens': dict(ra='ra', dec='dec', comoving_distance='chi')}
+                if shear is not None:
+                    views['shear'] = dict(ra='ra', dec='dec', g1=shear[0], g2=shear[1])
+                for kind, links in views.items():
+                    top = f.create_group(kind)
+                    top.attrs.update(nbin=1, bin_0=ibin)
+                    view = top.create_group(f'bin_{ibin}')
+                    for name, column in links.items():
+                        view[name] = group[column]  # hard link: the same data
+                    view.create_dataset('weight', shape=(n,), dtype=np.float32, fillvalue=1., chunks=chunks)
+        logger.debug("Saved to file %s.", fname)
+
+    @staticmethod
+    def write_txpipe_binned(fname: str, bins: dict[int, str], kinds: tuple[str, ...] = ('shear', 'lens')) -> None:
+        """Write TXPipe's binned catalog of tomographic bins written apart (:meth:`write_columns` with ``txpipe``).
+
+        The groups ``{kind}/bin_{b}`` are external links to those of the files of the bins, which can be written
+        later (a link to a file not yet written resolves once it is). The file serves as both the ``binned_shear_catalog``
+        and the ``binned_lens_catalog`` of TXPipe.
+
+        Parameters
+        ----------
+        fname : str
+            HDF5 file, in the directory of the files of the bins.
+        bins : dict
+            Files of the bins (relative to the directory of ``fname``, or absolute), by bin index.
+        kinds : tuple of str, optional
+            Samples: ``'shear'`` and ``'lens'`` (default), or only ``'lens'`` for catalogs without shapes.
+        """
+        import h5py
+        with atomic_write(fname) as tmp, h5py.File(tmp, 'w', locking=False) as f:
+            for kind in kinds:
+                top = f.create_group(kind)
+                top.attrs['nbin'] = len(bins)
+                for i, (ibin, path) in enumerate(sorted(bins.items())):
+                    top.attrs[f'bin_{i}'] = ibin
+                    top[f'bin_{ibin}'] = h5py.ExternalLink(path, f'/{kind}/bin_{ibin}')
         logger.debug("Saved to file %s.", fname)
 
     @staticmethod

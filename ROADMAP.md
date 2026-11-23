@@ -27,13 +27,12 @@ Planned technical developments of pollux, with their GitHub issue when there is 
   - Magnification ([#14](https://github.com/LSSTDESC/pollux/issues/14)).
   - CMB lensing ([#15](https://github.com/LSSTDESC/pollux/issues/15)).
 - Statistics
-  - Measure the 2pt functions and Cls of the catalogs with [TXPipe](https://github.com/LSSTDESC/TXPipe), the DESC pipeline: export of the catalogs, tomography and n(z) to its inputs, including 3x2pt between separate lens and source catalogs. pollux's own measurements stay as a quick validation of the products.
+  - Measure the 2pt functions and Cls of the catalogs with [TXPipe](https://github.com/LSSTDESC/TXPipe), the DESC pipeline. The HDF5 catalogs are already its binned shear and lens catalogs (`binned_catalog.hdf5`); its 2pt stages also need the n(z) of the bins (QP files, with the `qp` package), random catalogs over the footprint (or TXPipe's own, from a mask map in its format), patch centers and tracer metadata; and 3x2pt between separate lens and source catalogs. pollux's own measurements stay as a quick validation of the products.
   - Covariance module (`pollux.covariance`): the Gaussian covariance of the Cls of maps (pollux's predictions) saved with them in `cls.fits`, and that of the catalog statistics from [TJPCov](https://github.com/LSSTDESC/TJPCov) ([#16](https://github.com/LSSTDESC/pollux/issues/16)), as a pipeline task. Prototype with TJPCov master in the benchmarks of the HACC-HOS-Y1 tests; contribute its speed-ups (binning, projection of diagonal covariances) and the fix of the assembly of the xi- blocks upstream.
   - Covariance improvements: bin-averaged Wigner transforms and exact pair counts for the noise of the 2pt functions (TJPCov branch `real_nmt_ryo`), multipoles beyond 3 nside with the pixel window on the signal only, non-Gaussian terms (super-sample and connected, halo model), intrinsic alignments.
   - Survey configurations (n_eff per bin, shape noise, sky fraction; e.g. LSST Y1 and Y10) to compute the covariance of a survey on the predictions of the products, and judge their deviations in units of its errors; and optionally generate catalogs matching a survey.
   - Jackknife errors of the catalog 2pt functions: TreeCorr patches (`npatch`) with `var_method='jackknife'`, and the full covariance (`treecorr.estimate_multi_cov`). Only shot-noise errors are measured for now.
 - Performance
-  - Column-oriented catalog format (Parquet or HDF5), so that reading a few columns or a subsample does not read whole FITS rows.
   - Move what can be to GPUs (spherical harmonic transforms, painting particles on maps, baryonification, catalog sampling).
 - Tests
   - Unit tests (pytest) on small synthetic inputs (`SyntheticReader`, low nside; first ones in `tests/`), and tests on the simulations run at NERSC only.

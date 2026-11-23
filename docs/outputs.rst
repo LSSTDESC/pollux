@@ -24,7 +24,8 @@ seed, the baryon builder its tag, the lensing builder its n(z), the catalogs the
     - ``kappa/{nz}/``: convergence and shear maps of the tomographic bins (``kappa_bin{b}``, ``gamma1_bin{b}``, ...), and
       their redshift distributions (``nzs.txt``);
     - ``kappa/snapshots/``: convergence and shear maps with one source plane per shell (``kappa_{iii}``, ...);
-    - ``catalogs/{nz}/{tag}/``: source catalogs (``cat_bin{b}.fits``) and their statistics (``cat_2pt.fits``,
+    - ``catalogs/{nz}/{tag}/``: source catalogs (``cat_bin{b}.hdf5``, gathered for TXPipe in ``binned_catalog.hdf5``,
+      or ``cat_bin{b}.fits``, see :doc:`catalogs`) and their statistics (``cat_2pt.fits``,
       ``cat_cls.fits``, and ``cat_2pt_{shapes}.fits``, ``cat_cls_{shapes}.fits`` with the shapes ``'ia'``,
       ``'shear_plus_ia'`` and ``'observed'``, see :doc:`statistics`);
 
@@ -55,7 +56,7 @@ Index and loader
 ``python -m pollux.io.index {root_dir}`` lists the products under a directory, with their main parameters.
 
 :class:`pollux.io.PolluxLoader <pollux.io.loader.PolluxLoader>` reads the products of one realization (a root directory and a seed) from their files only, without creating
-builders, so that it only needs the I/O dependencies (numpy, healpy, healsparse, pyccl, sacc, astropy and PyYAML, but not NaMaster, TreeCorr, BaryonForge or Parsl):
+builders, so that it only needs the I/O dependencies (numpy, healpy, healsparse, pyccl, sacc, astropy, fitsio, h5py and PyYAML, but not NaMaster, TreeCorr, BaryonForge or Parsl):
 
 .. code-block:: python
 
@@ -76,7 +77,8 @@ Maps are read as HealSparse maps from the files of either format (``map_format``
 The ``nz`` of the loader names the redshift distributions of the convergence maps and catalogs (``'SRDv1_nz'`` by
 default), and ``loader.footprint`` holds the parameters of the footprint (its ``config.yaml``). The loader is a
 :class:`~pollux.io.files.PolluxIO`: :meth:`~pollux.io.files.PolluxIO.path` gives any file by product and name, and the
-readers by format (``read_map``, ``read_alm``, ``read_table``, ``read_sacc``, ``read_npy``) read it:
+readers by format (``read_map``, ``read_alm``, ``read_table``, ``read_columns``, ``read_sacc``, ``read_npy``) read it.
+``loader.read_catalog(ibin, columns, rows)`` reads columns of a catalog of either format:
 
 .. code-block:: python
 
@@ -84,3 +86,4 @@ readers by format (``read_map``, ``read_alm``, ``read_table``, ``read_sacc``, ``
     density = dmo.read_map(dmo.path('shells', 'density', '030', smooth_Mpc=2.))    # seed0/dmo/shells/smoothed/2Mpc/density_030.fits
     alm = dmo.read_alm(dmo.path('shells', 'alms', '030', intermediate=True))       # seed0/intermediate/dmo/shells/alms_030.npz (or .fits)
     config = dmb.read_config('catalogs')                                          # config.yaml of the catalogs
+    cat = dmo.read_catalog(0, columns=['ra', 'dec', 'e1_obs', 'e2_obs'])           # seed0/dmo/catalogs/SRDv1_nz/b2/cat_bin0.hdf5 (or .fits)

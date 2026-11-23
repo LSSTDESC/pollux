@@ -88,5 +88,5 @@ output directory: git commit and state of pollux, date, host and command, lists 
 packages, and copies of the run script and configuration. With ``require_clean=True``, it refuses to run if pollux
 has uncommitted changes.
 
-Catalogs also store the commit in their FITS headers: ``POLLUXV`` (first 12 characters) and ``DIRTY`` (uncommitted
-changes).
+Catalogs also store the commit in their metadata (HDF5 attributes or FITS headers): ``POLLUXV`` (first 12
+characters) and ``DIRTY`` (uncommitted changes).

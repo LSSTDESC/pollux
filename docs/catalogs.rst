@@ -115,4 +115,15 @@ never written, read as its fill value). ``binned_catalog.hdf5``, next to the bin
 it is both the ``binned_shear_catalog`` and the ``binned_lens_catalog`` of TXPipe. The same galaxies are both the
 sources and the lenses, as in the catalog statistics of pollux.
 
-TXPipe's 2pt stages also need the n(z) of the bins (QP files) and random catalogs: they are not written yet.
+``nzs.hdf5`` holds the redshift distributions of the bins (``nzs``), in the format of
+`qp <https://github.com/LSSTDESC/qp>`_, which TXPipe reads as its ``shear_photoz_stack`` and ``lens_photoz_stack``: an
+ensemble of ``interp`` distributions on a redshift grid, one per bin, and last that of all bins (weighted by their
+numbers of galaxies). They are the true distributions of the galaxies, those of the lensing builder up to the far
+edge of the last shell, from which the redshifts are drawn. In clustered catalogs, the number of galaxies of a shell
+also follows the mean density of the shell over the footprint, which differs slightly from the cosmic mean: the
+distributions are those expected for the input n(z). pollux writes the file with h5py; reading it as an ensemble
+needs qp (``qp.read``).
+
+TXPipe's 2pt stages copy the n(z) to their outputs on a grid up to z = 3 (``get_bin_n_of_z``), which cuts the tail
+of the last source bins (about 1% of the galaxies of the last SRD bin). They also need random catalogs, which are
+not written yet.

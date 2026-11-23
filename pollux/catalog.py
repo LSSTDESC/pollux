@@ -256,6 +256,30 @@ class CatalogGenerator(CatalogStatistics, ABC):
         """File gathering the bins as TXPipe's binned shear and lens catalogs (HDF5 catalogs, see ``catalog_format``)."""
         return self.io.path('catalogs', 'binned_catalog', ext='hdf5')
 
+    @property
+    def path_nzs(self) -> str:
+        """File of the redshift distributions of the bins (:attr:`nzs`) in qp's format, the ``shear_photoz_stack`` and
+        ``lens_photoz_stack`` inputs of TXPipe (HDF5 catalogs)."""
+        return self.io.path('catalogs', 'nzs', ext='hdf5')
+
+    @property
+    def nzs(self) -> tuple[np.ndarray, np.ndarray]:
+        """Redshift distributions of the galaxies of the bins, as they are drawn: those of the lensing builder up to the
+        far edge of the last shell, normalized, on the union of their grids (piecewise linear).
+
+        Returns
+        -------
+        z : ndarray
+            Redshift grid.
+        nzs : ndarray
+            Distributions, shape ``(nbins, len(z))``.
+        """
+        zmax = self.lensing.shell_builder.shell_edges_redshift[-1]
+        tracers = self.lensing.tracers
+        z = np.union1d(np.concatenate([t.z[t.z < zmax] for t in tracers]), [zmax])
+        nzs = np.array([np.interp(z, t.z, t.nz, left=0., right=0.) for t in tracers])
+        return z, nzs / np.trapz(nzs, z, axis=1)[:, None]
+
     @classmethod
     def smoothing_scales(cls, smooth_fields: tuple[str, ...], smooth_Mpc: float | np.ndarray | dict | None, nshells: int) -> dict[str, tuple]:
         """Return the smoothing scale of every field and shell (see ``smooth_fields`` and ``smooth_Mpc``).
@@ -562,7 +586,7 @@ class CatalogGenerator(CatalogStatistics, ABC):
         """Write the catalog of one tomographic bin, or of one shell, with the :attr:`metadata`.
 
         In HDF5, the catalog of a bin is also a bin of TXPipe's binned catalogs, gathered (all bins, written or not
-        yet) in :attr:`path_txpipe`.
+        yet) in :attr:`path_txpipe`, with their redshift distributions in :attr:`path_nzs`.
 
         Parameters
         ----------
@@ -578,6 +602,7 @@ class CatalogGenerator(CatalogStatistics, ABC):
         if txpipe is not None and self.catalog_format == 'hdf5':
             kinds = ('shear', 'lens') if self._txpipe_shapes is not None else ('lens',)
             self.io.write_txpipe_binned(self.path_txpipe, {i: os.path.basename(self.path(i)) for i in self.lensing.iter()}, kinds=kinds)
+            self.io.write_qp_nz(self.path_nzs, *self.nzs, weights=self.Ngal)
 
     @property
     def _txpipe_shapes(self) -> tuple[str, str] | None:

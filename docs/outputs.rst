@@ -24,7 +24,7 @@ seed, the baryon builder its tag, the lensing builder its n(z), the catalogs the
     - ``kappa/{nz}/``: convergence and shear maps of the tomographic bins (``kappa_bin{b}``, ``gamma1_bin{b}``, ...), and
       their redshift distributions (``nzs.txt``);
     - ``kappa/snapshots/``: convergence and shear maps with one source plane per shell (``kappa_{iii}``, ...);
-    - ``catalogs/{nz}/{tag}/``: source catalogs (``cat_bin{b}.hdf5``, gathered for TXPipe in ``binned_catalog.hdf5``,
+    - ``catalogs/{nz}/{tag}/``: source catalogs (``cat_bin{b}.hdf5``, gathered for TXPipe in ``binned_catalog.hdf5``, with their n(z) in ``nzs.hdf5``,
       or ``cat_bin{b}.fits``, see :doc:`catalogs`) and their statistics (``cat_2pt.fits``,
       ``cat_cls.fits``, and ``cat_2pt_{shapes}.fits``, ``cat_cls_{shapes}.fits`` with the shapes ``'ia'``,
       ``'shear_plus_ia'`` and ``'observed'``, see :doc:`statistics`);

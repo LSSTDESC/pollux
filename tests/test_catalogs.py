@@ -109,3 +109,32 @@ def test_subsample(lensing):
     for k in ('ra', 'g1'):
         assert np.array_equal(sub['hdf5'][k], sub['fits'][k])
     assert abs(sub['hdf5']['g1'].mean()) < 1e-6
+
+
+def test_txpipe_nz(lensing):
+    # the n(z) of the bins in qp's format, as TXPipe reads it (QPNOfZFile: groups meta and data, last row all bins)
+    cat = make_catalog(lensing, 'hdf5')
+    cat.generate()
+    z, nzs = cat.nzs
+    assert z[-1] == lensing.shell_builder.shell_edges_redshift[-1] and np.allclose(np.trapz(nzs, z, axis=1), 1.)
+    with h5py.File(cat.path_nzs, 'r') as f:
+        assert f['meta/pdf_name'][0].decode() == 'interp' and f['meta/pdf_version'][0] == 0
+        xvals, yvals = f['meta/xvals'][:], f['data/yvals'][:]
+    assert xvals.shape == (1, len(z)) and yvals.shape == (NBINS + 1, len(z))
+    assert np.allclose(yvals[:NBINS], nzs) and np.allclose(yvals[-1], cat.Ngal @ nzs / cat.Ngal.sum())
+    # the galaxies follow it, up to the mean density of each shell over the footprint (clustered catalogs)
+    columns = cat.read_catalogs(columns=['z'])
+    for ibin in range(NBINS):
+        cdf = np.concatenate([[0.], np.cumsum(0.5 * np.diff(z) * (nzs[ibin][1:] + nzs[ibin][:-1]))])
+        zgal = np.sort(columns[ibin]['z'])
+        assert np.max(np.abs(np.interp(zgal, z, cdf) - np.arange(1, zgal.size + 1) / zgal.size)) < 0.05
+
+
+def test_txpipe_nz_qp(lensing):
+    # read by qp itself, where it is installed (it needs numpy 2)
+    qp = pytest.importorskip('qp')
+    cat = make_catalog(lensing, 'hdf5')
+    cat.generate()
+    z, nzs = cat.nzs
+    ens = qp.read(cat.path_nzs)
+    assert ens.npdf == NBINS + 1 and np.allclose(ens.pdf(z)[:NBINS], nzs)

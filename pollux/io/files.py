@@ -12,7 +12,7 @@ whose ``config.yaml`` is checked like those of the other products), for any numb
                                     (density_{iii}, t11_{iii}, t22_{iii}, t12_{iii})
             kappa/snapshots/        kappa_{iii}, gamma1_{iii}, gamma2_{iii} (one source plane per shell)
             kappa/{nz}/             kappa_bin{b}, gamma1_bin{b}, gamma2_bin{b}, nzs.txt, smoothed/{s}Mpc/
-            catalogs/{nz}/{tag}/    cat_bin{b}.hdf5 (or .fits), binned_catalog.hdf5 (the bins, for TXPipe),
+            catalogs/{nz}/{tag}/    cat_bin{b}.hdf5 (or .fits), binned_catalog.hdf5 and nzs.hdf5 (for TXPipe),
                                     cat_2pt[_{shapes}].fits, cat_cls[_{shapes}].fits (shapes: ia,
                                     shear_plus_ia, observed)
         dmb/{tag}/                  baryonified products, with the same subtree as dmo/
@@ -514,6 +514,38 @@ class PolluxIO:
                 for i, (ibin, path) in enumerate(sorted(bins.items())):
                     top.attrs[f'bin_{i}'] = ibin
                     top[f'bin_{ibin}'] = h5py.ExternalLink(path, f'/{kind}/bin_{ibin}')
+        logger.debug("Saved to file %s.", fname)
+
+    @staticmethod
+    def write_qp_nz(fname: str, z: np.ndarray, nzs: np.ndarray, weights: np.ndarray) -> None:
+        """Write the redshift distributions of tomographic bins in the format of qp, as TXPipe's n(z) files.
+
+        A qp ensemble of ``interp`` distributions (piecewise linear on the grid ``z``, zero outside), in the groups
+        ``meta`` and ``data`` at the root of the file, as ``qp.Ensemble.write_to`` writes them: one row per bin, then
+        that of all the bins, their sum weighted by ``weights`` (the last row of TXPipe's ``QPNOfZFile``, its
+        non-tomographic n(z)). Every row is normalized. Written with h5py: qp, which needs numpy 2, is only needed to read it.
+
+        Parameters
+        ----------
+        fname : str
+            HDF5 file.
+        z : ndarray
+            Increasing redshift grid.
+        nzs : ndarray
+            Redshift distributions on ``z``, shape ``(nbins, len(z))``, normalized or not.
+        weights : ndarray
+            Weights of the bins in the distribution of all of them (e.g. their numbers of galaxies).
+        """
+        import h5py
+        nzs = np.asarray(nzs, dtype=np.float64)
+        nzs = nzs / np.trapz(nzs, z, axis=1)[:, None]
+        rows = np.vstack([nzs, np.asarray(weights, dtype=np.float64) @ nzs / np.sum(weights)])
+        with atomic_write(fname) as tmp, h5py.File(tmp, 'w', locking=False) as f:
+            meta = f.create_group('meta')
+            meta['pdf_name'] = np.array([b'interp'])
+            meta['pdf_version'] = np.array([0])
+            meta['xvals'] = np.asarray(z, dtype=np.float64)[None]
+            f.create_group('data')['yvals'] = rows
         logger.debug("Saved to file %s.", fname)
 
     @staticmethod

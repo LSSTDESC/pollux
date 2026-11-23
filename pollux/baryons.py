@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import collections
 import copy
 import logging
-from typing import Any, Iterable
+import multiprocessing
+import time
+import warnings
+from concurrent.futures import ProcessPoolExecutor
+from typing import Any, Callable, Iterable, Iterator
 
 import numpy as np
 import pyccl
@@ -55,6 +60,10 @@ class BaryonifiedShellBuilder(ShellBuilder):
     M_min : float or None, optional
         Minimum halo mass (Msun) of the baryonified halos, in the shells and in
         :meth:`matter_power_spectrum`. Default is ``10 * reader.mass_particles``.
+    nworkers : int, optional
+        Processes displacing the pixels around the halos of a shell, each for chunks of halos (see :meth:`_baryonify`).
+        It doesn't change the maps (beyond the order of the sums of the displacements) and is not recorded in the
+        ``config.yaml``. Default is 1 (no other process).
     tag : str or None, optional
         Tag of the baryon model: the shells go to ``{realization}/dmb/{tag}/shells`` (see
         :mod:`pollux.io.files`), ``dmb/default`` if None.
@@ -75,6 +84,7 @@ class BaryonifiedShellBuilder(ShellBuilder):
         mass_name: str,
         mass_unit: str,
         M_min: float | None = None,
+        nworkers: int = 1,
         tag: str | None = None,
         **interpolator_kwargs: Any,
     ) -> None:
@@ -93,6 +103,7 @@ class BaryonifiedShellBuilder(ShellBuilder):
         self.mass_name = mass_name
         self.mass_unit = mass_unit
         self.M_min = 10 * shell_builder.reader.mass_particles if M_min is None else M_min
+        self.nworkers = int(nworkers)
         self.tag = tag
         self._interpolator_kwargs = {**interpolator_kwargs, 'M_min': self.M_min}
 
@@ -118,10 +129,7 @@ class BaryonifiedShellBuilder(ShellBuilder):
             pixel_window=shell_builder.pixel_window)
 
         # Set up baryonification model
-        self.cosmo_dict = self.cosmo.to_dict()
-        self.cosmo_dict.update({'matter_power_spectrum': 'linear'})  # Use linear power spectrum for baryonification
-        self.cosmo_linear = pyccl.Cosmology(**self.cosmo_dict)
-        self.cosmo_dict.update({'Omega_m': self.cosmo['Omega_m']})
+        self.cosmo_linear = pyccl.Cosmology(**{**self.cosmo.to_dict(), 'matter_power_spectrum': 'linear'})  # of the model and the halos
 
         pix = bfg.HealPixel(self.nside)
         self.model = bfg.Profiles.Baryonification2D(
@@ -172,7 +180,7 @@ class BaryonifiedShellBuilder(ShellBuilder):
 
         Notes
         -----
-        Only halos heavier than ``M_min`` are baryonified. The interpolator is
+        Only halos heavier than ``M_min`` are baryonified (:meth:`_baryonify`). The interpolator is
         rebuilt for each shell (see :meth:`_setup_interpolator`).
         """
         shells = {}
@@ -183,7 +191,6 @@ class BaryonifiedShellBuilder(ShellBuilder):
             # Load the shell as a count map (in RING ordering), and set unseen/empty pixels to 0.
             count = self.shell_builder_ref.read_maps(ishell, dense=True)
             count[count == hp.UNSEEN] = 0.
-            lightcone_shell = bfg.utils.LightconeShell(map=count, cosmo=self.cosmo_dict)
 
             # Halo masses of the shell, in Msun
             halos = self.halo_builder.read_catalogs(ishell, variables=['ra', 'dec', 'z', self.mass_name])
@@ -192,9 +199,7 @@ class BaryonifiedShellBuilder(ShellBuilder):
             keep = M > self.M_min
             if keep.any():
                 logger.debug("Shell %d: using masses in range [%.3e, %.3e] Msun.", ishell, M[keep].min(), M[keep].max())
-                lightcone_halos = bfg.utils.HaloLightConeCatalog(halos['ra'][keep], halos['dec'][keep], M[keep], halos['z'][keep], self.cosmo_dict)
-                runner = bfg.Runners.BaryonifyShell(lightcone_halos, lightcone_shell, epsilon_max=self.epsilon_max, model=self.model)
-                baryonified_count = runner.process()
+                baryonified_count = self._baryonify(count, halos['ra'][keep], halos['dec'][keep], M[keep], halos['z'][keep])
             else:
                 # No halos above M_min in this shell
                 baryonified_count = count
@@ -234,6 +239,92 @@ class BaryonifiedShellBuilder(ShellBuilder):
         interpolator_kwargs.setdefault('z_max', max(z_edges[ishell + 1], z_edges[ishell] + 1e-3))
         self.model.setup_interpolator(**interpolator_kwargs)
         self._interpolator_ishell = ishell
+
+    def _baryonify(self, count: np.ndarray, ra: np.ndarray, dec: np.ndarray, M: np.ndarray, z: np.ndarray) -> np.ndarray:
+        """Return the baryonified map of a shell: BaryonForge's ``BaryonifyShell.process``, with the halos in parallel
+        and only the displaced pixels regridded.
+
+        Each halo displaces the pixels within ``epsilon_max`` times its radius (the displacement of the model, with the
+        computations of BaryonForge's runner, in the cosmology of the builder). The displacements of the unit vectors of
+        the pixels add up over the halos, so the halos are split in chunks of nearby halos, processed by
+        :attr:`nworkers` processes (forked by a fork server, each given the model and the halos), each returning the sum
+        of its displacements on the pixels it reaches; the chunks are then summed. The mass of each displaced pixel goes
+        to the four pixels around its new position, with bilinear weights, as in BaryonForge (by blocks of pixels, also
+        by the processes); that of the other pixels stays in place (BaryonForge's weights at a pixel center are 1 up to
+        rounding, 1e-10 at most). The memory is that of the maps and of the displacements of all pixels (19 GB at nside
+        8192), instead of BaryonForge's other arrays over all pixels (positions, new positions, angles, weights).
+
+        Parameters
+        ----------
+        count : ndarray
+            Dense RING count map of the shell (zero outside the footprint).
+        ra, dec : ndarray
+            Positions of the halos (degrees).
+        M : ndarray
+            Masses of the halos (Msun, :attr:`mass_def`).
+        z : ndarray
+            Redshifts of the halos.
+
+        Returns
+        -------
+        ndarray
+            Baryonified dense RING count map (float64), with the mass of ``count``.
+        """
+        if np.allclose(count, 0):
+            return count
+        if vars(self.model).get('p_keys'):
+            raise NotImplementedError("Baryonification models with halo properties (p_keys) are not supported.")
+        ra, dec, M, z = (np.asarray(x, dtype=np.float64) for x in (ra, dec, M, z))  # as BaryonForge's catalogs
+
+        # compute the radii and distances of the halos (physical Mpc)
+        a = 1 / (1 + z)
+        mass_def = pyccl.halos.massdef.MassDef(*self.mass_def)  # as MassDef.get_radius, for all scale factors at once
+        R = (M / (4. / 3. * np.pi * mass_def.get_Delta(self.cosmo_linear, a) * self.cosmo_linear.rho_x(a, mass_def.rho_type)))**(1. / 3.)
+        D = pyccl.angular_diameter_distance(self.cosmo_linear, a)
+        halos = dict(vec=np.atleast_2d(hp.ang2vec(ra, dec, lonlat=True)), M=M, a=a, R=R, D=D, ra=ra, dec=dec)
+        state = dict(halos=halos, nside=self.nside, model=self.model, epsilon_max=self.epsilon_max)
+
+        # start the processes, forked by a fork server that imports this module once (not from this process, whose
+        # threads could hold locks), and give each the state once
+        if self.nworkers > 1:
+            context = multiprocessing.get_context('forkserver')
+            context.set_forkserver_preload([__name__])
+            executor = ProcessPoolExecutor(self.nworkers, mp_context=context, initializer=_set_state, initargs=(state,))
+        else:
+            executor = None
+            _set_state(state)
+        window = 2 * self.nworkers  # tasks sent ahead
+        try:
+            # displace the pixels around chunks of nearby halos (sorted by coarse pixel), and sum their displacements
+            t0 = time.time()
+            order = np.argsort(hp.ang2pix(16, ra, dec, lonlat=True, nest=True), kind='stable')
+            chunks = np.array_split(order, min(M.size, 32 * self.nworkers))
+            offsets = np.zeros((count.size, 3))
+            for pix, offset in _imap(executor, _displace_pixels, chunks, window):
+                offsets[pix] += offset
+
+            # move the mass of the displaced pixels to the pixels around their new positions, by blocks of pixels
+            t1 = time.time()
+            moved = np.flatnonzero((count != 0) & np.any(offsets != 0, axis=1))
+            new_map = count.astype(np.float64)
+            new_map[moved] = 0.  # the other pixels keep their mass
+            blocks = (moved[i:i + 2**22] for i in range(0, moved.size, 2**22))
+            for pix, mass in _imap(executor, _regrid_pixels, ((block, offsets[block], count[block]) for block in blocks), window):
+                new_map[pix] += mass
+        finally:
+            if executor is None:
+                _set_state(None)
+            else:
+                executor.shutdown()
+
+        # check that the mass is conserved
+        if not np.isclose(np.sum(new_map), np.sum(count)):
+            warnings.warn(f"Baryonification: the mass of the shell changed from {np.sum(count):.14e} to {np.sum(new_map):.14e}.")
+        logger.debug(
+            "Baryonification: %d halos displaced the pixels in %.1f s (%d processes), %d pixels with mass regridded in %.1f s.", M.size, t1 - t0, self.nworkers,
+            moved.size,
+            time.time() - t1)
+        return new_map
 
     # endregion
 
@@ -442,6 +533,140 @@ class _MassThreshold(bfg.Profiles.Base.BaseBFGProfiles):
         if np.ndim(M) == 0:
             prof = np.squeeze(prof, axis=0)
         return prof
+
+
+# endregion
+
+# ======================================================================================================================
+# region Workers
+
+# state of the processes of BaryonifiedShellBuilder._baryonify: the halos, the model, nside and epsilon_max
+_BARYONIFY = None
+
+
+def _set_state(state: dict | None) -> None:
+    """Set the state of the processes of :meth:`BaryonifiedShellBuilder._baryonify`.
+
+    The initializer of its workers, and called in its own process when it has no workers.
+
+    Parameters
+    ----------
+    state : dict or None
+        Halos (positions, masses, scale factors, radii, distances), model, ``nside`` and ``epsilon_max``; None to clear
+        it.
+    """
+    global _BARYONIFY
+    _BARYONIFY = state
+
+
+def _displace_pixels(ihalos: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Return the pixels displaced by some halos, and the sums of their displacements (of their unit vectors).
+
+    The computations of BaryonForge's ``BaryonifyShell.process`` for each halo, on the state set by
+    :meth:`BaryonifiedShellBuilder._baryonify`.
+
+    Parameters
+    ----------
+    ihalos : ndarray
+        Indices of the halos.
+
+    Returns
+    -------
+    pix : ndarray
+        RING pixels, sorted.
+    offsets : ndarray
+        Sum of the displacements of the unit vectors of the pixels, shape ``(len(pix), 3)``.
+    """
+    state = _BARYONIFY
+    halos, nside, model = state['halos'], state['nside'], state['model']
+    pixels, offsets = [], []
+    for j in ihalos:
+        vec_j, M_j, a_j, R_j, D_j = halos['vec'][j], halos['M'][j], halos['a'][j], halos['R'][j], halos['D'][j]
+        # find the pixels within epsilon_max halo radii (at least the 4 nearest)
+        pixind = hp.query_disc(nside, vec_j, R_j * state['epsilon_max'] / D_j, inclusive=False, nest=False)
+        if pixind.size < 4:
+            pixind = hp.get_interp_weights(nside, halos['ra'][j], halos['dec'][j], lonlat=True)[0]
+        # compute their separations from the halo (physical distances, flat cosmology)
+        vec = np.stack(hp.pix2vec(nside, pixind), axis=1)
+        pos = vec * D_j
+        diff = pos - vec_j * D_j
+        r_sep = np.sqrt(np.sum(diff**2, axis=1))
+        # displace them radially by the model (in comoving distances)
+        offset = model.displacement(r_sep / a_j, M_j, a_j) * a_j
+        offset = offset[:, None] * (diff / r_sep[:, None])
+        offset = np.where(np.isfinite(offset), offset, 0)
+        # keep the change of their unit vectors
+        new_pos = pos + offset
+        pixels.append(pixind)
+        offsets.append(new_pos / np.sqrt(np.sum(new_pos**2, axis=1))[:, None] - vec)
+    if not pixels:
+        return np.zeros(0, dtype=np.int64), np.zeros((0, 3))
+    # sum the changes of each pixel
+    upix, inverse = np.unique(np.concatenate(pixels), return_inverse=True)
+    offsets = np.concatenate(offsets)
+    return upix, np.stack([np.bincount(inverse, weights=offsets[:, k], minlength=upix.size) for k in range(3)], axis=1)
+
+
+def _regrid_pixels(args: tuple[np.ndarray, np.ndarray, np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
+    """Return where the mass of displaced pixels goes: the pixels around their new positions, and the mass each gets.
+
+    As BaryonForge's ``regrid_pixels_hpix``, for a block of pixels: the mass of each goes to the four pixels around its
+    new position (unit vector plus displacement), with bilinear weights.
+
+    Parameters
+    ----------
+    args : tuple
+        RING pixels, their displacements (shape ``(n, 3)``) and their mass.
+
+    Returns
+    -------
+    pix : ndarray
+        RING pixels receiving mass, sorted.
+    mass : ndarray
+        Mass each receives.
+    """
+    pix, offsets, values = args
+    nside = _BARYONIFY['nside']
+    # find the 4 pixels around the new positions, with bilinear weights
+    lon, lat = hp.vec2ang(np.stack(hp.pix2vec(nside, pix), axis=1) + offsets, lonlat=True)
+    c_pix, c_weight = hp.get_interp_weights(nside, lon, lat, lonlat=True)
+    # sum the mass each pixel receives
+    upix, inverse = np.unique(c_pix.T.ravel(), return_inverse=True)
+    return upix, np.bincount(inverse, weights=(c_weight * values).T.ravel(), minlength=upix.size)
+
+
+def _imap(executor: ProcessPoolExecutor | None, func: Callable, args: Iterable, window: int) -> Iterator:
+    """Yield ``func`` of each of ``args``, in order, computed by the processes of ``executor`` or in this one.
+
+    Arguments are sent as results are taken, at most ``window`` ahead, so that they are made (e.g. sliced from large
+    arrays) only as needed and results don't pile up.
+
+    Parameters
+    ----------
+    executor : ProcessPoolExecutor or None
+        Processes computing ``func``; None to compute it in this process.
+    func : callable
+        Function of one argument (pickled to the processes by reference).
+    args : iterable
+        Arguments, consumed lazily.
+    window : int
+        Arguments sent and not yet returned, at most.
+
+    Yields
+    ------
+    object
+        ``func(arg)`` for each of ``args``, in their order.
+    """
+    if executor is None:
+        yield from map(func, args)
+        return
+    pending = collections.deque()
+    for arg in args:
+        pending.append(executor.submit(func, arg))
+        if len(pending) >= window:
+            yield pending.popleft().result()
+    while pending:
+        yield pending.popleft().result()
 
 
 # endregion

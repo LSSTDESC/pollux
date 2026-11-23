@@ -22,6 +22,18 @@ Inputs
 Halos lighter than ``M_min`` (by default 10 particles) are left unchanged. The profiles are convolved with the
 HEALPix pixel, since the displacement is applied to the shell maps.
 
+Displacement
+------------
+
+Each halo moves the pixels within ``epsilon_max`` times its radius (default 20) by the displacement of the profiles,
+and the mass of each moved pixel goes to the four pixels around its new position, as in BaryonForge's
+``BaryonifyShell`` runner (the maps are the same, up to rounding). The displacements of the halos add up, so the
+halos are processed in chunks of nearby halos by ``nworkers`` processes (forked by a fork server, each given the
+tabulated model; ``nworkers`` in the ``baryon`` section of the run configurations, 1 by default), which also regrid
+the moved pixels by blocks. The memory is that of the maps and of the displacements of all pixels, about 40 GB at
+nside 8192 for the main process (BaryonForge's runner needs more than 120 GB), so that shells can be baryonified at
+nside 8192.
+
 Matter power spectrum
 ---------------------
 

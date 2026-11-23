@@ -42,6 +42,7 @@ import fitsio
 import healpy as hp
 import healsparse as hsp
 import numpy as np
+from scipy.integrate import trapezoid
 import sacc
 from astropy.io import fits
 
@@ -538,7 +539,7 @@ class PolluxIO:
         """
         import h5py
         nzs = np.asarray(nzs, dtype=np.float64)
-        nzs = nzs / np.trapz(nzs, z, axis=1)[:, None]
+        nzs = nzs / trapezoid(nzs, z, axis=1)[:, None]
         rows = np.vstack([nzs, np.asarray(weights, dtype=np.float64) @ nzs / np.sum(weights)])
         with atomic_write(fname) as tmp, h5py.File(tmp, 'w', locking=False) as f:
             meta = f.create_group('meta')

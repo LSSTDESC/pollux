@@ -4,8 +4,8 @@ Getting started
 Installation
 ------------
 
-pollux needs Python 3.10 or later and CCL, healpy, healsparse, NaMaster, TreeCorr, sacc, numba, fitsio, h5py, skyproj,
-parallel_sort and pynverse, plus `Parsl <https://parsl.readthedocs.io/>`_ to run the pipeline,
+pollux needs Python 3.10 or later and CCL, healpy, healsparse, NaMaster, TreeCorr, sacc, numba, fitsio, h5py, skyproj
+and pynverse, plus `Parsl <https://parsl.readthedocs.io/>`_ to run the pipeline,
 `BaryonForge <https://github.com/DhayaaAnbajagane/BaryonForge>`_ for baryonification, and the ``pygio`` Python
 bindings of `GenericIO <https://git.cels.anl.gov/hacc/genericio>`_ to read HACC files.
 

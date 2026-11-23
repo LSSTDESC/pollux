@@ -17,7 +17,7 @@ QUAD_EPS_ABS = 0.0
 QUAD_LIMIT = 1000
 
 
-def quad(*args: Any, **kwargs: Any) -> float:
+def quad(func: Callable, *args: Any, **kwargs: Any) -> float:
     """Integrate a function using SciPy quad with project-wide default tolerances.
 
     This is a thin wrapper around :func:`scipy.integrate.quad` that enforces
@@ -25,8 +25,10 @@ def quad(*args: Any, **kwargs: Any) -> float:
 
     Parameters
     ----------
+    func : callable
+        Integrand, returning a scalar or a 1-element array.
     *args
-        Positional arguments forwarded to :func:`scipy.integrate.quad`.
+        Other positional arguments of :func:`scipy.integrate.quad` (bounds, ...).
     **kwargs
         Keyword arguments forwarded to :func:`scipy.integrate.quad`.
         User-provided ``epsabs``, ``epsrel`` and ``limit`` are overridden by the
@@ -41,7 +43,8 @@ def quad(*args: Any, **kwargs: Any) -> float:
     -----
     SciPy returns ``(value, error_estimate)``; this wrapper returns only ``value``.
     """
-    return scipy_quad(*args, epsabs=QUAD_EPS_ABS, epsrel=QUAD_EPS_REL, limit=QUAD_LIMIT, **kwargs)[0]
+    # the integrand may return a 1-element array (e.g. CCL's tracer methods), which numpy 2 doesn't convert to a float
+    return scipy_quad(lambda x, *a: np.asarray(func(x, *a)).item(), *args, epsabs=QUAD_EPS_ABS, epsrel=QUAD_EPS_REL, limit=QUAD_LIMIT, **kwargs)[0]
 
 
 def powspace(start: float, stop: float, num: int, power: float) -> np.ndarray:

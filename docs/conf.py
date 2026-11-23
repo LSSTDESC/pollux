@@ -63,7 +63,6 @@ autodoc_mock_imports = [
     'healsparse',
     'matplotlib',
     'numba',
-    'parallel_sort',
     'parsl',
     'pyccl',
     'pygio',

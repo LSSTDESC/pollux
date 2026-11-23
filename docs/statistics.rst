@@ -34,7 +34,7 @@ Catalogs measure, for all pairs of tomographic bins:
 - ``'shear_clustering'``: galaxy-galaxy lensing ``γt(θ)``, for all ordered pairs of lens and source bins.
 
 :meth:`~pollux.statistics.catalogs.CatalogStatistics.compute_2pt` measures them with TreeCorr between ``theta_min`` and
-``theta_max`` (``ntheta`` logarithmic bins, ``bin_slop``), and :meth:`~pollux.statistics.catalogs.CatalogStatistics.compute_cls`
+``theta_max`` (``ntheta`` logarithmic bins, ``bin_slop``, and ``angle_slop`` with TreeCorr 5), and :meth:`~pollux.statistics.catalogs.CatalogStatistics.compute_cls`
 measures the corresponding power spectra with NaMaster, from maps of the catalogs. ``subsample`` uses a random
 fraction of the galaxies, and ``remove_mean`` subtracts the mean shear of each bin. Error bars are shot noise only.
 

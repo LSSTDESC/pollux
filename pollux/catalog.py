@@ -17,6 +17,7 @@ import numpy as np
 import healpy as hp
 import pyccl
 import pymaster as nmt
+from scipy.integrate import trapezoid
 
 from .io.code_version import code_version
 from .utils.numerics import quad, sample_pdf
@@ -278,7 +279,7 @@ class CatalogGenerator(CatalogStatistics, ABC):
         tracers = self.lensing.tracers
         z = np.union1d(np.concatenate([t.z[t.z < zmax] for t in tracers]), [zmax])
         nzs = np.array([np.interp(z, t.z, t.nz, left=0., right=0.) for t in tracers])
-        return z, nzs / np.trapz(nzs, z, axis=1)[:, None]
+        return z, nzs / trapezoid(nzs, z, axis=1)[:, None]
 
     @classmethod
     def smoothing_scales(cls, smooth_fields: tuple[str, ...], smooth_Mpc: float | np.ndarray | dict | None, nshells: int) -> dict[str, tuple]:

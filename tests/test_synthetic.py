@@ -77,3 +77,14 @@ def test_octant_corner_at_observer(tmp_path):
     m = builder.read_maps(0)
     assert m.valid_pixels.size > 0 and np.all(m[m.valid_pixels] >= 0)
     assert pollux.shells._query_replica_ipix(np.array([[0., 0., 0.], *np.random.default_rng(0).uniform(1., 2., (7, 3))]), NSIDE) is None
+
+
+def test_inter_diff():
+    # particles of two snapshots matched by id (SnapshotInterpShellBuilder), in any order
+    from pollux.shells import _inter_diff
+    rng = np.random.default_rng(0)
+    ids = rng.permutation(10**6)[:2000]
+    ar1, ar2 = rng.permutation(ids[:1500]), rng.permutation(ids[500:])
+    i1, i2, o1, o2 = _inter_diff(ar1, ar2)
+    assert np.array_equal(ar1[i1], ar2[i2]) and set(ar1[i1]) == set(ids[500:1500])
+    assert set(ar1[o1]) == set(ids[:500]) and set(ar2[o2]) == set(ids[1500:])

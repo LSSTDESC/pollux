@@ -19,6 +19,7 @@ import numpy as np
 import pyccl
 import sacc
 from scipy.special import ndtr
+from scipy.integrate import trapezoid
 import warnings
 
 if TYPE_CHECKING:
@@ -263,7 +264,7 @@ class Tracer:
         """
         if self.kind == 'convergence':
             return self.z_source
-        return np.trapz(self.nz * self.z, self.z) / np.trapz(self.nz, self.z)
+        return trapezoid(self.nz * self.z, self.z) / trapezoid(self.nz, self.z)
 
     def mean_redshift_kernel(self, cosmo: pyccl.Cosmology, nchi: int = 1000) -> float:
         """Mean redshift weighted by the radial kernel of the field, i.e. where its signal comes from.
@@ -287,7 +288,7 @@ class Tracer:
         chi = np.linspace(0., pyccl.comoving_radial_distance(cosmo, 1. / (1. + zmax)), nchi + 1)[1:]
         kernel = np.sum(self.ccl(cosmo).get_kernel(chi), axis=0)
         z = 1. / pyccl.scale_factor_of_chi(cosmo, chi) - 1.
-        return np.trapz(z * kernel, chi) / np.trapz(kernel, chi)
+        return trapezoid(z * kernel, chi) / trapezoid(kernel, chi)
 
     # endregion
 

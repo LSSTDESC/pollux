@@ -1170,6 +1170,7 @@ class CatalogStatistics(TwoPointStatistics):
             ntheta: int = 20,
             sep_units: str = 'arcmin',
             bin_slop: float | None = None,
+            angle_slop: float | None = None,
             shear_cols: tuple[str, str] = ('gamma1', 'gamma2'),
             shapes: str = 'shear',
             subsample: float | None = None,
@@ -1220,6 +1221,10 @@ class CatalogStatistics(TwoPointStatistics):
         bin_slop : float or None, optional
             TreeCorr ``bin_slop`` (binning approximation tolerance). If None,
             uses TreeCorr's own default.
+        angle_slop : float or None, optional
+            TreeCorr ``angle_slop`` (TreeCorr 5 and later): tolerance in radians on the projection angle of the pairs
+            of the shear correlations, approximated by that of the centers of their cells. If None, uses TreeCorr's
+            own default (0.1).
         shear_cols : tuple of str, optional
             Names of the two catalog columns to use as the spin-2 shear field.
             See :meth:`compute_cls`.
@@ -1304,6 +1309,8 @@ class CatalogStatistics(TwoPointStatistics):
         cols1, cols2 = (list(cols) for cols in Shapes.of(self, shapes, shear_cols).columns)
 
         corr_kwargs = dict(min_sep=theta_min, max_sep=theta_max, nbins=ntheta, sep_units=sep_units, bin_slop=bin_slop)
+        if angle_slop is not None:  # not an option of TreeCorr 4
+            corr_kwargs['angle_slop'] = angle_slop
 
         # Build each bin's catalog(s) once, reused across all pairs below.
         # A single galaxy catalog serves as both the density tracer (for NN)

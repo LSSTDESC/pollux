@@ -3,6 +3,7 @@ import os
 
 import numpy as np
 import pytest
+from scipy.integrate import trapezoid
 
 import pollux
 from pollux.catalog import CatalogAugmentorShear
@@ -116,7 +117,7 @@ def test_txpipe_nz(lensing):
     cat = make_catalog(lensing, 'hdf5')
     cat.generate()
     z, nzs = cat.nzs
-    assert z[-1] == lensing.shell_builder.shell_edges_redshift[-1] and np.allclose(np.trapz(nzs, z, axis=1), 1.)
+    assert z[-1] == lensing.shell_builder.shell_edges_redshift[-1] and np.allclose(trapezoid(nzs, z, axis=1), 1.)
     with h5py.File(cat.path_nzs, 'r') as f:
         assert f['meta/pdf_name'][0].decode() == 'interp' and f['meta/pdf_version'][0] == 0
         xvals, yvals = f['meta/xvals'][:], f['data/yvals'][:]

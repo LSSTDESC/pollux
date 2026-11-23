@@ -24,8 +24,8 @@ import yaml
 from astropy.io import fits
 from scipy.spatial import ConvexHull
 from scipy.spatial.transform import Rotation
+from scipy.integrate import trapezoid
 from tqdm.auto import tqdm, trange
-from parallel_sort import argsort as pargsort
 from collections.abc import Iterable
 
 from .footprint import Footprint
@@ -1043,7 +1043,7 @@ class ShellBuilder(MapBuilder):
             zz = np.linspace(z_edges[ishell], z_edges[ishell + 1], 1000)
             aa = 1. / (1. + zz)
             dVdz = pyccl.comoving_angular_distance(self.cosmo, aa)**2 / pyccl.background.h_over_h0(self.cosmo, aa)
-            tracers.append(Tracer(f"density_{ishell}", 'density', z=zz, nz=dVdz / np.trapz(dVdz, zz)))
+            tracers.append(Tracer(f"density_{ishell}", 'density', z=zz, nz=dVdz / trapezoid(dVdz, zz)))
 
         return tracers
 
@@ -2682,7 +2682,7 @@ def _inter_diff(ar1: np.ndarray, ar2: np.ndarray) -> tuple[np.ndarray, np.ndarra
         Indices into ar2 that are not present in ar1.
     """
     ar = np.concatenate((ar1, ar2))
-    sar_idx = pargsort(ar)
+    sar_idx = np.argsort(ar, kind='stable')  # stable: the element of ar1 comes first in each pair
 
     return _inter_diff_kernel(ar, sar_idx, ar1.size)
 

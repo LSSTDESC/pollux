@@ -341,7 +341,8 @@ class Canary:
 
     def submit(self) -> list:
         """Restore the apps, and submit the canary: the middle call of each kind of task (in the order of the run
-        script), without its inputs (on disk), except the plots and the combinations of results (``NOT_IN_CANARY``).
+        script; among those on the dark-matter-only shells, if any), without its inputs (on disk), except the plots and
+        the combinations of results (``NOT_IN_CANARY``).
 
         Returns
         -------
@@ -355,6 +356,7 @@ class Canary:
         for name, (app, calls) in self.calls.items():
             if name.startswith('plot_') or name in NOT_IN_CANARY:
                 continue
+            calls = [c for c in calls if c[1].get('baryon_dict') is None] or calls
             args, kwargs = calls[len(calls) // 2]
             futures.append(app(*args, **{**kwargs, 'inputs': []}))
         print(f"Canary: {len(futures)} tasks, one of each kind:", ', '.join(sorted(f.task_record['func_name'] for f in futures)), flush=True)

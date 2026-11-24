@@ -793,7 +793,7 @@ class MapBuilder(MapStatistics, ABC):
         nside_plot : int or None, optional
             Maps of higher nside are degraded to it before drawing (default 1024, finer
             than the panels' resolution): the figure then only holds these copies, not
-            the full-resolution maps (about 3 GB each at nside 8192). None draws the
+            the full-resolution maps. None draws the
             maps as they are.
         **kwargs
             Forwarded to :func:`healpy.orthview`/:func:`healpy.mollview` (for

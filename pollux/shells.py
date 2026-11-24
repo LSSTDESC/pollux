@@ -554,9 +554,7 @@ class ShellBuilder(MapBuilder):
         if self.apply_replicate_rotflip:
             rot_dict = self.replicate_rotflip
 
-        # dense footprint mask for the overlap test (cached on self; vectorized
-        # boolean indexing below is both faster and far lighter than building a
-        # Python set of tens of millions of pixel indices)
+        # dense footprint mask for the overlap test
         mask_dense = self.footprint.mask(nest=True, padded=True) if not self.footprint.fullsky else None
 
         valid = []
@@ -2178,7 +2176,7 @@ def _loc2pix_nest(nside: int, order: int, ncap: int, npix: int, z: float, phi: f
     Notes
     -----
     Translation of the NESTED branch of ``T_Healpix_Base::loc2pix`` in HEALPix C++, as :func:`_loc2pix_ring` for
-    the RING branch; checked identical to ``healpy.vec2pix(nest=True)``.
+    the RING branch.
     """
     za = np.abs(z)
     tt = phi * inv_halfpi % 4.

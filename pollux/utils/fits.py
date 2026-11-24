@@ -8,9 +8,7 @@ import numpy as np
 def read_fits_rows(fname: str, rows: np.ndarray, columns: list[str] | None = None, block: int = 5_000_000) -> np.ndarray:
     """Read given rows of the table of a FITS file, by contiguous blocks of rows.
 
-    Reading scattered rows directly makes one small read per row; reading blocks and keeping
-    the rows of each is several times faster for subsamples of large catalogs (e.g. 1 min
-    instead of 5 for 0.5% of 2e8 rows on Lustre), and gives the same rows.
+    Each block is read whole and its chosen rows kept, instead of one small read per row.
 
     Parameters
     ----------

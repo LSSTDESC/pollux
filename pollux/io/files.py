@@ -330,8 +330,7 @@ class PolluxIO:
         Parameters
         ----------
         fname : str
-            File: ``.npz`` (uncompressed, with ``alm`` and ``mean``: about 10 times faster to write and read than
-            healpy's FITS files, and 20% smaller), or a FITS file of healpy otherwise.
+            File: ``.npz`` (uncompressed, with ``alm`` and ``mean``), or a FITS file of healpy otherwise.
         alm : ndarray
         mean : float or None, optional
             Mean removed from the field before its transform (:meth:`pollux.map_builder.MapBuilder._alm_field`),
@@ -397,7 +396,7 @@ class PolluxIO:
 
         Notes
         -----
-        HDF5 columns are read whole, then their rows selected: much faster than reading scattered rows. FITS rows are
+        HDF5 columns are read whole, then their rows selected. FITS rows are
         read in large contiguous blocks (:func:`~pollux.utils.fits.read_fits_rows`).
         """
         if fname.endswith('.hdf5'):

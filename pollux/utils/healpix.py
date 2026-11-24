@@ -4,8 +4,7 @@
 
 The conversions reorder with ducc0's multithreaded ``ring2nest``/``nest2ring`` and build or read the HealSparse
 arrays by coverage block, instead of :meth:`healsparse.HealSparseMap.update_values_pix` and
-:meth:`~healsparse.HealSparseMap.generate_healpix_map` (single-threaded, with a check of the uniqueness of all the
-pixels): about 4 and 15 seconds at nside 8192 instead of about 50, for the same maps.
+:meth:`~healsparse.HealSparseMap.generate_healpix_map`.
 
 Dense maps mark the pixels without a value (outside a footprint) with ``hp.UNSEEN`` (the sentinel of float
 HealSparse maps), as healpy does.

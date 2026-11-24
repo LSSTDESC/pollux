@@ -555,8 +555,8 @@ class CatalogStatistics(TwoPointStatistics):
             on disk. By default, the fields of the pair.
         read_unbinned_MCM : bool, optional
             When reading from disk, also read the unbinned mode-coupling matrix,
-            needed for bandpower windows but not to decouple spectra, and large
-            (~77 GB for spin-2 fields at lmax 24575). Default is True.
+            needed for bandpower windows but not to decouple spectra, and large.
+            Default is True.
         **field_kwargs
             Field options for a bin pair (``shapes``, ``shear_cols``, ``randoms``, ``randoms_per_galaxy``,
             ``seed``, ``subsample``, ``randoms_shared``, ``remove_mean``), see :meth:`compute_cls`.

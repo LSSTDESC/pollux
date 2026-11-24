@@ -62,8 +62,7 @@ class BaryonifiedShellBuilder(ShellBuilder):
         :meth:`matter_power_spectrum`. Default is ``10 * reader.mass_particles``.
     nworkers : int, optional
         Processes displacing the pixels around the halos of a shell, each for chunks of halos (see :meth:`_baryonify`).
-        It doesn't change the maps (beyond the order of the sums of the displacements) and is not recorded in the
-        ``config.yaml``. Default is 1 (no other process).
+        Not recorded in the ``config.yaml``. Default is 1 (no other process).
     tag : str or None, optional
         Tag of the baryon model: the shells go to ``{realization}/dmb/{tag}/shells`` (see
         :mod:`pollux.io.files`), ``dmb/default`` if None.
@@ -250,9 +249,7 @@ class BaryonifiedShellBuilder(ShellBuilder):
         :attr:`nworkers` processes (forked by a fork server, each given the model and the halos), each returning the sum
         of its displacements on the pixels it reaches; the chunks are then summed. The mass of each displaced pixel goes
         to the four pixels around its new position, with bilinear weights, as in BaryonForge (by blocks of pixels, also
-        by the processes); that of the other pixels stays in place (BaryonForge's weights at a pixel center are 1 up to
-        rounding, 1e-10 at most). The memory is that of the maps and of the displacements of all pixels (19 GB at nside
-        8192), instead of BaryonForge's other arrays over all pixels (positions, new positions, angles, weights).
+        by the processes); that of the other pixels stays in place.
 
         Parameters
         ----------

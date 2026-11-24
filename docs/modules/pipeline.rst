@@ -15,6 +15,11 @@ See :doc:`../pipeline`.
    :undoc-members:
    :show-inheritance:
 
+.. automodule:: pollux.pipeline.safeguards
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 .. automodule:: pollux.pipeline.report
    :members:
    :undoc-members:

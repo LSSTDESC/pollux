@@ -15,23 +15,21 @@ from parsl.launchers import SrunLauncher
 from parsl.monitoring.monitoring import MonitoringHub
 from parsl.providers import SlurmProvider
 
+from pollux.pipeline.safeguards import retry_handler
+
 nodes_per_block = 1
+RETRIES = 8  # cost of the failed tries of a task before it fails (see pollux.pipeline.safeguards.retry_handler)
 
 # Per-executor resources (tasks pick one via @python_app(executors=[...])).
 # Executors differ by the number of tasks sharing a node, chosen so their memory fits
 # in the node's 512 GB. Threads are only capped for 'default'; otherwise numba / OpenMP use all cores and
 # oversubscription fills the cores left idle by serial steps. Sized for nside 8192
-# full sky / 2048^3 particles (run_12 measurements, and run_11 at nside 4096 scaled
-# up for map-level tasks):
+# full sky / 2048^3 particles:
 #
-# - 'default': tasks up to ~10 GB that take minutes: sub-volume shells (<10 GB, up
-#   to ~5 min), full-shell assembly (~5 GB), kappa sums (~8 GB).
-# - 'highmem': up to ~120 GB: Cls (from ~50 GB alms), halo catalogs (116 GB at
-#   nside 4096 already) and baryonification.
-# - 'heavy': full-sky healpy transforms (~50-100 GB), which already use all cores, so
-#   one at a time (one nside 8192 map2alm takes ~1.7 min on a full node): alms
-#   (~3 min), shear (~5 min) and tidal (~8 min) maps, NaMaster workspace (~12 min);
-#   and source catalogs (memory unknown at full sky / nside 8192).
+# - 'default': light tasks: sub-volume shells, full-shell assembly, kappa sums.
+# - 'highmem': up to ~120 GB: Cls, halo catalogs, baryonification, catalog shells.
+# - 'heavy': full-sky healpy transforms, which already use all cores, so one at a
+#   time: alms, shear and tidal maps, NaMaster workspaces, 2pt functions.
 #
 # workers:      tasks per node
 # env:          extra environment variables for the workers (optional)
@@ -42,7 +40,7 @@ nodes_per_block = 1
 #               must exceed the executor's longest task. None: no draining (tasks
 #               still running at the walltime are killed and retried), for short tasks.
 EXECUTORS = {
-    # 16 threads per task: about 12% fewer core-hours than uncapped for construct_shell_sub, whose 32 tasks would want 320 threads on 256
+    # 16 threads per task, so that the 32 tasks share the 256 threads of a node
     'default':
         dict(
             workers=32,
@@ -193,12 +191,13 @@ def get_config(run_dir, debug, workflow_name, monitoring_db):
     mail = os.environ.get('POLLUX_MAIL')
     mail_options = f' \n#SBATCH --mail-user={mail} \n#SBATCH --mail-type=ALL' if mail else ''
 
-    executors = []
+    executors, drain_margins, walltimes = [], {}, {}
     for label, e in EXECUTORS.items():
         if debug:
             e = {**e, **DEBUG[label], 'walltime': '00:30:00'}
         walltime_s = _seconds(e['walltime'])
         drain_period = None if e['drain_margin'] is None else walltime_s - e['drain_margin']
+        drain_margins[label], walltimes[label] = e['drain_margin'], walltime_s
         provider = GracePeriodSlurmProvider(
             account=account,
             nodes_per_block=nodes_per_block,
@@ -234,7 +233,8 @@ def get_config(run_dir, debug, workflow_name, monitoring_db):
             resource_monitoring_interval=60,  # 600,
             logging_endpoint=f'sqlite:///{monitoring_db}',
         ),
-        retries=8,
+        retries=RETRIES,
+        retry_handler=retry_handler(drain_margins, walltimes, RETRIES, monitoring_db),  # no retries that cannot succeed
         strategy='htex_auto_scale',  # also scale in idle blocks while other blocks still have tasks
         max_idletime=60,
     )

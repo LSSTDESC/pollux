@@ -560,6 +560,8 @@ def _done(outputs, options_id=False):
     """
     import warnings
     from pollux.io import PolluxIO
+    if os.environ.get('POLLUX_CANARY'):  # a canary remakes its products (see pollux.pipeline.safeguards)
+        return False
     if not all(os.path.exists(fname) for fname in outputs):
         return False
     if options_id is not False:
@@ -576,6 +578,9 @@ def _run(outputs, compute):
     """Run compute (which writes the outputs) unless they are all saved (see _done); returns whether it ran."""
     if _done(outputs):
         return False
+    for fname in outputs:  # in a canary, the links to the products of its realization of reference
+        if os.path.islink(fname):
+            os.remove(fname)
     compute()
     return True
 

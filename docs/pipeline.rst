@@ -72,6 +72,31 @@ debug queue. The NERSC account is ``$POLLUX_ACCOUNT``, and Slurm notifications g
 Parsl records the tasks in a monitoring database, from which
 ``python -m pollux.pipeline.report {monitoring.db}`` reports the time, memory and failures of each kind of task.
 
+Safeguards
+----------
+
+:mod:`pollux.pipeline.safeguards` keeps tasks that do not work from using the allocation:
+
+- **Retries.** Blocks stop starting tasks a drain margin before their walltime, and a task still running at the
+  walltime is lost with its block. If it had run almost a whole block, it cannot fit in one and is not retried;
+  otherwise it is retried once, in case it fits when started earlier. Tasks lost earlier (node failures) are
+  retried as usual, tasks whose worker was lost (memory) four times, file system errors twice, other errors not.
+- **Canary.** Each code and configuration needs a canary before a run: one task of each kind, on the debug queue,
+  on a mirror of an existing realization (links to its files; the canary remakes the products of its tasks only).
+  It prints the time and memory of each kind of task next to those of the last accepted canary, and the projected
+  node-hours of a realization. A change beyond the tolerance, a failure or a first canary must be accepted.
+- **Guard.** During a run, a thread stops it (cancelling its blocks) when a kind of task takes much longer than in
+  its canary, or keeps failing.
+
+With the run scripts::
+
+    run_validation.sh config.yaml --canary          # one debug job, then the comparison
+    run_validation.sh config.yaml --accept-canary   # accept the last canary of this code and configuration
+    run_validation.sh config.yaml                   # the run, refused without an accepted canary
+    run_validation.sh config.yaml --no-canary       # the run without canary (the guard then checks failures only)
+
+The realization mirrored by the canary is set by ``canary: {seed: 0, save_dir_root: ...}`` in the configuration.
+
 Resuming
 --------
 

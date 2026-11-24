@@ -202,6 +202,24 @@ WORKFLOW_STYLE = """
 """
 
 
+def rasterize(name):
+    """Write ``{name}.png`` from ``{name}.svg``, for the PDF of the documentation (LaTeX does not take SVG files), with
+    the values of the CSS variables of the SVG, which cairosvg does not resolve. Needs cairosvg."""
+    import re
+    try:
+        import cairosvg
+    except ImportError:
+        print(f'{name}.png not written: cairosvg is not installed', flush=True)
+        return
+    with open(os.path.join(HERE, f'{name}.svg')) as fh:
+        svg = fh.read()
+    values = dict(re.findall(r'(--wf-[\w-]+):\s*([^;]+);', svg))
+    svg = re.sub(r'var\((--wf-[\w-]+)\)', lambda m: values[m.group(1)].strip(), svg)
+    fname = os.path.join(HERE, f'{name}.png')
+    cairosvg.svg2png(bytestring=svg.encode(), write_to=fname, output_width=2 * int(re.search(r'viewBox="0 0 (\d+)', svg).group(1)), background_color='white')
+    print(fname, flush=True)
+
+
 def workflow():
     """Tasks of a realization (pollux.pipeline.tasks) as an SVG diagram, about 840 pixels wide: cards in three columns,
     coloured by executor, with their numbers for HACC091_1024 at nside 2048 (dark matter only and baryonified, one catalog
@@ -301,6 +319,7 @@ def workflow():
     with open(fname, 'w') as fh:
         fh.write('\n'.join(out) + '\n')
     print(fname, flush=True)
+    rasterize('workflow')
 
 
 def workflow_combined():
@@ -388,6 +407,7 @@ def workflow_combined():
     with open(fname, 'w') as fh:
         fh.write('\n'.join(out) + '\n')
     print(fname, flush=True)
+    rasterize('workflow_combined')
 
 
 def lightcone():

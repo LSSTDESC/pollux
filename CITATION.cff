@@ -1,0 +1,46 @@
+cff-version: 1.2.0
+message: "If you use pollux, please cite the paper below for now."
+title: pollux
+abstract: "Weak lensing and large-scale structure simulations from N-body simulations, for the Higher-Order Statistics Topical Team of the LSST Dark Energy Science Collaboration."
+type: software
+authors:
+  - given-names: Cyrille
+    family-names: Doux
+  - given-names: Juan
+    family-names: Mena-Fernández
+version: "0.2"
+license: BSD-3-Clause
+repository-code: "https://github.com/LSSTDESC/pollux"
+url: "https://lsstdesc-pollux.readthedocs.io"
+preferred-citation:
+  type: article
+  title: "Optimization of Weak Lensing Lightcone Simulations for Higher-Order Statistics in the LSST era"
+  authors:
+    - given-names: J.
+      family-names: Mena-Fernández
+    - given-names: C.
+      family-names: Doux
+    - given-names: J.
+      family-names: Harnois-Déraps
+    - given-names: K.
+      family-names: Heitmann
+    - given-names: C.
+      family-names: Combet
+    - given-names: P.
+      family-names: Larsen
+    - given-names: N.
+      family-names: Frontiere
+    - given-names: A.
+      family-names: Bera
+    - given-names: S.
+      family-names: Samario-Nava
+    - given-names: L.
+      family-names: Castiblanco
+    - given-names: C.
+      family-names: Uhlemann
+    - name: "the LSST Dark Energy Science Collaboration"
+  year: 2026
+  identifiers:
+    - type: other
+      value: "arXiv:2605.00821"
+  url: "https://arxiv.org/abs/2605.00821"

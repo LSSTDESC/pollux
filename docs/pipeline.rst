@@ -19,7 +19,7 @@ The tasks use :class:`~pollux.reader.HACCReader`, :class:`~pollux.shells.Snapsho
 :class:`~pollux.catalog.CatalogClusteredPoisson`; the other readers, builders and catalogs are used from
 Python directly.
 
-.. figure:: figures/workflow_combined.svg
+.. figure:: figures/workflow_combined.*
    :width: 100%
    :alt: The Parsl tasks of a realization, from particles to 2pt functions
 

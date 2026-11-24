@@ -158,7 +158,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 class Canary:
     """The canaries of a run configuration: their key (code and configuration), mirror, tasks and records.
 
-    Records are in ``{save_dir_root}/canary/{name}.json``, the mirror and the monitoring database of the last canary
+    The key of a canary is the git tree of the package (so that changes of the docs or tests keep it), its uncommitted
+    changes, and the options of the configuration that change its tasks. Records are in ``{save_dir_root}/canary/{name}.json``, the mirror and the monitoring database of the last canary
     in ``{save_dir_root}/canary/{name}/``. The mirrored realization is the seed ``canary: {seed: ...}`` of the
     configuration (default 0), in ``canary: {save_dir_root: ...}`` (default that of the run); its products must be
     complete.
@@ -177,12 +178,14 @@ class Canary:
         self.name = os.path.splitext(os.path.basename(config_path))[0]
         self.dir = os.path.join(config['save_dir_root'], 'canary')
         self.records_file = os.path.join(self.dir, f'{self.name}.json')
+        # the code of the package (not the docs or tests): its git tree, and its uncommitted changes
         version = code_version()
-        diff = _git('diff', 'HEAD') if version['dirty'] else ''
+        tree = (_git('rev-parse', 'HEAD:pollux') or 'nogit').strip()
+        diff = _git('diff', 'HEAD', '--', ':/pollux') or ''
         options = {k: v for k, v in config.items() if k not in NOT_IN_KEY}
         self.version = version
         self.config_hash = _hash(options)
-        self.key = '-'.join([(version['commit'] or 'nogit')[:12], _hash(diff) if diff else 'clean', self.config_hash])
+        self.key = '-'.join([tree[:12], _hash(diff) if diff else 'clean', self.config_hash])
         self.calls = {}
         self._patched = []
 

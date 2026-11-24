@@ -3,7 +3,8 @@
 the run (:class:`RunGuard`).
 
 A canary runs one task of each kind on the debug QOS, on a mirror of an existing realization (symbolic links to its
-files: the tasks of the canary remake their products, the others are not run), and records their time and memory.
+files: the tasks of the canary remake their products, whose atomic writes replace the links without touching the
+files of the realization; the other tasks are not run), and records their time and memory.
 It is compared to the last accepted canary of the run: a change beyond :data:`TOLERANCE` needs to be accepted
 (``--accept-canary``) before a run, which also needs a canary of its code and configuration. During the run, the
 guard stops it when a kind of task takes much longer than in its canary, or keeps failing.

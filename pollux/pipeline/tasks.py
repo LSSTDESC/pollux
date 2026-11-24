@@ -578,9 +578,6 @@ def _run(outputs, compute):
     """Run compute (which writes the outputs) unless they are all saved (see _done); returns whether it ran."""
     if _done(outputs):
         return False
-    for fname in outputs:  # in a canary, the links to the products of its realization of reference
-        if os.path.islink(fname):
-            os.remove(fname)
     compute()
     return True
 

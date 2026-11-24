@@ -21,6 +21,7 @@ import argparse
 import datetime
 import hashlib
 import json
+import multiprocessing
 import os
 import shutil
 import sqlite3
@@ -293,11 +294,13 @@ class Canary:
         root = os.path.join(self.dir, self.name)
         if not os.path.isdir(os.path.join(source, f'seed{seed}')):
             raise SystemExit(f"No realization of reference for the canary in {source}/seed{seed}: set canary: {{seed, save_dir_root}}.")
-        if os.path.exists(root):
-            shutil.rmtree(root)  # links and the products of the previous canary only
-        for sub in ('footprint', f'seed{seed}'):
-            if os.path.isdir(os.path.join(source, sub)):
-                _mirror(os.path.join(source, sub), os.path.join(root, nside_dir, sub))
+        # the mirror is made by the run script only, not by the processes of Parsl that import it again
+        if multiprocessing.parent_process() is None:
+            if os.path.exists(root):
+                shutil.rmtree(root)  # links and the products of the previous canary only
+            for sub in ('footprint', f'seed{seed}'):
+                if os.path.isdir(os.path.join(source, sub)):
+                    _mirror(os.path.join(source, sub), os.path.join(root, nside_dir, sub))
         os.environ['POLLUX_CANARY'] = '1'
         config = {
             **self.config, 'seeds': [seed],

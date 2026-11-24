@@ -1,7 +1,7 @@
 """Figures of the documentation, from the products of the HACC-HOS-Y1 shared space at NERSC (the PNG files are committed:
 Read the Docs can't reach the data).
 
-    python make_figures.py [name ...]   (default: all; names: workflow, workflow_combined, lightcone, zoom, lensing, baryons, nz, cone, tracers)
+    python make_figures.py [name ...]   (default: all; names: workflow, lightcone, zoom, lensing, baryons, nz, cone, tracers)
 
 Run with the environment of the shared space (``source .../HACC-HOS-Y1/scripts/setup.sh``), on a login node.
 """
@@ -221,111 +221,9 @@ def rasterize(name):
 
 
 def workflow():
-    """Tasks of a realization (pollux.pipeline.tasks) as an SVG diagram, about 840 pixels wide: cards in three columns,
-    coloured by executor, with their numbers for HACC091_1024 at nside 2048 (dark matter only and baryonified, one catalog
-    and its 2pt functions). Colours are CSS variables with light defaults, so that a page can restyle them."""
-    W, H, PAD, GAP, MARGIN = 232, 64, 24, 36, 30
-    col = [PAD + i * (W + GAP) for i in range(3)]
-    row = dict(A=84, B=188, C=292, D=396, E=500, F=656, G=760)
-    nodes = {
-        'particles': ('A', 0, 'particles', 'GenericIO snapshots', None, 'input'),
-        'nz': ('B', 0, 'n(z)', 'redshift distributions', None, 'input'),
-        'sub': ('A', 1, 'construct_shell_sub', 'bin each sub-volume', '3,264', 'default'),
-        'combine': ('A', 2, 'combine_shell_subs', 'sum them into shells', '51', 'default'),
-        'shell_alms': ('B', 1, 'compute_shell_alms', 'harmonics, then Cls', '51', 'heavy'),
-        'kappa': ('B', 2, 'construct_kappa_map', 'Born convergence per shell', '51', 'default'),
-        'tidal': ('C', 1, 'compute_tidal_maps', 'tidal field, smoothed δ', '51', 'heavy'),
-        'kappa_alms': ('C', 2, 'compute_kappa_alms', 'harmonics of κ, then Cls', '51', 'heavy'),
-        'cat': ('D', 1, 'construct_catalog_shell', 'galaxies of each shell', '51', 'highmem'),
-        'shear': ('D', 2, 'compute_shear_maps', 'γ₁, γ₂ from κ', '51', 'heavy'),
-        'merge': ('E', 0, 'merge_catalog', 'one catalog per bin', '5', 'highmem'),
-        'pairs': ('E', 1, 'compute_catalog_2pt_sub', 'TreeCorr, per bin pair', '175', 'heavy'),
-        '2pt': ('E', 2, 'compute_catalog_2pt', 'SACC files and plots', '1', 'default'),
-        'halos': ('F', 0, 'halo properties', 'GenericIO', None, 'input'),
-        'halocat': ('F', 1, 'construct_halo_catalog', 'halos of each shell', '51', 'highmem'),
-        'bary': ('F', 2, 'construct_baryonified_shell', 'BaryonForge, in parallel', '51', 'highmem'),
-    }
-    edges = [('particles', 'sub'), ('sub', 'combine'), ('combine', 'shell_alms'), ('combine', 'kappa'), ('shell_alms', 'tidal'), ('kappa', 'kappa_alms'),
-             ('tidal', 'cat'), ('kappa_alms', 'shear'), ('shear', 'cat'), ('cat', 'merge'), ('merge', 'pairs'), ('pairs', '2pt'), ('halos', 'halocat'),
-             ('halocat', 'bary')]
-
-    def box(name):
-        return col[nodes[name][1]], row[nodes[name][0]]
-
-    def path(a, b):
-        (xa, ya), (xb, yb) = box(a), box(b)
-        if ya == yb:  # same row: straight, either way
-            if xb > xa:
-                return f'M{xa + W},{ya + H / 2:.0f} L{xb - 1},{yb + H / 2:.0f}'
-            return f'M{xa},{ya + H / 2:.0f} L{xb + W + 1},{yb + H / 2:.0f}'
-        x1, y1, x2, y2 = xa + W / 2, ya + H, xb + W / 2, yb  # down: a smooth curve, ending straight into the card
-        y3 = y2 - 12
-        dy = (y3 - y1) * 0.55
-        return f'M{x1:.0f},{y1:.0f} C{x1:.0f},{y1 + dy:.0f} {x2:.0f},{y3 - dy:.0f} {x2:.0f},{y3:.0f} L{x2:.0f},{y2 - 1:.0f}'
-
-    width, height = col[2] + W + MARGIN, row['G'] + H + 40
-    out = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" class="pollux-workflow" role="img" '
-           f'aria-label="Tasks of a pollux realization">', f'<style>{WORKFLOW_STYLE}</style>', f'<rect class="bg" x="0" y="0" width="{width}" height="{height}"/>',
-           '<defs><marker id="wf-arrow" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto">'
-           '<path class="arrowhead" d="M0,1 L10,5 L0,9 z"/></marker></defs>']
-    # bands and their headings
-    top = row['A'] - 48
-    out.append(f'<rect class="band" x="8" y="{top}" width="{width - 16}" height="{row["E"] + H + 20 - top}" rx="14"/>')
-    out.append(f'<text class="head" x="{PAD}" y="{row["A"] - 20}">Dark matter only</text>')
-    out.append(f'<text class="sub" x="{PAD + 128}" y="{row["A"] - 20}">dmo/</text>')
-    out.append(f'<rect class="band" x="8" y="{row["F"] - 48}" width="{width - 16}" height="{row["G"] + H + 20 - (row["F"] - 48)}" rx="14"/>')
-    out.append(f'<text class="head" x="{PAD}" y="{row["F"] - 20}">Baryonified</text>')
-    out.append(f'<text class="sub" x="{PAD + 96}" y="{row["F"] - 20}">dmb/{{tag}}/ · halos move the matter of the dmo shells</text>')
-    # legend of the executors, in the empty part of the first column
-    lx, ly = col[0] + 6, row['C'] + 30
-    out.append(f'<text class="legend-head" x="{lx}" y="{ly}">Executors (tasks per node)</text>')
-    for k, (kind, label) in enumerate((('default', 'default: 32, light tasks'), ('heavy', 'heavy: 1, all the cores'),
-                                       ('highmem', 'highmem: 4, large memory'), ('input', 'input files'))):
-        out.append(f'<circle class="dot-{kind}" cx="{lx + 5}" cy="{ly + 22 + 22 * k}" r="5"/>')
-        out.append(f'<text class="legend" x="{lx + 16}" y="{ly + 26 + 22 * k}">{label}</text>')
-    out.append(f'<text class="legend" x="{lx}" y="{ly + 128}">×n: tasks per realization</text>')
-    for a, b in edges:
-        out.append(f'<path class="edge" d="{path(a, b)}" marker-end="url(#wf-arrow)"/>')
-    # the n(z) gives the redshifts of the galaxies
-    (xn, yn), (xt, yt) = box('nz'), box('cat')
-    gx1, ym, yt2 = col[1] - GAP / 2, yn + H / 2, yt + H / 2
-    out.append(f'<path class="edge feed" d="M{xn + W},{ym:.0f} L{gx1 - 10:.0f},{ym:.0f} Q{gx1:.0f},{ym:.0f} {gx1:.0f},{ym + 10:.0f} L{gx1:.0f},{yt2 - 10:.0f} '
-               f'Q{gx1:.0f},{yt2:.0f} {gx1 + 10:.0f},{yt2:.0f} L{xt - 1},{yt2:.0f}" marker-end="url(#wf-arrow)"/>')
-    # the dmo shells feed the baryonification: down the right margin
-    (xc, yc), (xb, yb) = box('combine'), box('bary')
-    gx = xc + W + MARGIN / 2
-    ys, ye = yc + H / 2, yb + H / 2
-    out.append(f'<path class="edge feed" d="M{xc + W},{ys:.0f} L{gx - 10:.0f},{ys:.0f} Q{gx:.0f},{ys:.0f} {gx:.0f},{ys + 10:.0f} L{gx:.0f},{ye - 10:.0f} '
-               f'Q{gx:.0f},{ye:.0f} {gx - 10:.0f},{ye:.0f} L{xb + W + 1},{ye:.0f}" marker-end="url(#wf-arrow)"/>')
-    out.append(f'<text class="edge-label" x="{gx - 5:.0f}" y="{row["F"] - 56}" text-anchor="end">dmo shells</text>')
-    # the baryonified shells go through the same chain
-    y = row['G']
-    out.append(f'<path class="edge" d="M{xb + W / 2:.0f},{yb + H} L{xb + W / 2:.0f},{y - 1}" marker-end="url(#wf-arrow)"/>')
-    out.append(f'<rect class="card input" x="{col[0]}" y="{y}" width="{col[2] + W - col[0]}" height="{H}" rx="10"/>')
-    out.append(f'<text class="name" x="{col[0] + 16}" y="{y + 27}">the same tasks, from the baryonified shells</text>')
-    out.append(f'<text class="desc" x="{col[0] + 16}" y="{y + 46}">harmonics, convergence and shear, catalogs and 2pt functions with baryons</text>')
-    for name, (r, c, title, desc, count, kind) in nodes.items():
-        x, y = col[c], row[r]
-        out.append(f'<rect class="card{" input" if kind == "input" else ""}" x="{x}" y="{y}" width="{W}" height="{H}" rx="10"/>')
-        out.append(f'<text class="name" x="{x + 14}" y="{y + 25}">{title}</text>')
-        out.append(f'<text class="desc" x="{x + 14}" y="{y + 45}">{desc}</text>')
-        if count:
-            out.append(f'<circle class="dot-{kind}" cx="{x + W - 17}" cy="{y + 41}" r="5"/>')
-            out.append(f'<text class="count" x="{x + W - 28}" y="{y + 45}" text-anchor="end">×{count}</text>')
-    out.append(f'<text class="sub" x="{PAD}" y="{height - 14}">One realization of HACC091_1024 at nside 2048 (pollux.pipeline.tasks). '
-               'A run resumes where it stopped: tasks skip what is written.</text>')
-    out.append('</svg>')
-    fname = os.path.join(HERE, 'workflow.svg')
-    with open(fname, 'w') as fh:
-        fh.write('\n'.join(out) + '\n')
-    print(fname, flush=True)
-    rasterize('workflow')
-
-
-def workflow_combined():
     """Tasks of a realization (pollux.pipeline.tasks) as one chain, with the baryonification as an optional step between
-    the shells and the rest (``workflow_combined.svg``, about 840 pixels wide; ``workflow`` draws the two matter models
-    apart). Numbers of HACC091_1024 at nside 2048."""
+    the shells and the rest (``workflow.svg``, about 840 pixels wide, and ``workflow.png`` for the PDF). Numbers of
+    HACC091_1024 at nside 2048."""
     W, H, PAD, GAP, MARGIN = 232, 64, 24, 36, 30
     col = [PAD + i * (W + GAP) for i in range(3)]
     row = dict(A=60, B=164, C=268, D=372, E=476, F=580)
@@ -403,11 +301,11 @@ def workflow_combined():
     out.append(f'<text class="sub" x="{PAD}" y="{ly + 46}">×n: tasks of one realization of HACC091_1024 at nside 2048. A run resumes where it stopped: '
                'tasks skip what is written.</text>')
     out.append('</svg>')
-    fname = os.path.join(HERE, 'workflow_combined.svg')
+    fname = os.path.join(HERE, 'workflow.svg')
     with open(fname, 'w') as fh:
         fh.write('\n'.join(out) + '\n')
     print(fname, flush=True)
-    rasterize('workflow_combined')
+    rasterize('workflow')
 
 
 def lightcone():
@@ -758,7 +656,7 @@ def tracers():
 
 # endregion
 
-FIGURES = dict(workflow=workflow, workflow_combined=workflow_combined, lightcone=lightcone, zoom=zoom, lensing=lensing, baryons=baryons, nz=nz, cone=cone, tracers=tracers)
+FIGURES = dict(workflow=workflow, lightcone=lightcone, zoom=zoom, lensing=lensing, baryons=baryons, nz=nz, cone=cone, tracers=tracers)
 
 if __name__ == '__main__':
     for name in sys.argv[1:] or FIGURES:

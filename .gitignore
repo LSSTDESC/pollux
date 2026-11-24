@@ -6,3 +6,4 @@
 **/__pycache__
 **/docs/_build
 **/docs/notebooks
+**/docs/figures/.cache

@@ -11,6 +11,12 @@ the sub-volumes have their own format (``sub_format``): HealSparse maps of the n
 and counts (``.npz``); the particles are binned in the matching ordering, so that they are written without
 conversion.
 
+.. figure:: figures/zoom.png
+   :width: 100%
+   :alt: A shell at nside 8192, from the full sky to one degree
+
+   A shell of HACC150_3 at nside 8192: the full sky, then 10 and 1 degrees.
+
 Readers
 -------
 
@@ -55,6 +61,12 @@ each seed is a realization of the lightcone from the same simulation. An isometr
 
 The alternative ``apply_replicate_rotflip`` applies instead one of the 48 rotations and flips of the cubic grid to
 each replica, as in HACC.
+
+.. figure:: figures/lightcone.png
+   :width: 92%
+   :alt: A slice of the lightcone through the observer
+
+   A slice through the observer of a lightcone made of replicas of one box, without and with the random isometries of the shells.
 
 Subsampling
 -----------

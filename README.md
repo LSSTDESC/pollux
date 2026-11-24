@@ -55,8 +55,23 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the conventions of the code (formatti
 ## License
 pollux is distributed under the BSD 3-Clause License, see [LICENSE](LICENSE).
 
+## Citing pollux
+If you use pollux, please cite [Mena-Fernández et al. (2026)](https://arxiv.org/abs/2605.00821) for now:
+
+```bibtex
+@misc{MenaFernandez2026,
+      title={Optimization of Weak Lensing Lightcone Simulations for Higher-Order Statistics in the LSST era},
+      author={J. Mena-Fernández and C. Doux and J. Harnois-Déraps and K. Heitmann and C. Combet and P. Larsen and N. Frontiere and A. Bera and S. Samario-Nava and L. Castiblanco and C. Uhlemann and the LSST Dark Energy Science Collaboration},
+      year={2026},
+      eprint={2605.00821},
+      archivePrefix={arXiv},
+      primaryClass={astro-ph.CO},
+      url={https://arxiv.org/abs/2605.00821},
+}
+```
+
 ## Papers
 - [Mena-Fernández et al. (2026)](https://arxiv.org/abs/2605.00821): optimization of weak lensing lightcone simulations for higher-order statistics in LSST, using lightcones created from HACC simulations with pollux.
 - [Bera et al. (2026)](https://arxiv.org/abs/2605.00818): impact of baryonic feedback on two- and three-point correlation functions of galaxies and shear, from these same lightcones baryonified.
 
-![Example pollux map images](pollux_maps.png)
+![A shell of a pollux lightcone, from the full sky to one degree](docs/figures/zoom.png)

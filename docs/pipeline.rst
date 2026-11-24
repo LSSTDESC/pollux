@@ -19,6 +19,13 @@ The tasks use :class:`~pollux.reader.HACCReader`, :class:`~pollux.shells.Snapsho
 :class:`~pollux.catalog.CatalogClusteredPoisson`; the other readers, builders and catalogs are used from
 Python directly.
 
+.. figure:: figures/workflow_combined.svg
+   :width: 100%
+   :alt: The Parsl tasks of a realization, from particles to 2pt functions
+
+   The tasks of one realization of HACC091_1024 at nside 2048, coloured by the executor they run on, with their numbers.
+   With baryons, the tasks after the shells run on the dark-matter-only shells and again on the baryonified ones.
+
 Tasks
 -----
 

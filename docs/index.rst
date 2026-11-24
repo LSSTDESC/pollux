@@ -1,13 +1,13 @@
-Pollux Documentation
+Pollux documentation
 ====================
 
 DESC package to create weak lensing and large-scale structure simulations from N-body simulations for the Higher-Order Statistics Topical Team.
 
 Authors: Cyrille Doux and Juan Mena-Fernández
 
-.. image:: ../pollux_maps.png
-   :alt: Example pollux map images
-   :width: 600px
+.. image:: figures/zoom.png
+   :alt: A shell of a pollux lightcone, from the full sky to one degree
+   :width: 100%
 
 Features
 --------
@@ -22,6 +22,23 @@ Features
 - Catalog statistics (Cls with NaMaster, 2pt functions with TreeCorr, including those of the intrinsic alignments) and theory predictions with CCL.
 - Efficient parallel computation using the `Parsl <https://parsl.readthedocs.io/>`_ framework to distribute tasks over computing resources (:mod:`pollux.pipeline`), with a record of the code and environment of each run.
 - Use of DESC tools: `CCL <https://github.com/LSSTDESC/CCL>`_, `healsparse <https://github.com/LSSTDESC/healsparse>`_ and `NaMaster <https://github.com/LSSTDESC/NaMaster>`_.
+
+Citing pollux
+-------------
+
+If you use pollux, please cite `Mena-Fernández et al. (2026) <https://arxiv.org/abs/2605.00821>`_ for now:
+
+.. code-block:: bibtex
+
+   @misc{MenaFernandez2026,
+         title={Optimization of Weak Lensing Lightcone Simulations for Higher-Order Statistics in the LSST era},
+         author={J. Mena-Fernández and C. Doux and J. Harnois-Déraps and K. Heitmann and C. Combet and P. Larsen and N. Frontiere and A. Bera and S. Samario-Nava and L. Castiblanco and C. Uhlemann and the LSST Dark Energy Science Collaboration},
+         year={2026},
+         eprint={2605.00821},
+         archivePrefix={arXiv},
+         primaryClass={astro-ph.CO},
+         url={https://arxiv.org/abs/2605.00821},
+   }
 
 Papers
 ------

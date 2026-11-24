@@ -5,6 +5,12 @@ Lensing builders (:mod:`pollux.lensing`) make convergence maps by summing the de
 lensing weights, in the Born approximation (:class:`~pollux.lensing.BornLensingBuilder`), then shear maps from
 them.
 
+.. figure:: figures/lensing.png
+   :width: 59%
+   :alt: Convergence and shear on a patch
+
+   Convergence and shear of a source bin of HACC150_3 on 3 degrees.
+
 Convergence
 -----------
 

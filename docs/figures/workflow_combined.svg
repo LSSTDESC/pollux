@@ -1,0 +1,132 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 822 756" class="pollux-workflow" role="img" aria-label="Tasks of a pollux realization">
+<style>
+.pollux-workflow { --wf-bg: #ffffff; --wf-card: #ffffff; --wf-line: #c9d2df; --wf-edge: #8a97ab; --wf-ink: #1c2430; --wf-muted: #5b6678;
+  --wf-band: #f3f6fa; --wf-default: #2f6fdf; --wf-heavy: #d9822b; --wf-highmem: #2a9d78; --wf-input: #8a97ab;
+  font-family: Inter, "Helvetica Neue", Arial, sans-serif; }
+.pollux-workflow .bg { fill: var(--wf-bg); }
+.pollux-workflow .band { fill: var(--wf-band); }
+.pollux-workflow .card { fill: var(--wf-card); stroke: var(--wf-line); stroke-width: 1; }
+.pollux-workflow .card.input { fill: var(--wf-band); stroke-dasharray: 4 3; }
+.pollux-workflow .name { font-family: "JetBrains Mono", "SFMono-Regular", Menlo, Consolas, monospace; font-size: 12px; font-weight: 600;
+  fill: var(--wf-ink); }
+.pollux-workflow .desc { font-size: 11.5px; fill: var(--wf-muted); }
+.pollux-workflow .count { font-size: 11px; font-weight: 600; fill: var(--wf-ink); font-variant-numeric: tabular-nums; }
+.pollux-workflow .edge { fill: none; stroke: var(--wf-edge); stroke-width: 1.4; }
+.pollux-workflow .edge.feed { stroke-dasharray: 5 4; }
+.pollux-workflow .edge-label { font-size: 10.5px; fill: var(--wf-muted); }
+.pollux-workflow .head { font-family: "Space Grotesk", Inter, Arial, sans-serif; font-size: 14px; font-weight: 600; fill: var(--wf-ink); }
+.pollux-workflow .sub { font-size: 11.5px; fill: var(--wf-muted); }
+.pollux-workflow .legend { font-size: 11.5px; fill: var(--wf-muted); }
+.pollux-workflow .legend-head { font-size: 11.5px; font-weight: 600; fill: var(--wf-ink); }
+.pollux-workflow .dot-default { fill: var(--wf-default); }
+.pollux-workflow .dot-heavy { fill: var(--wf-heavy); }
+.pollux-workflow .dot-highmem { fill: var(--wf-highmem); }
+.pollux-workflow .dot-input { fill: var(--wf-input); }
+.pollux-workflow .arrowhead { fill: var(--wf-edge); }
+</style>
+<rect class="bg" x="0" y="0" width="822" height="756"/>
+<defs><marker id="wf-arrow" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto"><path class="arrowhead" d="M0,1 L10,5 L0,9 z"/></marker></defs>
+<rect class="band" x="8" y="20" width="806" height="644" rx="14"/>
+<path class="edge" d="M256,92 L291,92" marker-end="url(#wf-arrow)"/>
+<path class="edge" d="M524,92 L559,92" marker-end="url(#wf-arrow)"/>
+<path class="edge" d="M676,124 C676,139 676,137 676,152 L676,163" marker-end="url(#wf-arrow)"/>
+<path class="edge" d="M256,196 L291,196" marker-end="url(#wf-arrow)"/>
+<path class="edge" d="M524,196 L559,196" marker-end="url(#wf-arrow)"/>
+<path class="edge" d="M676,228 C676,243 408,241 408,256 L408,267" marker-end="url(#wf-arrow)"/>
+<path class="edge" d="M676,228 C676,243 676,241 676,256 L676,267" marker-end="url(#wf-arrow)"/>
+<path class="edge" d="M408,332 C408,347 408,345 408,360 L408,371" marker-end="url(#wf-arrow)"/>
+<path class="edge" d="M676,332 C676,347 676,345 676,360 L676,371" marker-end="url(#wf-arrow)"/>
+<path class="edge" d="M408,436 C408,451 408,449 408,464 L408,475" marker-end="url(#wf-arrow)"/>
+<path class="edge" d="M676,436 C676,451 676,449 676,464 L676,475" marker-end="url(#wf-arrow)"/>
+<path class="edge" d="M560,508 L525,508" marker-end="url(#wf-arrow)"/>
+<path class="edge" d="M256,508 L291,508" marker-end="url(#wf-arrow)"/>
+<path class="edge" d="M408,540 C408,555 140,553 140,568 L140,579" marker-end="url(#wf-arrow)"/>
+<path class="edge" d="M256,612 L291,612" marker-end="url(#wf-arrow)"/>
+<path class="edge" d="M524,612 L559,612" marker-end="url(#wf-arrow)"/>
+<path class="edge feed" d="M792,92 L797,92 Q807,92 807,102 L807,290 Q807,300 797,300 L793,300" marker-end="url(#wf-arrow)"/>
+<text class="edge-label" x="802" y="152" text-anchor="end">dmo shells</text>
+<rect class="card input" x="24" y="60" width="232" height="64" rx="10"/>
+<text class="name" x="38" y="85">particles</text>
+<text class="desc" x="38" y="105">GenericIO snapshots</text>
+<rect class="card" x="292" y="60" width="232" height="64" rx="10"/>
+<text class="name" x="306" y="85">construct_shell_sub</text>
+<text class="desc" x="306" y="105">bin each sub-volume</text>
+<circle class="dot-default" cx="507" cy="101" r="5"/>
+<text class="count" x="496" y="105" text-anchor="end">×3,264</text>
+<rect class="card" x="560" y="60" width="232" height="64" rx="10"/>
+<text class="name" x="574" y="85">combine_shell_subs</text>
+<text class="desc" x="574" y="105">sum them into shells</text>
+<circle class="dot-default" cx="775" cy="101" r="5"/>
+<text class="count" x="764" y="105" text-anchor="end">×51</text>
+<rect class="card input" x="24" y="164" width="232" height="64" rx="10"/>
+<text class="name" x="38" y="189">halo properties</text>
+<text class="desc" x="38" y="209">GenericIO</text>
+<rect class="card" x="292" y="164" width="232" height="64" rx="10"/>
+<text class="name" x="306" y="189">construct_halo_catalog</text>
+<text class="desc" x="306" y="209">halos of each shell</text>
+<circle class="dot-highmem" cx="507" cy="205" r="5"/>
+<text class="count" x="496" y="209" text-anchor="end">×51</text>
+<rect class="card" x="560" y="164" width="232" height="64" rx="10" stroke-dasharray="5 3"/>
+<text class="name" x="574" y="189">construct_baryonified_shell</text>
+<text class="desc" x="574" y="209">optional: BaryonForge</text>
+<circle class="dot-highmem" cx="775" cy="205" r="5"/>
+<text class="count" x="764" y="209" text-anchor="end">×51</text>
+<rect class="card" x="292" y="268" width="232" height="64" rx="10"/>
+<text class="name" x="306" y="293">compute_shell_alms</text>
+<text class="desc" x="306" y="313">harmonics, then Cls</text>
+<circle class="dot-heavy" cx="507" cy="309" r="5"/>
+<text class="count" x="496" y="313" text-anchor="end">×51</text>
+<rect class="card" x="560" y="268" width="232" height="64" rx="10"/>
+<text class="name" x="574" y="293">construct_kappa_map</text>
+<text class="desc" x="574" y="313">Born convergence per shell</text>
+<circle class="dot-default" cx="775" cy="309" r="5"/>
+<text class="count" x="764" y="313" text-anchor="end">×51</text>
+<rect class="card" x="292" y="372" width="232" height="64" rx="10"/>
+<text class="name" x="306" y="397">compute_tidal_maps</text>
+<text class="desc" x="306" y="417">tidal field, smoothed δ</text>
+<circle class="dot-heavy" cx="507" cy="413" r="5"/>
+<text class="count" x="496" y="417" text-anchor="end">×51</text>
+<rect class="card" x="560" y="372" width="232" height="64" rx="10"/>
+<text class="name" x="574" y="397">compute_kappa_alms</text>
+<text class="desc" x="574" y="417">harmonics of κ, then Cls</text>
+<circle class="dot-heavy" cx="775" cy="413" r="5"/>
+<text class="count" x="764" y="417" text-anchor="end">×51</text>
+<rect class="card input" x="24" y="476" width="232" height="64" rx="10"/>
+<text class="name" x="38" y="501">n(z)</text>
+<text class="desc" x="38" y="521">redshift distributions</text>
+<rect class="card" x="292" y="476" width="232" height="64" rx="10"/>
+<text class="name" x="306" y="501">construct_catalog_shell</text>
+<text class="desc" x="306" y="521">galaxies of each shell</text>
+<circle class="dot-highmem" cx="507" cy="517" r="5"/>
+<text class="count" x="496" y="521" text-anchor="end">×51</text>
+<rect class="card" x="560" y="476" width="232" height="64" rx="10"/>
+<text class="name" x="574" y="501">compute_shear_maps</text>
+<text class="desc" x="574" y="521">γ₁, γ₂ from κ</text>
+<circle class="dot-heavy" cx="775" cy="517" r="5"/>
+<text class="count" x="764" y="521" text-anchor="end">×51</text>
+<rect class="card" x="24" y="580" width="232" height="64" rx="10"/>
+<text class="name" x="38" y="605">merge_catalog</text>
+<text class="desc" x="38" y="625">one catalog per bin</text>
+<circle class="dot-highmem" cx="239" cy="621" r="5"/>
+<text class="count" x="228" y="625" text-anchor="end">×5</text>
+<rect class="card" x="292" y="580" width="232" height="64" rx="10"/>
+<text class="name" x="306" y="605">compute_catalog_2pt_sub</text>
+<text class="desc" x="306" y="625">TreeCorr, per bin pair</text>
+<circle class="dot-heavy" cx="507" cy="621" r="5"/>
+<text class="count" x="496" y="625" text-anchor="end">×175</text>
+<rect class="card" x="560" y="580" width="232" height="64" rx="10"/>
+<text class="name" x="574" y="605">compute_catalog_2pt</text>
+<text class="desc" x="574" y="625">SACC files and plots</text>
+<circle class="dot-default" cx="775" cy="621" r="5"/>
+<text class="count" x="764" y="625" text-anchor="end">×1</text>
+<circle class="dot-default" cx="29" cy="688" r="5"/>
+<text class="legend" x="39" y="692">default: 32 tasks per node</text>
+<circle class="dot-heavy" cx="250.0" cy="688" r="5"/>
+<text class="legend" x="260.0" y="692">heavy: 1 per node, all cores</text>
+<circle class="dot-highmem" cx="485.0" cy="688" r="5"/>
+<text class="legend" x="495.0" y="692">highmem: 4 per node</text>
+<circle class="dot-input" cx="657.0" cy="688" r="5"/>
+<text class="legend" x="667.0" y="692">input files</text>
+<text class="sub" x="24" y="718">With baryons, the tasks after the shells run twice: on the dmo shells (dmo/) and on the baryonified ones (dmb/{tag}/).</text>
+<text class="sub" x="24" y="738">×n: tasks of one realization of HACC091_1024 at nside 2048. A run resumes where it stopped: tasks skip what is written.</text>
+</svg>

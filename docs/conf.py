@@ -58,9 +58,12 @@ autosummary_generate_overwrite = False
 autodoc_mock_imports = [
     'astropy',
     'BaryonForge',
+    'ducc0',
     'fitsio',
+    'h5py',
     'healpy',
     'healsparse',
+    'hpgeom',
     'matplotlib',
     'numba',
     'parsl',

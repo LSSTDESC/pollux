@@ -22,8 +22,8 @@ RETRIES = 8  # cost of the failed tries of a task before it fails (see pollux.pi
 
 # Per-executor resources (tasks pick one via @python_app(executors=[...])).
 # Executors differ by the number of tasks sharing a node, chosen so their memory fits
-# in the node's 512 GB. Threads are only capped for 'default'; otherwise numba / OpenMP use all cores and
-# oversubscription fills the cores left idle by serial steps. Sized for nside 8192
+# in the node's 512 GB. Threads are capped so that the tasks of a node share its 256 threads, except for 'heavy',
+# whose single task uses them all. Sized for nside 8192
 # full sky / 2048^3 particles:
 #
 # - 'default': light tasks: sub-volume shells, full-shell assembly, kappa sums.
@@ -52,8 +52,18 @@ EXECUTORS = {
                 'OMP_NUM_THREADS': 16,
                 'NUMBA_NUM_THREADS': 16
             }),  # idle OpenMP threads sleep instead of spinning
+    # 64 threads per task: uncapped, the thread pools of four workers exceed what a node can create
     'highmem':
-        dict(workers=4, max_blocks=4, walltime='1:00:00', drain_margin=20 * 60),
+        dict(
+            workers=4,
+            max_blocks=4,
+            walltime='1:00:00',
+            drain_margin=20 * 60,
+            env={
+                'OMP_WAIT_POLICY': 'PASSIVE',
+                'OMP_NUM_THREADS': 64,
+                'NUMBA_NUM_THREADS': 64
+            }),
     'heavy':
         dict(workers=1, max_blocks=8, walltime='1:00:00', drain_margin=15 * 60),
 }

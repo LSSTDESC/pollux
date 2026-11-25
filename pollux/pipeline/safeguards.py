@@ -531,14 +531,17 @@ class RunGuard(threading.Thread):
         """
         with sqlite3.connect(f'file:{self.monitoring_db}?mode=ro', uri=True, timeout=30) as db:
             rows = task_table(db, [run_id], min_seconds=5.)  # not the tasks skipped (products saved)
+            # failures of the tasks themselves, not of the tasks they depend on (counted once, at their source)
             counts = db.execute(
-                """select k.task_func_name, count(distinct t.task_id), sum(t.task_fail_history is not null and t.task_fail_history != '')
-                                   from try t join task k on t.run_id = k.run_id and t.task_id = k.task_id where t.run_id = ? group by k.task_func_name""",
+                """select k.task_func_name, count(distinct t.task_id),
+                          sum(t.task_fail_history is not null and t.task_fail_history != '' and t.task_fail_history not like 'DependencyError%')
+                   from try t join task k on t.run_id = k.run_id and t.task_id = k.task_id where t.run_id = ? group by k.task_func_name""",
                 (run_id,)).fetchall()
             final = dict(
                 db.execute(
-                    """select task_func_name, count(*) from task where run_id = ? and task_fail_cost > ? group by task_func_name""",
-                    (run_id, self.retries)).fetchall())
+                    """select task_func_name, count(*) from task where run_id = ? and task_fail_cost > ? and task_id not in
+                       (select task_id from try where run_id = ? and task_fail_history like 'DependencyError%') group by task_func_name""",
+                    (run_id, self.retries, run_id)).fetchall())
         for row in rows:
             r = self.reference.get(row['task'])
             if r and row['n'] >= GUARD['min_tries'] and row['median_s'] > GUARD['ratio'] * r['seconds'] and row['median_s'] - r['seconds'] > GUARD['seconds']:

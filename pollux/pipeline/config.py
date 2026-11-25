@@ -29,7 +29,9 @@ RETRIES = 8  # cost of the failed tries of a task before it fails (see pollux.pi
 # - 'default': light tasks: sub-volume shells, full-shell assembly, kappa sums.
 # - 'highmem': up to ~120 GB: Cls, halo catalogs, baryonification, catalog shells.
 # - 'heavy': full-sky healpy transforms, which already use all cores, so one at a
-#   time: alms, shear and tidal maps, NaMaster workspaces, 2pt functions.
+#   time: alms, shear and tidal maps, NaMaster workspaces.
+# - 'twopt': catalog 2pt functions, two groups of bin pairs per node (up to ~190 GB each with 25% of the galaxies,
+#   ~90 GB with 10%), each with half of the threads.
 #
 # workers:      tasks per node
 # env:          extra environment variables for the workers (optional)
@@ -66,6 +68,17 @@ EXECUTORS = {
             }),
     'heavy':
         dict(workers=1, max_blocks=8, walltime='1:00:00', drain_margin=15 * 60),
+    'twopt':
+        dict(
+            workers=2,
+            max_blocks=8,
+            walltime='2:00:00',
+            drain_margin=50 * 60,
+            env={
+                'OMP_WAIT_POLICY': 'PASSIVE',
+                'OMP_NUM_THREADS': 128,
+                'NUMBA_NUM_THREADS': 128
+            }),
 }
 
 # Debug QOS: 30 min walltime, at most 5 submitted and 2 running jobs per user, so the
@@ -74,7 +87,8 @@ EXECUTORS = {
 DEBUG = {
     'default': dict(max_blocks=2, drain_margin=None),
     'highmem': dict(max_blocks=1, drain_margin=None),
-    'heavy': dict(max_blocks=2, drain_margin=None),
+    'heavy': dict(max_blocks=1, drain_margin=None),
+    'twopt': dict(max_blocks=1, drain_margin=None),
 }
 
 

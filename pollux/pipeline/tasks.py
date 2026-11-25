@@ -347,20 +347,48 @@ def plot_kappa_cls(reader_dict, shell_dict, lensing_dict, baryon_dict=None, inpu
 # region Catalog statistics
 
 
-@python_app(executors=['heavy'])
-def compute_catalog_2pt_sub(stat, pair, reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, stats_dict, baryon_dict=None, shapes='shear', inputs=[]):
-    """2pt function of one statistic ('clustering', 'shear' or 'shear_clustering') for one bin pair, with the shapes
-    of the shear legs ('shear', 'ia', 'shear_plus_ia' or 'observed', see CatalogGenerator.compute_2pt), saved to an
-    intermediate file (its name is returned; None if the 2pt functions of these shapes are saved).
+def pair_groups_2pt(stat, pairs):
+    """Bin pairs of a statistic grouped into the tasks of compute_catalog_2pt_sub, so that each task builds the
+    TreeCorr tree of the randoms, which takes most of its time, for several pairs, and counts the randoms once for all
+    of them (CatalogGenerator.compute_2pt, with randoms_shared): clustering pairs by first bin, shear x clustering pairs
+    by source bin (the second), shear pairs alone.
+
+    Parameters
+    ----------
+    stat : str
+        'clustering', 'shear' or 'shear_clustering'.
+    pairs : list of tuple of int
+        Bin pairs (i, j) of the statistic.
+
+    Returns
+    -------
+    list of list of tuple of int
+        Groups of pairs, one per task.
     """
+    if stat == 'shear':
+        return [[tuple(pair)] for pair in pairs]
+    groups = {}
+    for pair in pairs:
+        groups.setdefault(pair[1] if stat == 'shear_clustering' else pair[0], []).append(tuple(pair))
+    return list(groups.values())
+
+
+@python_app(executors=['twopt'])
+def compute_catalog_2pt_sub(stat, pairs, reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, stats_dict, baryon_dict=None, shapes='shear', inputs=[]):
+    """2pt function of one statistic ('clustering', 'shear' or 'shear_clustering') for a bin pair, or a list of bin
+    pairs computed together (see pair_groups_2pt), with the shapes of the shear legs ('shear', 'ia', 'shear_plus_ia'
+    or 'observed', see CatalogGenerator.compute_2pt), saved to an intermediate file (its name is returned; None if the
+    2pt functions of these shapes are saved).
+    """
+    pairs = [tuple(pairs)] if not hasattr(pairs[0], '__len__') else [tuple(pair) for pair in pairs]
     catalog = _make_catalog(reader_dict, shell_dict, lensing_dict, ia_dict, catalog_dict, baryon_dict)
     params_id = _params_id([stats_dict['common'], stats_dict['2pt']])
     if _done([catalog._path_stat('2pt', shapes)], options_id=params_id):
         return None
-    fname = catalog.io.path('catalogs', stat, *pair, ext='pkl', intermediate=True, folder=f'2pt_{shapes}_{params_id}')
+    fname = catalog.io.path('catalogs', stat, *sum(pairs, ()), ext='pkl', intermediate=True, folder=f'2pt_{shapes}_{params_id}')
     fname = _compute_pair(
         fname, lambda: catalog.compute_2pt(
-            what=stat, pairs=[pair], shapes=shapes, save=False, error_bars=True, theta_per_pair=True, **stats_dict['common'], **stats_dict['2pt']))
+            what=stat, pairs=pairs, shapes=shapes, save=False, error_bars=True, theta_per_pair=True, **stats_dict['common'], **stats_dict['2pt']))
     _free_memory()
     return fname
 

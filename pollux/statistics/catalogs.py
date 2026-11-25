@@ -1350,22 +1350,31 @@ class CatalogStatistics(TwoPointStatistics):
         theta_pairs = {}
         theta = None
 
+        # counts involving the randoms only through a catalog object shared by several pairs (randoms_shared): computed
+        # once for all of them, keyed by the catalogs they count
+        rand_counts = {}
+
+        def count_once(key, process):
+            if key not in rand_counts:
+                rand_counts[key] = treecorr.NNCorrelation(**corr_kwargs) if key[0] == 'rr' else treecorr.NGCorrelation(**corr_kwargs)
+                process(rand_counts[key])
+            return rand_counts[key]
+
         if 'clustering' in what:
             (xi_nn, dxi_nn, theta_nn), = ([d.setdefault(t, {}) for d in (xi, dxi, theta_pairs)] for t in self._STAT_TYPES_2PT['clustering'])
             for i, j in self.lensing.tqdm(sym_pairs, desc="[compute_2pt] clustering"):
                 dd = treecorr.NNCorrelation(**corr_kwargs)
-                rr = treecorr.NNCorrelation(**corr_kwargs)
                 dr = treecorr.NNCorrelation(**corr_kwargs)
                 # Landy-Szalay estimator
                 if i == j:
                     dd.process(cat_gal[i])
-                    rr.process(cat_rand[i])
+                    rr = count_once(('rr', id(cat_rand[i])), lambda c: c.process(cat_rand[i]))
                     dr.process(cat_gal[i], cat_rand[i])
                     xi_nn[i, j], var_nn = dd.calculateXi(rr=rr, dr=dr)
                 else:
                     rd = treecorr.NNCorrelation(**corr_kwargs)
                     dd.process(cat_gal[i], cat_gal[j])
-                    rr.process(cat_rand[i], cat_rand[j])
+                    rr = count_once(('rr', id(cat_rand[i]), id(cat_rand[j])), lambda c: c.process(cat_rand[i], cat_rand[j]))
                     dr.process(cat_gal[i], cat_rand[j])
                     rd.process(cat_rand[i], cat_gal[j])
                     xi_nn[i, j], var_nn = dd.calculateXi(rr=rr, dr=dr, rd=rd)
@@ -1397,10 +1406,9 @@ class CatalogStatistics(TwoPointStatistics):
                                      theta_x) = ([d.setdefault(t, {}) for d in (xi, dxi, theta_pairs)] for t in self._STAT_TYPES_2PT['shear_clustering'])
             for i, j in self.lensing.tqdm(de_pairs, desc="[compute_2pt] shear x clustering"):
                 ng = treecorr.NGCorrelation(**corr_kwargs)
-                rg = treecorr.NGCorrelation(**corr_kwargs)
                 # lens bin i, source bin j, with the signal around randoms subtracted
                 ng.process(cat_gal[i], cat_gal[j])
-                rg.process(cat_rand[i], cat_gal[j])
+                rg = count_once(('rg', id(cat_rand[i]), j), lambda c: c.process(cat_rand[i], cat_gal[j]))
                 xi_t[i, j], xi_x[i, j], var_ng = ng.calculateXi(rg=rg)
                 dxi_t[i, j] = dxi_x[i, j] = np.sqrt(var_ng)
                 theta_t[i, j] = theta_x[i, j] = np.exp(ng.meanlogr)

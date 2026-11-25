@@ -59,12 +59,13 @@ their tasks.
 Execution
 ---------
 
-:func:`~pollux.pipeline.config.get_config` defines three executors, by the memory of their tasks, each submitting
+:func:`~pollux.pipeline.config.get_config` defines four executors, by the memory of their tasks, each submitting
 one-node Slurm jobs (blocks) on demand (``EXECUTORS``):
 
 - ``'default'``: many tasks of up to about 10 GB per node (sub-volume shells, assembly of shells, convergence);
 - ``'highmem'``: four tasks of up to about 120 GB per node (power spectra, halo catalogs, baryonification);
-- ``'heavy'``: one task per node, for full-sky harmonic transforms and catalogs.
+- ``'heavy'``: one task per node, for full-sky harmonic transforms;
+- ``'twopt'``: two tasks per node, for the catalog 2pt functions.
 
 Blocks stop taking tasks before the end of their walltime, so that running tasks finish. ``debug=True`` uses the
 debug queue. The NERSC account is ``$POLLUX_ACCOUNT``, and Slurm notifications go to ``$POLLUX_MAIL`` if set.
@@ -103,7 +104,8 @@ Resuming
 Tasks skip the products already on disk, and every file is written to a temporary name then renamed, so that an
 interrupted task leaves no partial file. Only tasks skip: the methods of the builders and catalogs compute and write
 their products when called, and read their inputs, raising if one is missing (e.g. the a_lm of
-:meth:`~pollux.map_builder.MapBuilder.read_alms`, made by :meth:`~pollux.map_builder.MapBuilder.compute_alms`). Statistics are computed per bin pair, each pair saved as an intermediate
+:meth:`~pollux.map_builder.MapBuilder.read_alms`, made by :meth:`~pollux.map_builder.MapBuilder.compute_alms`). Statistics are computed per bin pair, or per group of bin pairs for the catalog 2pt functions (sharing the
+randoms, see :func:`~pollux.pipeline.tasks.pair_groups_2pt`), each saved as an intermediate
 file (in a folder named by an identifier of the binning and options of the statistic), then combined: tasks skip
 the pairs already saved, and the statistics already combined, but always redraw the plots. Launching a run again therefore resumes it. For the same reason, a product
 must be moved away (or the run given a new output directory) to be recomputed. A product whose ``config.yaml``

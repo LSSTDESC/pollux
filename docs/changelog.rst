@@ -26,6 +26,10 @@ Production of the HACC-HOS-Y1 lightcones (`PR #34 <https://github.com/LSSTDESC/p
   of each code and configuration before a run, and a guard stopping runs whose tasks take too long or keep failing.
 - :class:`~pollux.reader.SyntheticReader` (particles drawn in a box, for tests) replaces ``MockReader`` and
   ``DummyReader``; first tests in ``tests/`` (pytest).
+- Catalog 2pt functions by groups of bin pairs sharing their randoms (:func:`~pollux.pipeline.tasks.pair_groups_2pt`),
+  on a ``twopt`` executor, two tasks per node; thread caps of the ``highmem`` workers.
+- Non-Limber correction of the spectra of density tracers, e.g. thin shells (``non_limber=True`` in ``predict_cls``,
+  off by default: about a minute per pair).
 
 Version 0.1
 -----------

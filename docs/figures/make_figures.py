@@ -177,7 +177,7 @@ def to_plane(ra, dec, ra0, dec0):
 
 WORKFLOW_STYLE = """
 .pollux-workflow { --wf-bg: #ffffff; --wf-card: #ffffff; --wf-line: #c9d2df; --wf-edge: #8a97ab; --wf-ink: #1c2430; --wf-muted: #5b6678;
-  --wf-band: #f3f6fa; --wf-default: #2f6fdf; --wf-heavy: #d9822b; --wf-highmem: #2a9d78; --wf-input: #8a97ab;
+  --wf-band: #f3f6fa; --wf-default: #2f6fdf; --wf-heavy: #d9822b; --wf-highmem: #2a9d78; --wf-twopt: #8a5cd0; --wf-input: #8a97ab;
   font-family: Inter, "Helvetica Neue", Arial, sans-serif; }
 .pollux-workflow .bg { fill: var(--wf-bg); }
 .pollux-workflow .band { fill: var(--wf-band); }
@@ -197,6 +197,7 @@ WORKFLOW_STYLE = """
 .pollux-workflow .dot-default { fill: var(--wf-default); }
 .pollux-workflow .dot-heavy { fill: var(--wf-heavy); }
 .pollux-workflow .dot-highmem { fill: var(--wf-highmem); }
+.pollux-workflow .dot-twopt { fill: var(--wf-twopt); }
 .pollux-workflow .dot-input { fill: var(--wf-input); }
 .pollux-workflow .arrowhead { fill: var(--wf-edge); }
 """
@@ -242,7 +243,7 @@ def workflow():
         'cat': ('E', 1, 'construct_catalog_shell', 'galaxies of each shell', '51', 'highmem'),
         'shear': ('E', 2, 'compute_shear_maps', 'γ₁, γ₂ from κ', '51', 'heavy'),
         'merge': ('F', 0, 'merge_catalog', 'one catalog per bin', '5', 'highmem'),
-        'pairs': ('F', 1, 'compute_catalog_2pt_sub', 'TreeCorr, per bin pair', '175', 'heavy'),
+        'pairs': ('F', 1, 'compute_catalog_2pt_sub', 'TreeCorr, groups of pairs', '85', 'twopt'),
         '2pt': ('F', 2, 'compute_catalog_2pt', 'SACC files and plots', '1', 'default'),
     }
     edges = [('particles', 'sub'), ('sub', 'combine'), ('combine', 'bary'), ('halos', 'halocat'), ('halocat', 'bary'), ('bary', 'shell_alms'), ('bary', 'kappa'),
@@ -291,8 +292,8 @@ def workflow():
     # legend and notes, under the band
     ly = row['F'] + H + 48
     x = PAD
-    for kind, label in (('default', 'default: 32 tasks per node'), ('heavy', 'heavy: 1 per node, all cores'), ('highmem', 'highmem: 4 per node'),
-                        ('input', 'input files')):
+    for kind, label in (('default', 'default: 32 per node'), ('heavy', 'heavy: 1 per node'), ('highmem', 'highmem: 4 per node'),
+                        ('twopt', 'twopt: 2 per node'), ('input', 'input files')):
         out.append(f'<circle class="dot-{kind}" cx="{x + 5}" cy="{ly - 4}" r="5"/>')
         out.append(f'<text class="legend" x="{x + 15}" y="{ly}">{label}</text>')
         x += 15 + 7.0 * len(label) + 24

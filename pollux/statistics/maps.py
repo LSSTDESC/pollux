@@ -300,7 +300,8 @@ class MapStatistics(TwoPointStatistics):
             binning: str = 'wsp',
             error_bars: bool = False,
             stacked: bool = False,
-            ell: np.ndarray | None = None) -> tuple:
+            ell: np.ndarray | None = None,
+            non_limber: bool = False) -> tuple:
         """Predict theory angular power spectra using CCL.
 
         Parameters
@@ -324,6 +325,10 @@ class MapStatistics(TwoPointStatistics):
         ell : ndarray or None, optional
             Multipoles at which to evaluate CCL when ``binning='unbinned'``.
             If None, uses the effective bandpower ells from the binning scheme.
+        non_limber : bool, optional
+            Correct the Limber approximation of the spectra of density maps, e.g. shells, which are thin
+            (:meth:`pollux.cosmo.Theory.angular_cl`): 10-25% at ell ~ 30-100 and a few percent at ell ~ 200 for the
+            shells of a lightcone, but minutes per pair. Default is False.
 
         Returns
         -------
@@ -373,6 +378,7 @@ class MapStatistics(TwoPointStatistics):
                                       stacked=stacked,
                                       fsky=self.footprint.fsky,
                                       cross_covariance=not auto_only,
+                                      non_limber=non_limber,
                                       progress=self.tqdm)
         return res
 

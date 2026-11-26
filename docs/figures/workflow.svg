@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 822 756" class="pollux-workflow" role="img" aria-label="Tasks of a pollux realization">
 <style>
 .pollux-workflow { --wf-bg: #ffffff; --wf-card: #ffffff; --wf-line: #c9d2df; --wf-edge: #8a97ab; --wf-ink: #1c2430; --wf-muted: #5b6678;
-  --wf-band: #f3f6fa; --wf-default: #2f6fdf; --wf-heavy: #d9822b; --wf-highmem: #2a9d78; --wf-input: #8a97ab;
+  --wf-band: #f3f6fa; --wf-default: #2f6fdf; --wf-heavy: #d9822b; --wf-highmem: #2a9d78; --wf-twopt: #8a5cd0; --wf-input: #8a97ab;
   font-family: Inter, "Helvetica Neue", Arial, sans-serif; }
 .pollux-workflow .bg { fill: var(--wf-bg); }
 .pollux-workflow .band { fill: var(--wf-band); }
@@ -21,6 +21,7 @@
 .pollux-workflow .dot-default { fill: var(--wf-default); }
 .pollux-workflow .dot-heavy { fill: var(--wf-heavy); }
 .pollux-workflow .dot-highmem { fill: var(--wf-highmem); }
+.pollux-workflow .dot-twopt { fill: var(--wf-twopt); }
 .pollux-workflow .dot-input { fill: var(--wf-input); }
 .pollux-workflow .arrowhead { fill: var(--wf-edge); }
 </style>
@@ -111,22 +112,24 @@
 <text class="count" x="228" y="625" text-anchor="end">×5</text>
 <rect class="card" x="292" y="580" width="232" height="64" rx="10"/>
 <text class="name" x="306" y="605">compute_catalog_2pt_sub</text>
-<text class="desc" x="306" y="625">TreeCorr, per bin pair</text>
-<circle class="dot-heavy" cx="507" cy="621" r="5"/>
-<text class="count" x="496" y="625" text-anchor="end">×175</text>
+<text class="desc" x="306" y="625">TreeCorr, groups of pairs</text>
+<circle class="dot-twopt" cx="507" cy="621" r="5"/>
+<text class="count" x="496" y="625" text-anchor="end">×85</text>
 <rect class="card" x="560" y="580" width="232" height="64" rx="10"/>
 <text class="name" x="574" y="605">compute_catalog_2pt</text>
 <text class="desc" x="574" y="625">SACC files and plots</text>
 <circle class="dot-default" cx="775" cy="621" r="5"/>
 <text class="count" x="764" y="625" text-anchor="end">×1</text>
 <circle class="dot-default" cx="29" cy="688" r="5"/>
-<text class="legend" x="39" y="692">default: 32 tasks per node</text>
-<circle class="dot-heavy" cx="250.0" cy="688" r="5"/>
-<text class="legend" x="260.0" y="692">heavy: 1 per node, all cores</text>
-<circle class="dot-highmem" cx="485.0" cy="688" r="5"/>
-<text class="legend" x="495.0" y="692">highmem: 4 per node</text>
-<circle class="dot-input" cx="657.0" cy="688" r="5"/>
-<text class="legend" x="667.0" y="692">input files</text>
+<text class="legend" x="39" y="692">default: 32 per node</text>
+<circle class="dot-heavy" cx="208.0" cy="688" r="5"/>
+<text class="legend" x="218.0" y="692">heavy: 1 per node</text>
+<circle class="dot-highmem" cx="366.0" cy="688" r="5"/>
+<text class="legend" x="376.0" y="692">highmem: 4 per node</text>
+<circle class="dot-twopt" cx="538.0" cy="688" r="5"/>
+<text class="legend" x="548.0" y="692">twopt: 2 per node</text>
+<circle class="dot-input" cx="696.0" cy="688" r="5"/>
+<text class="legend" x="706.0" y="692">input files</text>
 <text class="sub" x="24" y="718">With baryons, the tasks after the shells run twice: on the dmo shells (dmo/) and on the baryonified ones (dmb/{tag}/).</text>
 <text class="sub" x="24" y="738">×n: tasks of one realization of HACC091_1024 at nside 2048. A run resumes where it stopped: tasks skip what is written.</text>
 </svg>

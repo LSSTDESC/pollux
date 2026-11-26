@@ -406,9 +406,13 @@ class Theory:
     # smoothing scales (Mpc) considered by lognormal_smoothing: round values, for file names
     SMOOTHING_SCALES = (0.1, 0.12, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.8, 1., 1.2, 1.5, 2., 2.5, 3., 4., 5., 6., 8., 10., 12., 15., 20., 25., 30., 40., 50.)
 
+    # non-Limber correction (see :meth:`_non_limber_correction`): computed up to this multipole, falling as 1 / ell^2 beyond
+    NON_LIMBER_LMAX = 1000
+
     def __init__(self, cosmo: pyccl.Cosmology, p_of_k_a: pyccl.Pk2D | None = None) -> None:
         self.cosmo = cosmo
         self.p_of_k_a = p_of_k_a
+        self._non_limber = {}  # non-Limber corrections of pairs of density tracers, keyed by their names
         self._smoothed_pk = {}  # power spectra with a Gaussian smoothing, keyed by the spectrum and the tracers' smoothing
         self._pt_calculator = None
         self._pt_correction_pk = {}  # corrections of perturbation theory to NLA, keyed by the tracers' amplitudes
@@ -416,7 +420,7 @@ class Theory:
     # ==================================================================================================================
     # region Power spectra
 
-    def angular_cl(self, t1: Tracer | TracerSum, t2: Tracer | TracerSum, ell: np.ndarray, *, bb: bool = False) -> np.ndarray:
+    def angular_cl(self, t1: Tracer | TracerSum, t2: Tracer | TracerSum, ell: np.ndarray, *, bb: bool = False, non_limber: bool = False) -> np.ndarray:
         """Return the angular power spectrum of two tracers.
 
         Parameters
@@ -428,6 +432,10 @@ class Theory:
         bb : bool, optional
             Return the B-mode spectrum instead: only intrinsic alignments beyond NLA (two ``'ia'``
             tracers, one with ``a2`` or ``a1delta``) have B modes, zero otherwise. Default is False.
+        non_limber : bool, optional
+            Add the non-Limber correction of two unsmoothed ``'density'`` tracers
+            (:meth:`_non_limber_correction`), significant for thin shells below ell ~ 1000 but slow
+            (minutes per pair). Other pairs stay in the Limber approximation. Default is False.
 
         Returns
         -------
@@ -447,7 +455,7 @@ class Theory:
         if isinstance(t1, TracerSum) or isinstance(t2, TracerSum):
             terms1 = t1.tracers if isinstance(t1, TracerSum) else (t1,)
             terms2 = t2.tracers if isinstance(t2, TracerSum) else (t2,)
-            return sum(self.angular_cl(a, b, ell, bb=bb) for a in terms1 for b in terms2)
+            return sum(self.angular_cl(a, b, ell, bb=bb, non_limber=non_limber) for a in terms1 for b in terms2)
 
         # smoothing of the tracers, independent of their order (key of the smoothed spectra)
         smoothing = tuple(sorted(((t.smooth_Mpc, t.smooth_nside or 0) for t in (t1, t2) if t.smooth_Mpc), key=repr))
@@ -470,6 +478,8 @@ class Theory:
             pk = self._pk_pt_correction(t1, t2, smoothing)
             kernel2 = t2._ccl_pt_kernel(self.cosmo) if t2.kind == 'ia' else t2.ccl(self.cosmo)
             cl = cl + self._limber(t1._ccl_pt_kernel(self.cosmo), kernel2, ell, pk)
+        if non_limber and t1.kind == t2.kind == 'density' and not smoothing:
+            cl = cl + self._non_limber_correction(t1, t2, ell)
         return cl
 
     def _pk_pt_correction(self, t1: Tracer, t2: Tracer, smoothing: tuple, *, bb: bool = False) -> pyccl.Pk2D:
@@ -592,12 +602,130 @@ class Theory:
             # e.g. kernels or spectra too sharp for the default (QAG) integration
             return pyccl.angular_cl(self.cosmo, kernel1, kernel2, ell, p_of_k_a=pk, limber_integration_method='spline')
 
+    def _non_limber_correction(self, t1: Tracer, t2: Tracer, ell: np.ndarray) -> np.ndarray:
+        r"""Return the non-Limber correction of the angular power spectrum of two ``'density'`` tracers (cached by their names).
+
+        The difference between the exact spectrum and its Limber approximation, both with the matter power
+        spectrum of the predictions at one effective redshift (the mean of the kernels), which suits narrow kernels
+        (e.g. shells of matter):
+
+        .. math::
+
+            \Delta C_\ell = \frac{2}{\pi} \int dk\, k^2 P(k) I_1(k) I_2(k)
+            - \int d\chi \frac{W_1 W_2}{\chi^2} P\left(\frac{\ell + 1/2}{\chi}\right),
+            \qquad I_i(k) = \int d\chi\, W_i(\chi)\, j_\ell(k \chi),
+
+        with the radial kernels :math:`W_i` of the CCL tracers. It is computed at about 70 multipoles up to
+        :attr:`NON_LIMBER_LMAX`, in parallel threads, and interpolated; beyond, the relative correction falls as
+        :math:`1 / \ell^2`. Zero below ell = 2.
+
+        Parameters
+        ----------
+        t1, t2 : Tracer
+            ``'density'`` tracers.
+        ell : array_like
+            Multipoles.
+
+        Returns
+        -------
+        ndarray
+            Correction, to add to the Limber C_ell of :meth:`angular_cl`.
+        """
+        key = tuple(sorted((t1.name, t2.name)))
+        if key not in self._non_limber:
+            self._non_limber[key] = self._non_limber_table(t1, t2)
+        ells, delta, limber_lmax = self._non_limber[key]
+        ell = np.asarray(ell, dtype=float)
+        out = np.interp(ell, ells, delta, left=0., right=0.)
+        hi = ell > ells[-1]
+        if np.any(hi):
+            # relative correction falling as 1 / ell^2, on the Limber spectrum at the effective redshift (computed at
+            # 50 multipoles and interpolated in log)
+            grid = np.geomspace(ells[-1], ell[hi].max(), 50)
+            shape = np.exp(np.interp(np.log(ell[hi]), np.log(grid), np.log(np.abs(limber_lmax(grid)) + 1e-300)))
+            out[hi] = delta[-1] * shape / abs(limber_lmax(ells[-1:])[0]) * (ells[-1] / ell[hi])**2
+        return out
+
+    def _non_limber_table(self, t1: Tracer, t2: Tracer) -> tuple:
+        """Return the non-Limber correction of two ``'density'`` tracers at the multipoles where it is computed.
+
+        The radial kernels are those of the CCL tracers, on 4001 comoving distances over the redshift range of each
+        tracer; the power spectrum is that of the predictions at the scale factor of their mean comoving distance
+        (weighted by the kernels). The exact spectrum integrates over k up to ``3 (ell + 1/2) / chi_min`` (plus the
+        inverse width of the kernels), with 12 points per oscillation of the Bessel functions in k and in comoving
+        distance. The multipoles (2 to 29, then 40 up to :attr:`NON_LIMBER_LMAX`) are computed in parallel threads.
+
+        Parameters
+        ----------
+        t1, t2 : Tracer
+            ``'density'`` tracers.
+
+        Returns
+        -------
+        ells : ndarray
+            Multipoles where the correction is computed.
+        delta : ndarray
+            Exact minus Limber C_ell at ``ells``.
+        limber : callable
+            Limber C_ell at the effective redshift, as a function of the multipoles, to extrapolate the correction
+            beyond ``ells`` (see :meth:`_non_limber_correction`).
+        """
+        import os
+        from concurrent.futures import ThreadPoolExecutor
+        from scipy.special import spherical_jn
+        cosmo = self.cosmo
+        kernels = []
+        for t in (t1, t2):
+            chi_e = pyccl.comoving_radial_distance(cosmo, 1. / (1. + np.array([t.z.min(), t.z.max()])))
+            chi = np.linspace(chi_e[0], chi_e[1], 4001)
+            kernels.append((chi, np.asarray(t.ccl(cosmo).get_kernel(chi)).sum(axis=0)))
+        w = np.concatenate([k[1] for k in kernels])
+        chi_eff = np.sum(np.concatenate([k[0] for k in kernels]) * w) / np.sum(w)
+        a_eff = float(pyccl.scale_factor_of_chi(cosmo, chi_eff))
+        pk = self.p_of_k_a if self.p_of_k_a is not None else cosmo.get_nonlin_power()
+
+        def power(k):
+            return pk(np.atleast_1d(k), a_eff, cosmo)
+
+        def limber(ell):
+            # Limber spectrum at the effective redshift, on the overlap of the kernels
+            chi = kernels[0][0]
+            w2 = np.interp(chi, kernels[1][0], kernels[1][1], left=0., right=0.)
+            return np.array([trapezoid(kernels[0][1] * w2 / chi**2 * power((l + 0.5) / chi), chi) for l in np.atleast_1d(ell)])
+
+        chi_min = min(k[0][0] for k in kernels)
+        chi_max = max(k[0][-1] for k in kernels)
+        width = min(k[0][-1] - k[0][0] for k in kernels)
+
+        def exact(ell):
+            # k up to 3 (ell + 1/2) / chi_min (and the width of the kernels), 12 points per oscillation in k and in chi
+            kmax = 3. * (ell + 0.5) / chi_min + 50. / width
+            k = np.arange(0.2 * (ell + 0.5) / chi_max, kmax, 2. * np.pi / chi_max / 12.)
+            integrals = []
+            for chi, kern in kernels:
+                c = np.linspace(chi[0], chi[-1], int(12 * (chi[-1] - chi[0]) * kmax / (2. * np.pi)) + 64)
+                wc = np.interp(c, chi, kern)
+                integrals.append(np.concatenate([trapezoid(wc * spherical_jn(ell, np.outer(k[s:s + 2000], c)), c, axis=1) for s in range(0, k.size, 2000)]))
+            return 2. / np.pi * trapezoid(k**2 * power(k) * integrals[0] * integrals[1], k) - limber(ell)[0]
+
+        ells = np.unique(np.concatenate([np.arange(2, 30), np.round(np.geomspace(30, self.NON_LIMBER_LMAX, 40))]).astype(int))
+        with ThreadPoolExecutor(os.cpu_count()) as pool:  # scipy's Bessel functions release the GIL
+            delta = np.array(list(pool.map(exact, ells[::-1])))[::-1]  # longest first
+        return ells.astype(float), delta, limber
+
     # endregion
 
     # ==================================================================================================================
     # region Bandpowers
 
-    def binned_cl(self, t1: Tracer, t2: Tracer, b: pymaster.NmtBin, bpws: np.ndarray | None = None, f_ell: np.ndarray | None = None) -> np.ndarray:
+    def binned_cl(
+            self,
+            t1: Tracer,
+            t2: Tracer,
+            b: pymaster.NmtBin,
+            bpws: np.ndarray | None = None,
+            f_ell: np.ndarray | None = None,
+            non_limber: bool = False) -> np.ndarray:
         """Return the angular power spectrum of two tracers, binned into bandpowers.
 
         Parameters
@@ -614,6 +742,8 @@ class Theory:
             None, C_ell (E mode) are averaged over each bandpower.
         f_ell : ndarray or None, optional
             Window applied to the fields (e.g. the pixel window), multiplying C_ell by ``f_ell**2``.
+        non_limber : bool, optional
+            Non-Limber correction of density pairs (see :meth:`angular_cl`). Default is False.
 
         Returns
         -------
@@ -623,7 +753,7 @@ class Theory:
         """
         ell = np.arange(b.lmax + 1)
         window = 1. if f_ell is None else f_ell**2
-        cl = self.angular_cl(t1, t2, ell) * window
+        cl = self.angular_cl(t1, t2, ell, non_limber=non_limber) * window
         if bpws is None:
             return b.bin_cell(cl[None, :])
         # E (or scalar) input in the first component of the windows
@@ -648,6 +778,7 @@ class Theory:
             fsky: float = 1.,
             cross_covariance: bool = True,
             all_components: bool = False,
+            non_limber: bool = False,
             progress: Callable | None = None) -> tuple:
         """Predict angular power spectra of tracer pairs, with optional Gaussian errors and covariance.
 
@@ -691,6 +822,8 @@ class Theory:
             With ``binning='wsp'``, return all components of the bandpower windows (shape
             ``(n_cl, n_bands)``, e.g. EE, EB, BE, BB) instead of the first one.
             Errors and stacking use the first component.
+        non_limber : bool, optional
+            Non-Limber correction of density pairs (see :meth:`angular_cl`): slow, for thin shells. Default is False.
         progress : callable or None, optional
             Wrapper for the loop over pairs (e.g. a tqdm function).
 
@@ -732,9 +865,9 @@ class Theory:
         def predict(t1: Tracer, t2: Tracer, w: np.ndarray | None = None) -> np.ndarray:
             # C_ell of two tracers, unbinned or binned
             if unbinned:
-                cl = self.angular_cl(t1, t2, ell)
+                cl = self.angular_cl(t1, t2, ell, non_limber=non_limber)
                 return cl if f_ell is None else cl * np.interp(ell, np.arange(len(f_ell)), f_ell)**2
-            return self.binned_cl(t1, t2, b, bpws=w, f_ell=f_ell)
+            return self.binned_cl(t1, t2, b, bpws=w, f_ell=f_ell, non_limber=non_limber)
 
         # spectra of the pairs (all components with bandpower windows if all_components), keeping the first one per tracer pair
         cl = {}

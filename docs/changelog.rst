@@ -1,6 +1,12 @@
 Changelog
 =========
 
+Version 0.2.1
+-------------
+
+- Requirements of the package (``pip install pollux`` reads the products; ``[all]`` for the rest), Python >= 3.10.
+- Zenodo DOI of the software in ``CITATION.cff``, the README and the documentation.
+
 Version 0.2
 -----------
 

@@ -2,7 +2,7 @@ from setuptools import find_packages, setup
 
 setup(
     name='pollux',
-    version='0.2',
+    version='0.2.1',
     description='Package to create weak lensing simulations from N-body simulations for the Higher-Order Statistics Topical Team.',
     author='Cyrille Doux',
     author_email='doux@lpsc.in2p3.fr',

@@ -8,7 +8,7 @@ authors:
     family-names: Doux
   - given-names: Juan
     family-names: Mena-Fernández
-version: "0.2"
+version: "0.2.1"
 doi: 10.5281/zenodo.24586235
 identifiers:
   - type: doi

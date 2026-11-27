@@ -1,5 +1,5 @@
 cff-version: 1.2.0
-message: "If you use pollux, please cite the paper below for now."
+message: "If you use pollux, please cite the paper below for now, and the software by its DOI."
 title: pollux
 abstract: "Weak lensing and large-scale structure simulations from N-body simulations, for the Higher-Order Statistics Topical Team of the LSST Dark Energy Science Collaboration."
 type: software
@@ -9,6 +9,15 @@ authors:
   - given-names: Juan
     family-names: Mena-Fernández
 version: "0.2"
+doi: 10.5281/zenodo.24586235
+identifiers:
+  - type: doi
+    value: 10.5281/zenodo.24586235
+    description: "All versions (resolves to the latest)"
+  - type: doi
+    value: 10.5281/zenodo.24586236
+    description: "Version 0.2"
+date-released: "2026-11-27"
 license: BSD-3-Clause
 repository-code: "https://github.com/LSSTDESC/pollux"
 url: "https://lsstdesc-pollux.readthedocs.io"

@@ -40,6 +40,19 @@ If you use pollux, please cite `Mena-Fernández et al. (2026) <https://arxiv.org
          url={https://arxiv.org/abs/2605.00821},
    }
 
+and the software by its DOI, `10.5281/zenodo.24586235 <https://doi.org/10.5281/zenodo.24586235>`_ (all versions; version 0.2: `10.5281/zenodo.24586236 <https://doi.org/10.5281/zenodo.24586236>`_):
+
+.. code-block:: bibtex
+
+   @software{pollux,
+         title={pollux},
+         author={Doux, Cyrille and Mena-Fernández, Juan},
+         year={2026},
+         publisher={Zenodo},
+         doi={10.5281/zenodo.24586235},
+         url={https://doi.org/10.5281/zenodo.24586235},
+   }
+
 Papers
 ------
 

@@ -4,6 +4,7 @@
 [![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD_3--Clause-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 [![GitHub issues](https://img.shields.io/github/issues/LSSTDESC/pollux)](https://github.com/LSSTDESC/pollux/issues)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24586235.svg)](https://doi.org/10.5281/zenodo.24586235)
 [![arXiv:2605.00821](https://img.shields.io/badge/arXiv-2605.00821-b31b1b.svg)](https://arxiv.org/abs/2605.00821)
 [![arXiv:2605.00818](https://img.shields.io/badge/arXiv-2605.00818-b31b1b.svg)](https://arxiv.org/abs/2605.00818)
 
@@ -20,6 +21,8 @@ DESC package to create weak lensing and large-scale structure simulations from N
 - Catalog statistics (Cls with NaMaster, 2pt functions with TreeCorr, including those of the intrinsic alignments) and theory predictions with CCL.
 - Efficient parallel computation using the [Parsl](https://parsl.readthedocs.io/en/stable/index.html) framework to distribute tasks over computing resources (`pollux.pipeline`), with a record of the code and environment of each run.
 - Use of DESC tools: [CCL](https://github.com/LSSTDESC/CCL), [healsparse](https://github.com/LSSTDESC/healsparse) and [NaMaster](https://github.com/LSSTDESC/NaMaster).
+
+![A shell of a pollux lightcone, from the full sky to one degree](docs/figures/zoom.png)
 
 ## Organisation of the code
 - `reader.py` implements `Reader` objects to read particle data from N-body simulation snapshots, and provides basic lightcone information (particle density, shell binning, etc.)
@@ -39,10 +42,11 @@ DESC package to create weak lensing and large-scale structure simulations from N
 ## Installation
 pollux needs Python 3.10 or later and CCL, healpy, healsparse, NaMaster, TreeCorr, sacc, numba, fitsio, h5py, skyproj and pynverse, plus Parsl to run the pipeline, [BaryonForge](https://github.com/DhayaaAnbajagane/BaryonForge) for baryonification, and the `pygio` Python bindings of [GenericIO](https://git.cels.anl.gov/hacc/genericio) to read HACC files.
 
-Then install pollux from a clone of this repository:
+The simplest is to install them from conda-forge (the environment of the HACC-HOS-Y1 production is pinned in its shared space), then pollux from a clone of this repository:
 ```
 pip install -e .
 ```
+`pip` itself installs only what reading the products needs (`pollux.PolluxLoader`: numpy, healpy, healsparse, CCL, sacc, h5py, fitsio, ...); `pip install -e ".[all]"` adds the PyPI packages of the rest (NaMaster, TreeCorr, numba, ducc0, Parsl, ...), but not BaryonForge and GenericIO.
 
 ## Running the pipeline
 A run is a Python script chaining the Parsl tasks of `pollux.pipeline.tasks` with a YAML configuration, on Slurm jobs set by `pollux.pipeline.config`. The [documentation](https://lsstdesc-pollux.readthedocs.io/) describes each step and its options, how to use them from Python or in a run, and the outputs; the notebooks of `notebooks/` show examples.
@@ -70,8 +74,19 @@ If you use pollux, please cite [Mena-Fernández et al. (2026)](https://arxiv.org
 }
 ```
 
+and the software by its DOI, [10.5281/zenodo.24586235](https://doi.org/10.5281/zenodo.24586235) (all versions; version 0.2: [10.5281/zenodo.24586236](https://doi.org/10.5281/zenodo.24586236)):
+
+```bibtex
+@software{pollux,
+      title={pollux},
+      author={Doux, Cyrille and Mena-Fernández, Juan},
+      year={2026},
+      publisher={Zenodo},
+      doi={10.5281/zenodo.24586235},
+      url={https://doi.org/10.5281/zenodo.24586235},
+}
+```
+
 ## Papers
 - [Mena-Fernández et al. (2026)](https://arxiv.org/abs/2605.00821): optimization of weak lensing lightcone simulations for higher-order statistics in LSST, using lightcones created from HACC simulations with pollux.
 - [Bera et al. (2026)](https://arxiv.org/abs/2605.00818): impact of baryonic feedback on two- and three-point correlation functions of galaxies and shear, from these same lightcones baryonified.
-
-![A shell of a pollux lightcone, from the full sky to one degree](docs/figures/zoom.png)

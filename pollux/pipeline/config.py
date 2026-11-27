@@ -1,4 +1,18 @@
-"""Parsl configuration of the pipeline: executors by memory and CPU use on Slurm at NERSC, and the YAML configurations of runs."""
+"""Parsl configurations of the pipeline, and the YAML configurations of runs.
+
+The tasks of :mod:`pollux.pipeline.tasks` run on executors named by the memory and CPU use of their tasks,
+:data:`EXECUTOR_LABELS`: any Parsl configuration of a run must define executors with these labels.
+
+- :func:`perlmutter_config`: Slurm jobs on the CPU nodes of NERSC's Perlmutter (512 GB, 256 threads per node), sized
+  for full-sky maps at nside 8192 (:data:`EXECUTORS`). Site-specific: the account, queues, node size and Slurm options
+  are those of NERSC.
+- :func:`local_config`: all executors on the local machine (a laptop, a login or interactive node), for tests and
+  small runs.
+
+Elsewhere, write a :class:`parsl.config.Config` with executors of these labels and the provider of the site's
+scheduler (see the `Parsl documentation <https://parsl.readthedocs.io/en/stable/userguide/configuring.html>`_), sized
+from :data:`EXECUTORS`, and pass it to :func:`check_labels`.
+"""
 
 import os
 import time
@@ -13,14 +27,18 @@ from parsl.jobs.error_handlers import windowed_error_handler
 from parsl.jobs.states import JobState, JobStatus
 from parsl.launchers import SrunLauncher
 from parsl.monitoring.monitoring import MonitoringHub
-from parsl.providers import SlurmProvider
+from parsl.providers import LocalProvider, SlurmProvider
 
 from pollux.pipeline.safeguards import retry_handler
+
+#: Executors of the tasks (``@python_app(executors=[...])`` in :mod:`pollux.pipeline.tasks`), by the memory and CPU use of
+#: their tasks: every Parsl configuration of a run must define them.
+EXECUTOR_LABELS = ('default', 'highmem', 'heavy', 'twopt')
 
 nodes_per_block = 1
 RETRIES = 8  # cost of the failed tries of a task before it fails (see pollux.pipeline.safeguards.retry_handler)
 
-# Per-executor resources (tasks pick one via @python_app(executors=[...])).
+# Per-executor resources on Perlmutter CPU nodes (512 GB, 128 cores, 256 threads), for perlmutter_config.
 # Executors differ by the number of tasks sharing a node, chosen so their memory fits
 # in the node's 512 GB. Threads are capped so that the tasks of a node share its 256 threads, except for 'heavy',
 # whose single task uses them all. Sized for nside 8192
@@ -41,6 +59,7 @@ RETRIES = 8  # cost of the failed tries of a task before it fails (see pollux.pi
 #               so in-flight tasks finish instead of being killed (ManagerLost);
 #               must exceed the executor's longest task. None: no draining (tasks
 #               still running at the walltime are killed and retried), for short tasks.
+#: Resources of each executor on Perlmutter CPU nodes (see the comments above), used by :func:`perlmutter_config`.
 EXECUTORS = {
     # 16 threads per task, so that the 32 tasks share the 256 threads of a node
     'default':
@@ -187,8 +206,8 @@ def read_run_config(path):
     return config
 
 
-def get_config(run_dir, debug, workflow_name, monitoring_db):
-    """Return the parsl configuration of a run.
+def perlmutter_config(run_dir, debug, workflow_name, monitoring_db):
+    """Return the Parsl configuration of a run on the CPU nodes of NERSC's Perlmutter.
 
     Parameters
     ----------
@@ -205,13 +224,22 @@ def get_config(run_dir, debug, workflow_name, monitoring_db):
     -------
     parsl.config.Config
 
+    Raises
+    ------
+    ValueError
+        If ``$POLLUX_ACCOUNT`` is not set.
+
     Notes
     -----
-    The NERSC account is ``$POLLUX_ACCOUNT`` (default ``m1727``), and Slurm emails go to
-    ``$POLLUX_MAIL`` if set. Workers inherit the environment of the run script.
+    Site-specific: one-node Slurm jobs on Perlmutter's CPU nodes (``-C cpu``, QOS ``regular`` or ``debug``), sized by
+    :data:`EXECUTORS` (or :data:`DEBUG`). The NERSC account is ``$POLLUX_ACCOUNT`` (required: no default, so that
+    no project is charged by mistake), and Slurm emails go to ``$POLLUX_MAIL`` if set. Workers inherit the
+    environment of the run script.
     """
     qos = 'debug' if debug else 'regular'
-    account = os.environ.get('POLLUX_ACCOUNT', 'm1727')
+    account = os.environ.get('POLLUX_ACCOUNT')
+    if not account:
+        raise ValueError("Set the NERSC account of the run in $POLLUX_ACCOUNT (e.g. export POLLUX_ACCOUNT=m1727)")
     mail = os.environ.get('POLLUX_MAIL')
     mail_options = f' \n#SBATCH --mail-user={mail} \n#SBATCH --mail-type=ALL' if mail else ''
 
@@ -262,6 +290,69 @@ def get_config(run_dir, debug, workflow_name, monitoring_db):
         strategy='htex_auto_scale',  # also scale in idle blocks while other blocks still have tasks
         max_idletime=60,
     )
+    return check_labels(config)
+
+
+get_config = perlmutter_config  # earlier name, kept for the run scripts
+
+
+def local_config(run_dir, workers=None, workflow_name=None, monitoring_db=None):
+    """Return a Parsl configuration running all the executors on the local machine.
+
+    For tests and small runs (e.g. low nside or a small footprint) on a laptop, a login node or an interactive node:
+    no scheduler, no retries.
+
+    Parameters
+    ----------
+    run_dir : str
+        Parsl run directory.
+    workers : dict or int or None, optional
+        Workers of each executor (by label), or of all of them. Default is one each: memory, not cores, usually
+        limits how many tasks run at once (see :data:`EXECUTORS` for the memory of tasks at nside 8192).
+    workflow_name : str or None, optional
+        Name of the workflow in the monitoring database (with ``monitoring_db``).
+    monitoring_db : str or None, optional
+        Path of a monitoring database, to record the tasks (as on Perlmutter, for
+        ``python -m pollux.pipeline.report`` and the guard of :func:`~pollux.pipeline.safeguards.run_tasks`). Default
+        is None: no monitoring (run the tasks with ``run_tasks(futures, None, guard=False)``).
+
+    Returns
+    -------
+    parsl.config.Config
+    """
+    if workers is None or isinstance(workers, int):
+        workers = dict.fromkeys(EXECUTOR_LABELS, workers or 1)
+    executors = [
+        HighThroughputExecutor(label=label, max_workers_per_node=workers[label], provider=LocalProvider(init_blocks=1, max_blocks=1))
+        for label in EXECUTOR_LABELS
+    ]
+    monitoring = None
+    if monitoring_db is not None:
+        monitoring = MonitoringHub(
+            workflow_name=workflow_name, hub_address='127.0.0.1', resource_monitoring_interval=60, logging_endpoint=f'sqlite:///{monitoring_db}')
+    return check_labels(Config(executors=executors, run_dir=run_dir, monitoring=monitoring, retries=0))
+
+
+def check_labels(config):
+    """Check that a Parsl configuration has the executors of the tasks (:data:`EXECUTOR_LABELS`).
+
+    Parameters
+    ----------
+    config : parsl.config.Config
+
+    Returns
+    -------
+    parsl.config.Config
+        ``config`` itself.
+
+    Raises
+    ------
+    ValueError
+        If an executor of the tasks is missing.
+    """
+    missing = set(EXECUTOR_LABELS) - {e.label for e in config.executors}
+    if missing:
+        raise ValueError(f"The Parsl configuration has no executor {sorted(missing)}: the tasks need {list(EXECUTOR_LABELS)}")
     return config
 
 

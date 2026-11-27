@@ -48,27 +48,95 @@ A run script:
 2. creates a reader and a shell builder in the main process, for what the tasks need to know in advance (number of
    sub-volumes, of shells, smoothing scales per shell from :meth:`~pollux.cosmo.Theory.lognormal_smoothing`);
 3. records its code version (:func:`~pollux.io.code_version.write_code_version`, see below);
-4. loads the Parsl configuration (:func:`~pollux.pipeline.config.get_config`) and creates the futures of all
-   tasks, chained by their ``inputs``;
+4. loads a Parsl configuration (see `Execution`_) and creates the futures of all tasks, chained by their ``inputs``;
 5. waits for the futures. A failed task makes the tasks depending on it fail, but not the others: catching the
    exception of each future lets the run go on and list the failures at the end.
 
 Run scripts are launched from a login node, in the background (``nohup``), since they wait for the Slurm jobs of
 their tasks.
 
+A minimal run, from the particles of a HACC simulation to the tomographic convergence and shear on the full sky, on
+the local machine (the paths and the redshift distributions are placeholders; on Perlmutter, use the commented line
+instead):
+
+.. code-block:: python
+
+    import os
+
+    import numpy as np
+    import parsl
+
+    import pollux
+    from pollux.pipeline.config import local_config, perlmutter_config
+    from pollux.pipeline.safeguards import run_tasks
+    from pollux.pipeline.tasks import (combine_shell_subs, compute_kappa_alms, compute_shear_maps, construct_kappa_map,
+                                       construct_shell_sub)
+
+    out = os.path.expandvars('$PSCRATCH/pollux_example')
+    nside, seed = 2048, 0
+
+    # options of the objects, from which the workers rebuild them
+    reader_dict = dict(path='/path/to/HACC/simulation', run_params='run/indat.params', snap_sub_every_n=2)
+    footprint = pollux.Footprint(nside, pollux.PolluxIO(os.path.join(out, 'simulation', f'nside{nside}')))
+    shell_dict = dict(footprint=footprint, seed=seed, apply_grid_isometry=True, group_isometries=True)
+    z = np.linspace(0., 3., 300)
+    nzs = [(z, np.exp(-(z - zm)**2 / (2 * 0.1**2))) for zm in (0.5, 1.)]  # two source bins
+    lensing_dict = dict(nzs=nzs, tag='example')
+
+    # in the main process, only what the tasks need to know in advance: sub-volumes and shells
+    reader = pollux.reader.HACCReader(**reader_dict)
+    builder = pollux.shells.SnapshotShellBuilder(reader, **shell_dict)
+
+    if __name__ == '__main__':
+        monitoring_db = os.path.join(out, 'monitoring.db')
+        parsl.load(local_config(os.path.join(out, 'runinfo'), workflow_name='example', monitoring_db=monitoring_db))
+        # parsl.load(perlmutter_config(os.path.join(out, 'runinfo'), debug=True, workflow_name='example', monitoring_db=monitoring_db))
+
+        # shells: one task per sub-volume of the snapshots, then one per shell summing its sub-volumes
+        subs = {ijob: construct_shell_sub(ijob, reader_dict, shell_dict) for ijob in range(reader.njobs)}
+        shells = [combine_shell_subs(ishell, reader_dict, shell_dict, inputs=[subs[ijob] for ijob in reader.ijobs_for_snapshot(ishell)])
+                  for ishell in range(builder.nmaps)]
+        # convergence of each bin from all the shells, then its spherical harmonics and shear
+        kappas = [construct_kappa_map(i, reader_dict, shell_dict, lensing_dict, inputs=shells) for i in range(len(nzs))]
+        alms = [compute_kappa_alms(i, reader_dict, shell_dict, lensing_dict, inputs=[kappas[i]]) for i in range(len(nzs))]
+        shears = [compute_shear_maps(i, reader_dict, shell_dict, lensing_dict, inputs=[alms[i]]) for i in range(len(nzs))]
+
+        failed = run_tasks(list(subs.values()) + shells + kappas + alms + shears, monitoring_db)
+        print('failed tasks:', failed)
+        parsl.dfk().cleanup()
+
+Each task skips its product if it is already on disk, so running the script again resumes it. The scripts of the
+HACC-HOS-Y1 runs add the catalogs and statistics, the configuration files, the code version and the safeguards
+below.
+
 Execution
 ---------
 
-:func:`~pollux.pipeline.config.get_config` defines four executors, by the memory of their tasks, each submitting
-one-node Slurm jobs (blocks) on demand (``EXECUTORS``):
+The tasks run on four Parsl executors, named by the memory and CPU use of their tasks
+(:data:`~pollux.pipeline.config.EXECUTOR_LABELS`): any Parsl configuration of a run must define executors with these
+labels, which :func:`~pollux.pipeline.config.check_labels` checks.
 
-- ``'default'``: many tasks of up to about 10 GB per node (sub-volume shells, assembly of shells, convergence);
-- ``'highmem'``: four tasks of up to about 120 GB per node (power spectra, halo catalogs, baryonification);
-- ``'heavy'``: one task per node, for full-sky harmonic transforms;
-- ``'twopt'``: two tasks per node, for the catalog 2pt functions.
+- ``'default'``: light tasks (sub-volume shells, assembly of shells, convergence), many per node;
+- ``'highmem'``: tasks of up to about 120 GB at nside 8192 (power spectra, halo catalogs, baryonification, catalog shells);
+- ``'heavy'``: full-sky harmonic transforms, which use all the cores of a node;
+- ``'twopt'``: the catalog 2pt functions, up to about 200 GB each.
 
-Blocks stop taking tasks before the end of their walltime, so that running tasks finish. ``debug=True`` uses the
-debug queue. The NERSC account is ``$POLLUX_ACCOUNT``, and Slurm notifications go to ``$POLLUX_MAIL`` if set.
+**On NERSC's Perlmutter.** :func:`~pollux.pipeline.config.perlmutter_config` submits one-node Slurm jobs (blocks) on
+the CPU nodes on demand, with the number of tasks per node, threads and walltime of each executor in
+:data:`~pollux.pipeline.config.EXECUTORS` (32, 4, 1 and 2 tasks per node). Blocks stop taking tasks before the end of
+their walltime, so that running tasks finish. ``debug=True`` uses the debug queue. The NERSC account must be set in
+``$POLLUX_ACCOUNT`` (there is no default), and Slurm notifications go to ``$POLLUX_MAIL`` if set. This configuration
+is specific to NERSC: the queues, node size and Slurm options are those of Perlmutter.
+
+**On one machine.** :func:`~pollux.pipeline.config.local_config` runs all the executors on the local machine (a
+laptop, a login or interactive node), one task each by default, for tests and small runs (low nside, small
+footprints).
+
+**Elsewhere.** Write a :class:`parsl.config.Config` with executors of the same labels and the provider of the site's
+scheduler (Slurm, PBS, ...), following the `Parsl documentation
+<https://parsl.readthedocs.io/en/stable/userguide/configuring.html>`_, and size each executor from the memory of its
+tasks (:data:`~pollux.pipeline.config.EXECUTORS` gives them for nside 8192). Cap the threads of each task
+(``OMP_NUM_THREADS``, ``NUMBA_NUM_THREADS``) when several share a node.
 
 Parsl records the tasks in a monitoring database, from which
 ``python -m pollux.pipeline.report {monitoring.db}`` reports the time, memory and failures of each kind of task.
@@ -101,18 +169,23 @@ The realization mirrored by the canary is set by ``canary: {seed: 0, save_dir_ro
 Resuming
 --------
 
-Tasks skip the products already on disk, and every file is written to a temporary name then renamed, so that an
-interrupted task leaves no partial file. Only tasks skip: the methods of the builders and catalogs compute and write
-their products when called, and read their inputs, raising if one is missing (e.g. the a_lm of
-:meth:`~pollux.map_builder.MapBuilder.read_alms`, made by :meth:`~pollux.map_builder.MapBuilder.compute_alms`). Statistics are computed per bin pair, or per group of bin pairs for the catalog 2pt functions (sharing the
-randoms, see :func:`~pollux.pipeline.tasks.pair_groups_2pt`), each saved as an intermediate
-file (in a folder named by an identifier of the binning and options of the statistic), then combined: tasks skip
-the pairs already saved, and the statistics already combined, but always redraw the plots. Launching a run again therefore resumes it. For the same reason, a product
-must be moved away (or the run given a new output directory) to be recomputed. A product whose ``config.yaml``
-differs from the options of the run raises an error, instead of mixing the two (see :doc:`outputs`); it is checked
+Tasks skip the products already on disk, so launching a run again resumes it. Every file is written to a temporary
+name then renamed, so an interrupted task leaves no partial file.
+
+Only tasks skip. The methods of the builders and catalogs compute and write their products when called, and read
+their inputs, raising if one is missing (e.g. the a_lm of :meth:`~pollux.map_builder.MapBuilder.read_alms`, made by
+:meth:`~pollux.map_builder.MapBuilder.compute_alms`).
+
+Statistics are computed per bin pair, or per group of bin pairs for the catalog 2pt functions (sharing the randoms,
+see :func:`~pollux.pipeline.tasks.pair_groups_2pt`), each saved as an intermediate file in a folder named by an
+identifier of the binning and options of the statistic, then combined. Tasks skip the pairs already saved and the
+statistics already combined, but always redraw the plots.
+
+To recompute a product, move it away (or give the run a new output directory). A product whose ``config.yaml``
+differs from the options of the run raises an error instead of mixing the two (see :doc:`outputs`); it is checked
 before skipping, so a skipped product has the options of the run. Likewise, the combined statistics record the
-identifier of their binning and options (``options_id`` in the metadata of their SACC file), and one computed
-with other options raises an error.
+identifier of their binning and options (``options_id`` in the metadata of their SACC file), and one computed with
+other options raises an error.
 
 Code version
 ------------

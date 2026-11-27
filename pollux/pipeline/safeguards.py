@@ -586,8 +586,8 @@ def run_tasks(futures: list, monitoring_db: str, reference: dict | None = None, 
     ----------
     futures : list
         Futures of the tasks.
-    monitoring_db : str
-        Monitoring database of the run.
+    monitoring_db : str or None
+        Monitoring database of the run (None without monitoring, with ``guard=False``).
     reference : dict or None, optional
         Tasks of the canary of the run, for the guard (None: failures only).
     guard : bool, optional

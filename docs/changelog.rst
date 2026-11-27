@@ -28,6 +28,9 @@ Production of the HACC-HOS-Y1 lightcones (`PR #34 <https://github.com/LSSTDESC/p
   ``DummyReader``; first tests in ``tests/`` (pytest).
 - Catalog 2pt functions by groups of bin pairs sharing their randoms (:func:`~pollux.pipeline.tasks.pair_groups_2pt`),
   on a ``twopt`` executor, two tasks per node; thread caps of the ``highmem`` workers.
+- Parsl configurations: :func:`~pollux.pipeline.config.perlmutter_config` (NERSC, ``$POLLUX_ACCOUNT`` now required;
+  ``get_config`` kept as an alias), :func:`~pollux.pipeline.config.local_config` (one machine), and the executor labels
+  every configuration must define (:data:`~pollux.pipeline.config.EXECUTOR_LABELS`).
 - Non-Limber correction of the spectra of density tracers, e.g. thin shells (``non_limber=True`` in ``predict_cls``,
   off by default: about a minute per pair).
 
